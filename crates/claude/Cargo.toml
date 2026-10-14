@@ -1,0 +1,16 @@
+[package]
+name = "ainet-claude"
+description = "Claude Code integration for ainet: sessions, inbox sockets, hooks, /always rules, transcripts, cost, agent-badge, launch lines (ported from Den)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = "1"
+rustix = { version = "1", features = ["std", "fs", "net", "process", "event", "time"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+
+[lints]
+workspace = true

@@ -1,0 +1,16 @@
+[package]
+name = "ainet-pty"
+description = "Panes: agent processes on pseudo-terminals with a parsed screen"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+portable-pty.workspace = true
+tokio.workspace = true
+vt100.workspace = true
+
+[lints]
+workspace = true

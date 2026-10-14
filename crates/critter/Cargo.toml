@@ -1,0 +1,10 @@
+[package]
+name = "ainet-critter"
+description = "Seeded 16x16 pixel-art critters and names, one face per agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true

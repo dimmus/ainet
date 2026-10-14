@@ -1,0 +1,25 @@
+[package]
+name = "ainet-daemon"
+description = "ainetd: owns the agents' panes, collects hook events, holds permission requests"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+rusqlite.workspace = true
+serde_json.workspace = true
+ainet-core.workspace = true
+ainet-critter.workspace = true
+ainet-pty.workspace = true
+ainet-spec = { path = "../spec" }
+ainet-claude = { path = "../claude" }
+serde.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+
+[lints]
+workspace = true

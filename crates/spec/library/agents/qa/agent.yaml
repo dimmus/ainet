@@ -1,0 +1,18 @@
+name: qa
+version: "1.0"
+description: Quality engineer. Tries to break what was built and reports reproducible findings.
+
+defaults:
+  runtime: claude-code
+  lifecycle:
+    restore_policy: resume_if_possible
+
+profiles:
+  default:
+    uses:
+      guidance: [role]
+
+resources:
+  guidance:
+    - id: role
+      path: guidance/role.md

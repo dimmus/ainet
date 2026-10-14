@@ -1,0 +1,109 @@
+version: "0.2"
+name: factory
+summary: >
+  A product team: a lead and a product advisor, a development pod (build, QA,
+  design) and two independent reviewers. Bring ideas to orch.advisor; orch.lead
+  runs the team.
+
+culture_file: CULTURE.md
+
+pods:
+  - id: orch
+    label: Orchestration
+    members:
+      - id: lead
+        label: Lead
+        agent_ref: "local:agents/orchestrator"
+        profile: default
+        runtime: claude-code
+        cwd: "."
+      - id: advisor
+        label: Advisor
+        agent_ref: "local:agents/advisor"
+        profile: default
+        runtime: claude-code
+        cwd: "."
+    edges:
+      - kind: collaborates_with
+        from: advisor
+        to: lead
+
+  - id: dev
+    label: Development
+    members:
+      - id: build
+        label: Builder
+        agent_ref: "local:agents/implementer"
+        profile: default
+        runtime: claude-code
+        cwd: "."
+      - id: qa
+        label: QA
+        agent_ref: "local:agents/qa"
+        profile: default
+        runtime: claude-code
+        cwd: "."
+      - id: design
+        label: Designer
+        agent_ref: "local:agents/designer"
+        profile: default
+        runtime: claude-code
+        cwd: "."
+    edges:
+      - kind: delegates_to
+        from: build
+        to: qa
+      - kind: collaborates_with
+        from: design
+        to: build
+
+  - id: rev
+    label: Review
+    members:
+      - id: review-a
+        label: Reviewer A
+        agent_ref: "local:agents/reviewer"
+        profile: default
+        runtime: claude-code
+        cwd: "."
+      - id: review-b
+        label: Reviewer B
+        agent_ref: "local:agents/reviewer"
+        profile: default
+        runtime: claude-code
+        cwd: "."
+
+edges:
+  - kind: delegates_to
+    from: orch.lead
+    to: dev.build
+  - kind: delegates_to
+    from: orch.lead
+    to: dev.design
+  - kind: delegates_to
+    from: orch.lead
+    to: dev.qa
+  - kind: delegates_to
+    from: orch.lead
+    to: rev.review-a
+  - kind: delegates_to
+    from: orch.lead
+    to: rev.review-b
+  - kind: escalates_to
+    from: dev.build
+    to: orch.lead
+  - kind: escalates_to
+    from: dev.qa
+    to: orch.lead
+  - kind: escalates_to
+    from: dev.design
+    to: orch.advisor
+  - kind: can_observe
+    from: rev.review-a
+    to: dev.build
+  - kind: can_observe
+    from: rev.review-b
+    to: dev.build
+  - kind: can_observe
+    from: rev.review-b
+    to: dev.qa

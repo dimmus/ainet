@@ -1,0 +1,45 @@
+version: "0.2"
+name: research
+summary: >
+  A research lead, an analyst who digs for evidence and a synthesizer who turns
+  it into a decision-ready answer. Bring the question to research.lead.
+
+culture_file: CULTURE.md
+
+pods:
+  - id: research
+    label: Research
+    members:
+      - id: lead
+        label: Research lead
+        agent_ref: "local:agents/research-lead"
+        profile: default
+        runtime: claude-code
+        cwd: "."
+      - id: analyst
+        label: Analyst
+        agent_ref: "local:agents/analyst"
+        profile: default
+        runtime: claude-code
+        cwd: "."
+      - id: synthesizer
+        label: Synthesizer
+        agent_ref: "local:agents/synthesizer"
+        profile: default
+        runtime: claude-code
+        cwd: "."
+    edges:
+      - kind: delegates_to
+        from: lead
+        to: analyst
+      - kind: delegates_to
+        from: lead
+        to: synthesizer
+      - kind: collaborates_with
+        from: analyst
+        to: synthesizer
+      - kind: escalates_to
+        from: synthesizer
+        to: lead
+
+edges: []

@@ -1,0 +1,30 @@
+[package]
+name = "ainet"
+description = "A Rust control room for teams of coding agents: one binary, its own PTYs, a TUI with critters"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+keywords = ["ai", "agents", "tui", "terminal", "claude"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "ainet"
+path = "src/main.rs"
+
+[dependencies]
+ainet-core.workspace = true
+ainet-critter.workspace = true
+ainet-daemon.workspace = true
+ainet-tui.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

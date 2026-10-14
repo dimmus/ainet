@@ -1,0 +1,18 @@
+name: reviewer
+version: "1.0"
+description: Independent code reviewer. Reads changes for correctness, risk and clarity, and gives a clear verdict.
+
+defaults:
+  runtime: claude-code
+  lifecycle:
+    restore_policy: resume_if_possible
+
+profiles:
+  default:
+    uses:
+      guidance: [role]
+
+resources:
+  guidance:
+    - id: role
+      path: guidance/role.md

@@ -1,0 +1,48 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+default-members = ["crates/ainet"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+repository = "https://github.com/dimmus/ainet"
+
+[workspace.dependencies]
+ainet-core = { path = "crates/core" }
+ainet-critter = { path = "crates/critter" }
+ainet-daemon = { path = "crates/daemon" }
+ainet-pty = { path = "crates/pty" }
+ainet-tui = { path = "crates/tui" }
+
+anyhow = "1"
+clap = { version = "4.6", features = ["derive"] }
+portable-pty = "0.9"
+ratatui = "0.30"
+rusqlite = { version = "0.40", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tachyonfx = "0.25"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "signal"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4"] }
+vt100 = "0.16"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
+# Dependencies are compiled with optimisations even in debug builds, so the
+# TUI's animations stay smooth while you iterate on our own code.
+[profile.dev.package."*"]
+opt-level = 2

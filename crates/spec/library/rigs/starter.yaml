@@ -1,0 +1,30 @@
+version: "0.2"
+name: starter
+summary: >
+  A builder and an independent reviewer in your repository. Give dev.build one
+  bounded change; it hands the result to dev.review for a verdict.
+
+culture_file: CULTURE.md
+
+pods:
+  - id: dev
+    label: Development
+    members:
+      - id: build
+        label: Builder
+        agent_ref: "local:agents/implementer"
+        profile: default
+        runtime: claude-code
+        cwd: "."
+      - id: review
+        label: Reviewer
+        agent_ref: "local:agents/reviewer"
+        profile: default
+        runtime: claude-code
+        cwd: "."
+    edges:
+      - kind: delegates_to
+        from: build
+        to: review
+
+edges: []

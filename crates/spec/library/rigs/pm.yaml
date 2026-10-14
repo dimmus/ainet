@@ -1,0 +1,49 @@
+version: "0.2"
+name: pm
+summary: >
+  A product lead with a researcher and a prototype builder. Bring an idea to
+  pm.lead; it comes back as a scoped, evidence-backed plan.
+
+culture_file: CULTURE.md
+
+pods:
+  - id: pm
+    label: Product
+    members:
+      - id: lead
+        label: Product lead
+        agent_ref: "local:agents/product-lead"
+        profile: default
+        runtime: claude-code
+        cwd: "."
+      - id: researcher
+        label: Researcher
+        agent_ref: "local:agents/researcher"
+        profile: default
+        runtime: claude-code
+        cwd: "."
+    edges:
+      - kind: delegates_to
+        from: lead
+        to: researcher
+      - kind: escalates_to
+        from: researcher
+        to: lead
+
+  - id: dev
+    label: Prototyping
+    members:
+      - id: build
+        label: Prototyper
+        agent_ref: "local:agents/prototyper"
+        profile: default
+        runtime: claude-code
+        cwd: "."
+
+edges:
+  - kind: delegates_to
+    from: pm.lead
+    to: dev.build
+  - kind: escalates_to
+    from: dev.build
+    to: pm.lead

@@ -1,0 +1,39 @@
+version: "0.2"
+name: code-review
+summary: >
+  A review lead and two independent reviewers. Point rev.lead at a branch, a
+  range of commits or a set of files; it returns one verified report.
+
+culture_file: CULTURE.md
+
+pods:
+  - id: rev
+    label: Review
+    members:
+      - id: lead
+        label: Review lead
+        agent_ref: "local:agents/review-lead"
+        profile: default
+        runtime: claude-code
+        cwd: "."
+      - id: review-a
+        label: Reviewer A
+        agent_ref: "local:agents/reviewer"
+        profile: default
+        runtime: claude-code
+        cwd: "."
+      - id: review-b
+        label: Reviewer B
+        agent_ref: "local:agents/reviewer"
+        profile: default
+        runtime: claude-code
+        cwd: "."
+    edges:
+      - kind: delegates_to
+        from: lead
+        to: review-a
+      - kind: delegates_to
+        from: lead
+        to: review-b
+
+edges: []

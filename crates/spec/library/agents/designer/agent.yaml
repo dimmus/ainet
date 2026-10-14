@@ -1,0 +1,18 @@
+name: designer
+version: "1.0"
+description: Product designer. Shapes user-facing flows, copy and interface details, and specifies them for the builder.
+
+defaults:
+  runtime: claude-code
+  lifecycle:
+    restore_policy: resume_if_possible
+
+profiles:
+  default:
+    uses:
+      guidance: [role]
+
+resources:
+  guidance:
+    - id: role
+      path: guidance/role.md

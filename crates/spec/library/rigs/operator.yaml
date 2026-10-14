@@ -1,0 +1,20 @@
+version: "0.2"
+name: operator
+summary: >
+  Your guide: tell it what you want built, and it recommends a team from the
+  library, launches it in your repository, and hands the goal to its lead.
+
+culture_file: CULTURE.md
+
+pods:
+  - id: kernel
+    label: Kernel
+    members:
+      - id: operator
+        label: Operator
+        agent_ref: "local:agents/operator"
+        profile: default
+        runtime: claude-code
+        cwd: "."
+
+edges: []

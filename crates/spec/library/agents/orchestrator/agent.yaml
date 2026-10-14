@@ -1,0 +1,18 @@
+name: orchestrator
+version: "1.0"
+description: Team lead. Breaks goals into bounded tasks, routes them to the right seats and integrates the results.
+
+defaults:
+  runtime: claude-code
+  lifecycle:
+    restore_policy: resume_if_possible
+
+profiles:
+  default:
+    uses:
+      guidance: [role]
+
+resources:
+  guidance:
+    - id: role
+      path: guidance/role.md

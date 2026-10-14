@@ -1,0 +1,54 @@
+version: "0.2"
+name: workshop
+summary: >
+  A lead with a builder, a QA engineer and a reviewer. Bring goals to team.lead;
+  it splits them into tasks and runs them through build, test and review.
+
+culture_file: CULTURE.md
+
+pods:
+  - id: team
+    label: Team
+    members:
+      - id: lead
+        label: Lead
+        agent_ref: "local:agents/orchestrator"
+        profile: default
+        runtime: claude-code
+        cwd: "."
+      - id: build
+        label: Builder
+        agent_ref: "local:agents/implementer"
+        profile: default
+        runtime: claude-code
+        cwd: "."
+      - id: qa
+        label: QA
+        agent_ref: "local:agents/qa"
+        profile: default
+        runtime: claude-code
+        cwd: "."
+      - id: review
+        label: Reviewer
+        agent_ref: "local:agents/reviewer"
+        profile: default
+        runtime: claude-code
+        cwd: "."
+    edges:
+      - kind: delegates_to
+        from: lead
+        to: build
+      - kind: delegates_to
+        from: lead
+        to: qa
+      - kind: delegates_to
+        from: lead
+        to: review
+      - kind: can_observe
+        from: review
+        to: build
+      - kind: escalates_to
+        from: build
+        to: lead
+
+edges: []

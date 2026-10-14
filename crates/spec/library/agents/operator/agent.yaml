@@ -1,0 +1,18 @@
+name: operator
+version: "1.0"
+description: Your guide to ainet. Talks with you about the outcome you want, recommends a team, launches it, and hands your goal to its lead.
+
+defaults:
+  runtime: claude-code
+  lifecycle:
+    restore_policy: resume_if_possible
+
+profiles:
+  default:
+    uses:
+      guidance: [role]
+
+resources:
+  guidance:
+    - id: role
+      path: guidance/role.md
