@@ -11,10 +11,12 @@ pub mod command;
 pub mod daemon;
 pub mod demo;
 pub mod link;
+pub mod palette;
 pub mod popup;
 pub mod store;
 
 pub use command::{Command, Context};
 pub use demo::Demo;
 pub use link::{Backend, Link, Msg, Sink};
+pub use palette::Palette;
 pub use store::{Change, Entry, Row, Store, Tally};

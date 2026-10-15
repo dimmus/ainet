@@ -15,7 +15,7 @@ use ratatui::widgets::{
 
 use crate::app::{App, Row, Tab};
 use crate::sprite::{self, Size};
-use crate::theme::{Palette, c, mix, pulse};
+use crate::theme::{Palette, Styles as _, c, mix, pulse};
 
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 

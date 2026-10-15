@@ -10,7 +10,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{HighlightSpacing, List, ListItem, Paragraph, Wrap};
 
 use crate::app::{App, Entry};
-use crate::theme::{Palette, c, mix};
+use crate::theme::{Palette, Styles as _, c, mix};
 use crate::view::{age, chip, panel};
 
 fn hue_of(app: &App, id: &str) -> [u8; 3] {

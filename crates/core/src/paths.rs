@@ -32,13 +32,18 @@ pub fn database() -> PathBuf {
     state_dir().join("ainet.sqlite")
 }
 
-/// `$XDG_CONFIG_HOME/ainet/config.toml`.
-pub fn config_file() -> PathBuf {
+/// `$XDG_CONFIG_HOME/ainet`, else `~/.config/ainet`: the console's
+/// `config.toml` and the desktop app's settings and keymap.
+pub fn config_dir() -> PathBuf {
     std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| home().join(".config"))
         .join("ainet")
-        .join("config.toml")
+}
+
+/// `$XDG_CONFIG_HOME/ainet/config.toml`.
+pub fn config_file() -> PathBuf {
+    config_dir().join("config.toml")
 }
 
 /// The Omarchy theme file; ainet follows it like Den does.

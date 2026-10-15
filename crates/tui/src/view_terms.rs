@@ -13,7 +13,7 @@ use tui_term::widget::{Cursor, PseudoTerminal};
 use crate::app::App;
 use crate::sprite::{self, Size};
 use crate::term;
-use crate::theme::{c, mix, pulse};
+use crate::theme::{Styles as _, c, mix, pulse};
 use crate::view::{chip, glyph, panel};
 
 pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
