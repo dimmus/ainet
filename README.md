@@ -50,6 +50,44 @@ ainet up path/to/openrig/rig.yaml           # any OpenRig RigSpec
 | ![Fleet](docs/images/fleet.png) | ![Comms](docs/images/comms.png) |
 | ![Inbox](docs/images/inbox.png) | ![Map](docs/images/map.png) |
 
+## Desktop app
+
+`ainet-gui` is a desktop front end in Zed's style (GPUI and Zed's own UI
+components), in early development: so far a window with Zed's title bar,
+docks and status bar over the same fleet state as the TUI. The plan is
+[docs/GUI-PLAN.md](docs/GUI-PLAN.md); the Zed pin and how to upgrade it,
+[docs/GUI.md](docs/GUI.md).
+
+```bash
+just gui-demo                 # cargo run -p ainet-gui -- --demo
+just gui                      # against ainetd, started through the console binary
+ainet gui [--demo]            # runs ainet-gui installed next to ainet or on PATH
+ainet-gui --socket PATH --view rig:docs
+```
+
+It is a separate binary and never built by plain `cargo build`; it starts
+ainetd with `ainet daemon` (next to it, on `PATH` or `$AINET_BIN`), so build
+or install `ainet` too. If that fails, the window still opens and says why
+in the status bar.
+
+Arch Linux packages GPUI needs: the part of Zed's `script/linux` (at
+v1.24.2) that GPUI uses, plus a Vulkan driver, since GPUI renders with
+Vulkan:
+
+```bash
+sudo pacman -S --needed gcc pkgconf fontconfig wayland libxcb libxkbcommon-x11 \
+  vulkan-icd-loader xdg-desktop-portal
+sudo pacman -S --needed vulkan-radeon   # or vulkan-intel, or nvidia-utils
+```
+
+It needs Rust 1.98 or newer (Zed's toolchain); the console crates still
+build with 1.88. The first build compiles GPUI and takes a while.
+
+**Licence:** `ainet-gui` links Zed's GPL-3.0-or-later crates, so the
+`ainet-gui` crate and binary are **GPL-3.0-or-later**. Everything else in
+this repository, including the `ainet` console binary, stays MIT and never
+depends on it.
+
 ## Teams
 
 ```bash
@@ -108,6 +146,7 @@ check their queue.
 | `crates/pty` | panes: spawn, write, resize, screen and scrollback |
 | `crates/model` | what a front end knows: the fleet store fed by ainetd's snapshot and events, the Fleet tree, the `/command` language, the demo fleet |
 | `crates/tui` | ratatui + tachyonfx + tui-term: Fleet, Terminals, Comms, Inbox, Map |
+| `crates/gui` | `ainet-gui`, the desktop app (GPL-3.0-or-later): GPUI and Zed's `ui`/`theme` |
 | `crates/core` | agents, rigs, messages, queue, the wire protocol, a blocking client |
 | `crates/critter` | the seeded 16×16 critters and names |
 
@@ -158,5 +197,7 @@ team, rig bundles, missions and slices, permission policies, remote hosts.
 
 ## License
 
-MIT. Critter code and design are ported from Den and agent-badge (MIT); see
+MIT, except `crates/gui` (`ainet-gui`), which is GPL-3.0-or-later because
+it links Zed's GPL crates. Critter code and design are ported from Den and
+agent-badge (MIT); the desktop app uses Zed's crates and icons; see
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
