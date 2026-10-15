@@ -1,8 +1,9 @@
 //! The title bar, after Zed's `platform_title_bar`: drags and double-click
 //! zooms the window, carries the window controls when decorations are
-//! client-side, and shows the app name, the rig switcher (a placeholder
-//! until phase 5), the requests waiting on you (a badge that glows when
-//! one arrives and opens the Inbox) and the connection.
+//! client-side, and shows the app name, the rig switcher (the selected
+//! agent's rig; a click picks another, `fleet::SwitchRig`), the requests
+//! waiting on you (a badge that glows when one arrives and opens the
+//! Inbox) and the connection.
 
 use gpui::{
     Decorations, Entity, MouseButton, WeakEntity, WindowButton, WindowButtonLayout, WindowControlArea, svg,
@@ -11,9 +12,13 @@ use theme::{CLIENT_SIDE_DECORATION_BORDER, CLIENT_SIDE_DECORATION_ROUNDING};
 use ui::utils::platform_title_bar_height;
 use ui::{Indicator, Tooltip, prelude::*};
 
+use ainet_model::Store;
+
+use crate::actions::SwitchRig;
 use crate::fleet::{Connection, FleetModel};
 use crate::inbox::waiting_badge;
 use crate::quit;
+use crate::rig_modals::RigAction;
 use crate::workspace::Workspace;
 
 pub struct TitleBar {
@@ -46,6 +51,16 @@ pub fn connection_badge(connection: &Connection) -> (Color, &'static str) {
     }
 }
 
+/// The rig switcher's words: the rig commands act on (the selected
+/// agent's, or the only one).
+pub fn rig_label(store: &Store) -> String {
+    match store.rig_for(None, None) {
+        Some(rig) => rig,
+        None if store.rigs.is_empty() => "no rigs".into(),
+        None => "choose a rig".into(),
+    }
+}
+
 impl Render for TitleBar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let decorations = window.window_decorations();
@@ -60,6 +75,7 @@ impl Render for TitleBar {
         let fleet = self.fleet.read(cx);
         let (dot, words) = connection_badge(&fleet.connection());
         let (waiting, alerts) = (fleet.tally().waiting, fleet.alerts());
+        let rig = rig_label(&fleet.store);
         let layout = client_side.then(|| button_layout(cx)).flatten();
         let controls = |side: &[Option<WindowButton>]| {
             let buttons: Vec<WindowButton> = side.iter().flatten().copied().collect();
@@ -72,17 +88,28 @@ impl Render for TitleBar {
         let start = h_flex()
             .gap_2()
             .child(Label::new("ainet").weight(gpui::FontWeight::SEMIBOLD))
-            .child(
-                Button::new("rig-switcher", "all rigs")
-                    .style(ButtonStyle::Subtle)
-                    .label_size(LabelSize::Small)
-                    .end_icon(
-                        Icon::new(IconName::ChevronDown)
-                            .size(IconSize::XSmall)
-                            .color(Color::Muted),
+            .child({
+                let workspace = self.workspace.clone();
+                // Not a window drag: a click here switches rig.
+                div()
+                    .debug_selector(|| "TITLE-RIG-SWITCHER".into())
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(
+                        Button::new("rig-switcher", rig)
+                            .style(ButtonStyle::Subtle)
+                            .label_size(LabelSize::Small)
+                            .end_icon(
+                                Icon::new(IconName::ChevronDown)
+                                    .size(IconSize::XSmall)
+                                    .color(Color::Muted),
+                            )
+                            .tooltip(Tooltip::for_action_title("Switch Rig", &SwitchRig))
+                            .on_click(move |_, window, cx| {
+                                let _ =
+                                    workspace.update(cx, |w, cx| w.rig_action(RigAction::Select, window, cx));
+                            }),
                     )
-                    .tooltip(Tooltip::text("Switch rig (coming soon)")),
-            );
+            });
         let end = h_flex()
             .gap_3()
             .pr_2()

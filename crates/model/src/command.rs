@@ -915,7 +915,7 @@ mod tests {
     #[test]
     fn listings_come_back_item_by_item_by_their_token() {
         let (tx, rx) = mpsc::channel();
-        let (mut link, _) = Link::new(Backend::Demo(Box::default()), tx);
+        let (mut link, _) = Link::new(Backend::Demo(Box::new(Demo::full())), tx);
         let listing = |rx: &mpsc::Receiver<Msg>| {
             rx.try_iter()
                 .find_map(|m| match m {
@@ -1316,7 +1316,7 @@ mod tests {
     #[test]
     fn asked_replies_come_back_whole_by_their_token() {
         let (tx, rx) = mpsc::channel();
-        let (mut link, snapshot) = Link::new(Backend::Demo(Box::default()), tx);
+        let (mut link, snapshot) = Link::new(Backend::Demo(Box::new(Demo::full())), tx);
         let mut store = Store::new();
         store.apply(Msg::Snapshot(Box::new(snapshot.unwrap())));
         let lead = store.find_agent("orch-lead@docs").unwrap().clone();

@@ -18,6 +18,9 @@ use crate::link::Listing;
 
 const MIN: i64 = 60_000;
 
+/// What the demo says to a request it does not carry out.
+const CANNOT: &str = "the demo cannot do that; run ainet without --demo";
+
 struct Seed {
     id: &'static str,
     rig: Option<&'static str>,
@@ -217,6 +220,10 @@ pub struct Demo {
     next_msg: u64,
     talk: usize,
     rng: u64,
+    /// Whether it also answers what only the desktop app asks of it
+    /// (transcripts, specs, plans, queue requests, listings as popups,
+    /// chat topics); the console's demo keeps its replies as they were.
+    full: bool,
 }
 
 impl Default for Demo {
@@ -230,6 +237,38 @@ fn address(s: &Seed) -> Option<String> {
 }
 
 impl Demo {
+    /// The demo as the desktop app uses it: it also carries out queue
+    /// requests, keeps chat topics, and shows transcripts, specs, plans
+    /// and listings, which the console's demo says it cannot do.
+    pub fn full() -> Self {
+        Demo {
+            full: true,
+            ..Demo::new()
+        }
+    }
+
+    /// Whether only the full demo answers `req` (the console's says it
+    /// cannot do that).
+    fn full_only(req: &Request) -> bool {
+        match req {
+            Request::Up(spec) => spec.plan,
+            _ => matches!(
+                req,
+                Request::QueueClaim { .. }
+                    | Request::QueueUnclaim { .. }
+                    | Request::QueueUpdate { .. }
+                    | Request::QueueHandoff { .. }
+                    | Request::QueueBlock { .. }
+                    | Request::QueueShow { .. }
+                    | Request::Transcript { .. }
+                    | Request::SpecShow { .. }
+                    | Request::Export { .. }
+                    | Request::Specs
+                    | Request::SnapshotList { .. }
+            ),
+        }
+    }
+
     pub fn new() -> Self {
         let now = now_ms();
         let home = std::env::var("HOME").unwrap_or_else(|_| "/home/you".into());
@@ -338,6 +377,7 @@ impl Demo {
             next_msg: 0,
             talk: 1,
             rng: 0x2545_f491_4f6c_dd1d,
+            full: false,
         };
         demo.push_item(
             4,
@@ -645,6 +685,9 @@ impl Demo {
     /// What the demo does with a request: events to apply, and a result
     /// (`Some` text for a popup).
     pub fn handle(&mut self, req: &Request) -> (Vec<Event>, Result<Option<String>, String>) {
+        if !self.full && Self::full_only(req) {
+            return (vec![], Err(CANNOT.into()));
+        }
         match req {
             Request::Answer { item, decision } => (self.answer(*item, *decision), Ok(None)),
             Request::AnswerQuestion { item, .. } => (self.answer(*item, Decision::Allow), Ok(None)),
@@ -690,7 +733,10 @@ impl Demo {
                 let m = ChatMessage {
                     id: self.chat.len() as u64 + 1,
                     rig: rig.clone(),
-                    topic: topic.clone().unwrap_or_else(|| "general".into()),
+                    topic: topic
+                        .clone()
+                        .filter(|_| self.full)
+                        .unwrap_or_else(|| "general".into()),
                     sender: "you (operator)".into(),
                     body: body.clone(),
                     created: now_ms(),
@@ -758,10 +804,7 @@ impl Demo {
             | Request::Input { .. }
             | Request::Resize { .. }
             | Request::Send { .. } => (vec![], Ok(None)),
-            _ => (
-                vec![],
-                Err("the demo cannot do that; run ainet without --demo".into()),
-            ),
+            _ => (vec![], Err(CANNOT.into())),
         }
     }
 
@@ -1144,5 +1187,40 @@ mod tests {
         assert_eq!(rows.len(), 10 + screen.len());
         assert!(rows.ends_with(&screen));
         assert!(demo.history(agent, 0, 10_000).len() > 50);
+    }
+
+    /// The console's demo answers as it always has; only the desktop
+    /// app's carries out the requests added for it.
+    #[test]
+    fn only_the_full_demo_answers_the_apps_requests() {
+        let asks = [
+            Request::Transcript {
+                agent: SEEDS[0].id.into(),
+                tail: 0,
+                grep: None,
+            },
+            Request::SpecShow { name: "docs".into() },
+            Request::Export { rig: "docs".into() },
+            Request::Specs,
+            Request::SnapshotList { rig: "docs".into() },
+            Request::QueueShow { id: "q-1".into() },
+        ];
+        for req in &asks {
+            let (events, reply) = Demo::new().handle(req);
+            assert!(events.is_empty() && reply == Err(CANNOT.into()), "{req:?}");
+            assert!(Demo::full().handle(req).1.is_ok(), "{req:?}");
+        }
+        let post = Request::ChatSend {
+            rig: "docs".into(),
+            topic: Some("release".into()),
+            sender: None,
+            body: "hi".into(),
+        };
+        let topic = |mut demo: Demo| match demo.handle(&post).0.as_slice() {
+            [Event::Chat { message }] => message.topic.clone(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(topic(Demo::new()), "general");
+        assert_eq!(topic(Demo::full()), "release");
     }
 }

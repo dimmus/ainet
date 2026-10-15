@@ -60,22 +60,37 @@ pub struct Flight {
 /// The messages in the air. It notes the newest message it has seen, so
 /// each new one between two agents on the map flies once; messages from
 /// before the map was opened, and edits of old ones (delivered, read), do
-/// not fly.
+/// not fly. Neither do those a snapshot brings (ainetd's history, which
+/// arrives after the map may have opened, or what came while
+/// reconnecting): each snapshot starts the watch anew.
 #[derive(Clone, Debug, Default)]
 pub struct Flights {
     seen: Option<u64>,
+    /// The snapshot `seen` was noted in (`FleetModel::snapshots`).
+    snapshot: u64,
     flights: Vec<Flight>,
 }
 
 impl Flights {
     /// Takes off every message newer than any seen whose sender and
-    /// recipient are on the map (`on_map`), at `now`; the first call only
+    /// recipient are on the map (`on_map`), at `now`; the first call, and
+    /// the first after another snapshot (`snapshot` counts them), only
     /// notes where the stream is. Returns how many took off.
-    pub fn watch(&mut self, messages: &[Message], on_map: impl Fn(&str) -> bool, now: Instant) -> usize {
+    pub fn watch(
+        &mut self,
+        messages: &[Message],
+        snapshot: u64,
+        on_map: impl Fn(&str) -> bool,
+        now: Instant,
+    ) -> usize {
         let newest = messages.iter().map(|m| m.id).max();
-        let Some(seen) = self.seen else {
-            self.seen = Some(newest.unwrap_or(0));
-            return 0;
+        let seen = match self.seen {
+            Some(seen) if snapshot == self.snapshot => seen,
+            _ => {
+                self.seen = Some(newest.unwrap_or(0));
+                self.snapshot = snapshot;
+                return 0;
+            }
         };
         let before = self.flights.len();
         for m in messages.iter().filter(|m| m.id > seen) {
@@ -260,9 +275,11 @@ impl MapItem {
     /// New messages between agents on the map take off.
     fn watch(&mut self, cx: &mut Context<Self>) {
         let now = cx.background_executor().now();
-        let store = &self.fleet.read(cx).store;
+        let fleet = self.fleet.read(cx);
+        let store = &fleet.store;
         let on_map = |id: &str| store.agents.get(id).is_some_and(|a| a.state.is_live());
-        self.flights.watch(&store.messages, on_map, now);
+        self.flights
+            .watch(&store.messages, fleet.snapshots(), on_map, now);
     }
 
     fn select(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -933,14 +950,14 @@ mod tests {
         let mut flights = Flights::default();
         let mut stream = vec![message(1, "a", "b"), message(2, "b", "a")];
         // What was said before the map opened does not fly.
-        assert_eq!(flights.watch(&stream, on_map, t0), 0);
+        assert_eq!(flights.watch(&stream, 0, on_map, t0), 0);
         assert!(flights.is_empty());
 
         stream.push(message(3, "a", "b"));
         stream.push(message(4, "operator", "a"));
         stream.push(message(5, "a", "a"));
         assert_eq!(
-            flights.watch(&stream, on_map, t0),
+            flights.watch(&stream, 0, on_map, t0),
             1,
             "only between two on the map"
         );
@@ -951,7 +968,7 @@ mod tests {
         );
         // Seen once: watching again, or an edit of it, flies nothing.
         stream[2].read = Some(1);
-        assert_eq!(flights.watch(&stream, on_map, t0), 0);
+        assert_eq!(flights.watch(&stream, 0, on_map, t0), 0);
 
         // It eases from sender to recipient.
         assert_eq!(Flights::progress(&flight, t0), 0.0);
@@ -970,12 +987,29 @@ mod tests {
     }
 
     #[test]
+    fn what_a_snapshot_brings_does_not_fly() {
+        let t0 = Instant::now();
+        let mut flights = Flights::default();
+        // Opened before ainetd's snapshot: nothing to see yet.
+        assert_eq!(flights.watch(&[], 0, |_| true, t0), 0);
+        // The snapshot brings the history: none of it is new.
+        let mut stream: Vec<Message> = (1..=5).map(|id| message(id, "a", "b")).collect();
+        assert_eq!(flights.watch(&stream, 1, |_| true, t0), 0);
+        assert!(flights.is_empty());
+        stream.push(message(6, "b", "a"));
+        assert_eq!(flights.watch(&stream, 1, |_| true, t0), 1, "what follows flies");
+        // A reconnect's snapshot, with what was said meanwhile: still old.
+        stream.push(message(7, "a", "b"));
+        assert_eq!(flights.watch(&stream, 2, |_| true, t0), 0);
+    }
+
+    #[test]
     fn too_many_flights_drop_the_oldest() {
         let t0 = Instant::now();
         let mut flights = Flights::default();
-        flights.watch(&[], |_| true, t0);
+        flights.watch(&[], 0, |_| true, t0);
         let stream: Vec<Message> = (1..=100).map(|id| message(id, "a", "b")).collect();
-        flights.watch(&stream, |_| true, t0);
+        flights.watch(&stream, 0, |_| true, t0);
         let ids: Vec<u64> = flights.iter().map(|f| f.message).collect();
         assert_eq!(ids.len(), MAX_FLIGHTS);
         assert_eq!(ids.last(), Some(&100));
@@ -1206,6 +1240,51 @@ mod tests {
             cx.run_until_parked();
             let (_, layout) = map.read_with(cx, |m, _| m.drawn().cloned().unwrap());
             assert!(layout.nodes.is_empty());
+        }
+
+        /// ainetd's snapshot arrives after the map opened (`--view map`,
+        /// or opening it while connecting): its history stays put.
+        #[gpui::test]
+        async fn the_history_a_late_snapshot_brings_does_not_fly(cx: &mut TestAppContext) {
+            init_test(cx);
+            let fleet = cx.new(|_| FleetModel::offline());
+            let (map, cx) = cx.add_window_view({
+                let fleet = fleet.clone();
+                move |_, cx| MapItem::new(fleet, cx)
+            });
+            cx.run_until_parked();
+            let snapshot = Msg::Snapshot(Box::new(ainet_model::Demo::new().snapshot()));
+            fleet.update(cx, |f, cx| f.receive(vec![Msg::Connected(true), snapshot], cx));
+            cx.run_until_parked();
+            let between_agents = fleet.read_with(cx, |f, _| {
+                let live = |id: &str| f.store.agents.get(id).is_some_and(|a| a.state.is_live());
+                f.store
+                    .messages
+                    .iter()
+                    .filter(|m| m.from != m.to && live(&m.from) && live(&m.to))
+                    .count()
+            });
+            assert!(between_agents > 0, "the history has messages to fly");
+            assert!(map.read_with(cx, |m, _| m.flights().is_empty()));
+
+            // What is said after it flies.
+            let (from, to, next) = fleet.read_with(cx, |f, _| {
+                let live = |id: &str| f.store.agents.get(id).is_some_and(|a| a.state.is_live());
+                let m = f
+                    .store
+                    .messages
+                    .iter()
+                    .find(|m| m.from != m.to && live(&m.from) && live(&m.to));
+                let m = m.unwrap();
+                let next = f.store.messages.iter().map(|m| m.id).max().unwrap() + 1;
+                (m.from.clone(), m.to.clone(), next)
+            });
+            fleet.update(cx, |f, cx| {
+                let message = message(next, &from, &to);
+                f.receive(vec![Msg::Event(Box::new(Event::Message { message }))], cx)
+            });
+            cx.run_until_parked();
+            assert_eq!(map.read_with(cx, |m, _| m.flights().iter().count()), 1);
         }
     }
 }

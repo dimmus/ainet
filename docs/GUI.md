@@ -393,7 +393,9 @@ bottom dock's Queue panel.
   from ids without cloning, plus open threads). A `gpui::list`, since
   rows differ in height: only rows on show are drawn, and when the
   Store changes only the rows that changed are spliced in
-  (`comms::splice`), so the scroll position holds. A message shows its
+  (`comms::splices`: first the rows that dropped off the front, as the
+  Store at its cap of 2000 drops its oldest for each new one, then what
+  changed in the rest), so the scroll position holds. A message shows its
   sender's critter (or a person icon for you), `from → to` in the
   agents' colours (the accent for you), `#id`, `↳ #id` for a reply, a
   **held** chip (the typing guard holds it) or the TUI's unread dot (not
@@ -465,7 +467,7 @@ strip or their buttons in the status bar (`Workspace::toggle_panel_focus`):
 |---|---|
 | `queue_panel.rs` | `QueuePanel`: the queue as Zed's `ui::Table` (virtualised): id, a state chip, priority, `source → destination` in the agents' colours, summary, how long since it moved; the TUI's order (`Store::queue_items`: in progress, blocked, pending, done, canceled, latest first), open items only or all (`queue::ToggleOpenOnly`, the Open/All buttons). Chips in the TUI's colours (`Palette::qstate`, shared with the TUI) in ainet's own themes, else the theme's status colours (`queue_panel::state_colors`). The status bar button counts the open items |
 | `queue_form.rs` | `QueueFormModal`: the forms for a note, a handoff (to, body) and a block (on, then): enter goes to the next field, then sends; what is missing is said in the form, which stays open |
-| `chatroom.rs` | `ChatroomPanel`: one rig's chatroom on one topic (`Store::chat_rooms`: every rig's `general` plus every topic posted in; a dropdown picks one, else it follows the selected agent's rig), posts oldest first with the poster's critter, following the newest; a box (it takes the keyboard when the panel is shown) posts `ChatSend` there as you (`command::chat`) |
+| `chatroom.rs` | `ChatroomPanel`: one rig's chatroom on one topic (`Store::chat_rooms`: every rig's `general` plus every topic posted in; a dropdown picks one, else it follows the selected agent's rig), posts oldest first with the poster's critter, following the newest (the list tracks the room's post ids and splices what changed, `comms::splices`, so a post dropped at the Store's cap, from this room or another, keeps the rows and a reader's place right); a box (it takes the keyboard when the panel is shown) posts `ChatSend` there as you (`command::chat`) |
 | `events_panel.rs` | `EventsPanel`: what happened, one line each, newest last: agents joining, leaving and changing state, rigs, inbox items and answers, messages, chat, queue items, the connection. `FleetModel` logs a line (`ainet_model::journal::happened`, read off each message before the Store applies it, so a change says what it was before) and keeps the last `KEEP_EVENTS` (500); the list drops what the log drops (`events_panel::moved`) |
 | `report.rs` | `ReportItem`: a reply that is long text, as a tab: the buffer font in a read-only `TextInput` (select with the mouse or keys, `ctrl-a`, `ctrl-c`), scrolling, with a Copy All and an Ask Again button; "Loading…" until the reply, the daemon's error if it fails |
 
@@ -516,7 +518,8 @@ which calls it), `command::queue`/`QueueCommand` and `command::chat`
 (which `/chat` now uses), `Store::queue_items` (the TUI's order, which the
 TUI now uses), `Store::chat_rooms`/`chat_in`, `Palette::qstate` (the TUI's
 chip colours), the `journal` module, and the demo answers transcripts,
-specs, exports and the queue requests; all with tests.
+specs, exports and the queue requests (the app's `Demo::full` only; the
+console's demo is unchanged); all with tests.
 
 ## The Map (phase 4 step 7)
 
@@ -556,7 +559,10 @@ handling, clipped to the tab.
   drawn frame by frame (`on_next_frame`) only while one is in the air.
   `map::Flights` is that state, pure: it notes the newest message seen,
   so messages from before the tab opened and edits of old ones (read,
-  delivered) do not fly; at most 64 are in the air.
+  delivered) do not fly; at most 64 are in the air. Each snapshot
+  (`FleetModel::snapshots` counts them) starts the watch anew, so the
+  history ainetd's snapshot brings after the tab opened (`--view map`
+  at start-up, or a reconnect) does not fly either.
 - **Mouse.** Hovering a node lights it and its edges (the accent colour;
   the others fade); a click selects the agent (the Store's selection, so
   the Fleet and Agent panels follow), a double click opens its terminal.
@@ -580,11 +586,12 @@ when wide and stacked when tall, `spawned_by` pointing from the spawner,
 loose agents in their own cluster, edges across clusters, a loop in the
 edges), routes, and the pulses being the TUI's; pure ones in the GUI for
 the flights (taking off once, only between agents on the map, easing,
-landing after a second, at most 64) and the camera (zooming about the
+landing after a second, at most 64, nothing a snapshot brings) and the camera (zooming about the
 pointer, mapping back); headless ones for `ctrl-t` drawing every live
 agent inside the map without overlaps, zoom and fit, hover, click and
 double click, dragging to pan, a message sent through the fleet flying
-and landing on the test clock, and the empty fleet.
+and landing on the test clock, a late snapshot's history staying put,
+and the empty fleet.
 
 ## The command palette, pickers and modals (phase 5)
 
@@ -593,9 +600,9 @@ All in the modal layer, on the picker and the text field of phase 3:
 | File | What | After Zed's |
 |---|---|---|
 | `command_palette.rs` | `CommandPalette` (`ctrl-shift-p`): every action available where the keyboard was (`Window::available_actions`; `menu::*` left out), named in words as Zed's (`humanize`: `workspace::ToggleLeftDock` is "workspace: toggle left dock"), with its key binding there (`ui::KeyBinding::for_action_in`), fuzzy filtered (`normalize` lets `workspace::toggle_left` find it too), the ones run from it lately first (kept for the session). Picking one goes back where the keyboard was and runs it there. A line starting with `/`, or one that matches no action, is a console command: `commands::parse` (`command::parse`, no rig in view, so the selected agent's rig) says in its row what it does (`launching docs`) or what is wrong (the usage, `no command /x`); enter runs it, or stays open while it is wrong | `command_palette` |
-| `commands.rs` | the console's command language for the app, shared with Comms: requests through the fleet, the console's own commands (`/view`, `/allow`, `/quit`, …) as the app's actions | — |
+| `commands.rs` | the console's command language for the app, shared with Comms: requests through the fleet, the console's own commands (`/view`, `/allow`, `/quit`, …) as the app's actions. `/answer <text>` answers the question waiting on you (`commands::question`: the selected agent's first, else the oldest), as the TUI's answers the one selected. `/view fleet` focuses the Fleet, `/view rig:<name>` and `/view <rig>` tile that rig's terminals (`Workspace::tile_rig`), whichever agent is selected; another name says there is no such view or rig | — |
 | `up_modal.rs` | `fleet::Up`: `SpecPicker` over the library (`Request::Specs`, through the new `FleetModel::list`), with what is typed offered as a source of its own (a spec file's path, or a name); then `UpModal`: working directory (Browse… asks the system for a folder, `cx.prompt_for_paths`), rig name, fresh seats (`dev.impl, dev.review`). **Plan** shows what would launch (`UpSpec { plan: true }`, `FleetModel::ask`) in the form; **Launch** (or enter in the last field) sends `Up`. Both are `command::up` | `file_finder`, `ui::Modal` |
-| `rig_modals.rs` | `fleet::Restore`: a `RigPicker`, then `RestoreModal`: the snapshots (`Request::SnapshotList`), the latest by default, picked by click or `up`/`down`; the rig's seats as checkboxes to start fresh; enter restores (`command::restore`). `fleet::Down`: `DownModal` asks about the selected agent's rig (or the only one; else a rig picker first), with **Take a snapshot first** checked; enter takes it down (`command::down`) | — |
+| `rig_modals.rs` | `fleet::SwitchRig` (the title bar's rig switcher, which names the selected agent's rig, `title_bar::rig_label`): a `RigPicker`; picking a rig selects its first live agent in the Fleet's order (`rig_modals::first_agent`), so the Fleet, Agent panel, Chatroom and the rig commands follow it. `fleet::Restore`: a `RigPicker`, then `RestoreModal`: the snapshots (`Request::SnapshotList`), the latest by default, picked by click or `up`/`down`; the rig's seats as checkboxes to start fresh; enter restores (`command::restore`). `fleet::Down`: `DownModal` asks about the selected agent's rig (or the only one; else a rig picker first), with **Take a snapshot first** checked; enter takes it down (`command::down`) | — |
 | `seat_modals.rs` | `fleet::Spawn` (`s` in the Fleet): `SpawnModal`, the runtime (claude-code, codex, terminal), working directory (Browse…) and role, as `/spawn` (`command::spawn`). `fleet::Grow`: `GrowModal` for the selected agent's rig (else a rig picker): pod, member, runtime (or the rig's default), role, as `/grow` (`command::grow`); it says so when the pod or member is missing | — |
 | `form.rs` | what the forms share: Zed's `InputField`s (over `TextInput`) where enter moves to the next field and sends from the last, `tab`/`shift-tab` round the fields (`form::NextField`, `PreviousField`, context `Form`), Browse…, the runtime buttons, the frame (`ui::Modal`, `ModalHeader`, `Section`, `ModalFooter`) | — |
 | `theme_selector.rs` | `theme_selector::Toggle`: every registered theme, dark first, the one in use ticked and selected; moving previews it on the window, escape or a click outside puts the one in use back, picking it saves it (`settings::save_theme`) | `theme_selector` |
@@ -611,11 +618,18 @@ items come back whole as `Msg::Listing` (`Change::Listing`,
 `ainet_model::Listing::{Specs, Snapshots}`), to that caller only. The demo
 lists its two rigs as the library, two snapshots of each, and answers
 `up --plan` for its rigs (its other rig requests still say it cannot).
+These answers, and transcripts, specs, exports, the queue requests and
+chat topics, are the app's demo only (`Demo::full`, which
+`FleetModel::demo` uses): the console's `ainet --demo` (`Demo::new`)
+answers as before, "the demo cannot do that".
 
 Saving the theme: only `"theme"` changes in settings.json's text (with a
 theme per appearance, `"light"` or `"dark"` for the system's appearance
-now, as Zed's selector); a file that does not parse is left alone and the
-error shows as a toast. The settings then reload from the new text.
+now, as Zed's selector); a file that does not parse, or cannot be read
+(only a missing one counts as empty), is left alone and the error shows
+as a toast. The new text goes to a file beside it, then is renamed over
+it (through a symlink, over the file it points at), so a crash never
+leaves it cut short. The settings then reload from the new text.
 
 Keys (Linux; `cmd` for `ctrl` on macOS where Zed has it):
 
@@ -629,15 +643,19 @@ Keys (Linux; `cmd` for `ctrl` on macOS where Zed has it):
 | `tab`, `shift-tab` | a form (context `Form`) | `form::NextField`, `PreviousField` |
 | `enter` | a form's field | the next field; the last sends |
 
-`fleet::Up`, `Down`, `Restore`, `Grow` and `theme_selector::Toggle` have
-no default keys: the palette has them.
+`fleet::Up`, `Down`, `Restore`, `Grow`, `SwitchRig` and
+`theme_selector::Toggle` have no default keys: the palette has them.
 
 Tests: pure ones for action names, queries, seat lists and editing
 settings.json's text (in place, a missing key, comments and strings
 hiding keys, what it cannot edit); headless ones for the palette (the
 actions with their bindings, the one picked run where the keyboard was,
 lately used first, a usage error kept in the row, `/down` and `/view
-inbox` run), the switcher opening a terminal (`ctrl-enter` only
+inbox` run, `/answer` answering the waiting question, `/view rig:infra`
+and `/view docs` tiling that rig), the rig switcher (a click, the rig
+picked, its first agent selected, the label following), saving the
+theme (an unreadable file left alone, a missing one written, a symlink
+kept), the switcher opening a terminal (`ctrl-enter` only
 selecting), the Up flow against the demo (the library listed, Browse…,
 the plan shown, the `UpSpec` for plan and launch, a typed name),
 restore (rig, snapshot by keys, a fresh seat), down (escape, snapshot
@@ -687,7 +705,8 @@ the demo's plan.
 
 `~/.config/ainet/settings.json` (`$XDG_CONFIG_HOME` respected) is JSON with
 comments and trailing commas, every field optional; saved changes apply at
-once (the file is checked every 750 ms). If it does not parse, the last good
+once (the file is checked every 750 ms: its time, size and a hash of its
+contents, so a quick re-save of the same size is seen too). If it does not parse, the last good
 settings stay and the status bar says what is wrong. `ctrl-,` opens it
 (creating it with every field commented out).
 

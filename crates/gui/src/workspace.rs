@@ -27,7 +27,9 @@ use crate::actions::{
     ToggleBottomDock, ToggleCritterSize, ToggleLeftDock, ToggleRightDock, ToggleSwitcher, ToggleTypingGuard,
     ToggleZoom, terminal as terminal_actions,
 };
-use crate::actions::{Down, Grow, Restore, Spawn, Up, command_palette, tab_switcher, theme_selector};
+use crate::actions::{
+    Down, Grow, Restore, Spawn, SwitchRig, Up, command_palette, tab_switcher, theme_selector,
+};
 use crate::agent_panel::AgentPanel;
 use crate::args::View;
 use crate::chatroom::ChatroomPanel;
@@ -711,9 +713,17 @@ impl Workspace {
     /// of terminal-shaped tiles. Panes left from tiling before, holding
     /// only these terminals, make way.
     pub fn tile_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.zoom_out(cx);
         let store = &self.fleet.read(cx).store;
         let rig = store.selected_agent().and_then(|a| a.rig.clone());
+        self.tile_rig(rig.as_deref(), window, cx);
+    }
+
+    /// Lays out every live terminal of `rig` (all of them for `None`) as
+    /// [`Self::tile_all`] does: `/view rig:<name>`.
+    pub fn tile_rig(&mut self, rig: Option<&str>, window: &mut Window, cx: &mut Context<Self>) {
+        self.zoom_out(cx);
+        let rig = rig.map(str::to_string);
+        let store = &self.fleet.read(cx).store;
         let ids = store.terminal_ids(rig.as_deref());
         let Some(first) = ids.first().cloned() else {
             let text = match rig {
@@ -976,10 +986,11 @@ impl Workspace {
 
     /// Restoring, taking down or growing a rig: the selected agent's rig
     /// (or the only one) for taking down and growing, as the TUI's
-    /// commands; else, and always to restore, a rig picker first.
-    fn rig_action(&mut self, then: RigAction, window: &mut Window, cx: &mut Context<Self>) {
+    /// commands; else, and always to restore or switch rig, a rig picker
+    /// first.
+    pub fn rig_action(&mut self, then: RigAction, window: &mut Window, cx: &mut Context<Self>) {
         let rig = match then {
-            RigAction::Restore => None,
+            RigAction::Restore | RigAction::Select => None,
             RigAction::Down | RigAction::Grow => self.fleet.read(cx).store.rig_for(None, None),
         };
         let fleet = self.fleet.clone();
@@ -1141,6 +1152,9 @@ impl Render for Workspace {
             )
             .on_action(cx.listener(|this, _: &Down, window, cx| this.rig_action(RigAction::Down, window, cx)))
             .on_action(cx.listener(|this, _: &Grow, window, cx| this.rig_action(RigAction::Grow, window, cx)))
+            .on_action(
+                cx.listener(|this, _: &SwitchRig, window, cx| this.rig_action(RigAction::Select, window, cx)),
+            )
             // The selected agent's actions, from the Fleet's keys and menu.
             .on_action(cx.listener(|this, _: &TileAll, window, cx| this.tile_all(window, cx)))
             .on_action(cx.listener(|this, _: &OpenTerminal, window, cx| {

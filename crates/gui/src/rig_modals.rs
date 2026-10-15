@@ -1,6 +1,7 @@
 //! Restoring a rig and taking one down (`fleet::Restore`, `fleet::Down`),
 //! and the rig picker that leads to them (and to growing one) when no
-//! rig is selected. Restoring picks a snapshot (`Request::SnapshotList`,
+//! rig is selected, or switches rig (`fleet::SwitchRig`, the title bar's
+//! rig switcher). Restoring picks a snapshot (`Request::SnapshotList`,
 //! the latest by default) and the seats to start fresh; taking down asks
 //! first, with a snapshot taken unless you say not to. Each sends what
 //! `/restore` and `/down` send, through `ainet-model`'s command layer.
@@ -10,7 +11,7 @@ use std::sync::Arc;
 
 use ainet_core::{Request, SnapshotInfo};
 use ainet_model::describe::age;
-use ainet_model::{Listing, command};
+use ainet_model::{Listing, Row, Store, command};
 use fuzzy::{StringMatch, StringMatchCandidate};
 use gpui::{DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Task, WeakEntity};
 use ui::{Checkbox, HighlightedLabel, ListItem, ListItemSpacing, TintColor, ToggleState, prelude::*};
@@ -28,6 +29,8 @@ pub enum RigAction {
     Restore,
     Down,
     Grow,
+    /// Selects the rig's first live agent.
+    Select,
 }
 
 impl RigAction {
@@ -36,6 +39,7 @@ impl RigAction {
             RigAction::Restore => "Restore which rig?",
             RigAction::Down => "Take which rig down?",
             RigAction::Grow => "Add a seat to which rig?",
+            RigAction::Select => "Switch to which rig?",
         }
     }
 
@@ -56,8 +60,25 @@ impl RigAction {
             RigAction::Grow => {
                 workspace.toggle_modal(window, cx, |window, cx| GrowModal::new(fleet, rig, window, cx))
             }
+            RigAction::Select => fleet.update(cx, |fleet, cx| match first_agent(&fleet.store, &rig) {
+                Some(id) => fleet.select(&id, cx),
+                None => fleet.show(format!("no live agents in rig {rig}"), false, cx),
+            }),
         }
     }
+}
+
+/// The first live agent of `rig`, in the Fleet's order: where switching
+/// to the rig puts the selection.
+pub fn first_agent(store: &Store, rig: &str) -> Option<String> {
+    store.rows.iter().find_map(|row| match row {
+        Row::Agent { id, .. } => store
+            .agents
+            .get(id)
+            .filter(|a| a.rig.as_deref() == Some(rig) && a.state.is_live())
+            .map(|a| a.id.clone()),
+        _ => None,
+    })
 }
 
 /// The rigs ainet knows, to pick one.
@@ -145,6 +166,11 @@ impl PickerDelegate for RigPicker {
             return;
         };
         let (workspace, fleet, then) = (self.workspace.clone(), self.fleet.clone(), self.then);
+        // Switching rig is all there is to it; the others' forms take the
+        // picker's place.
+        if then == RigAction::Select {
+            cx.emit(DismissEvent);
+        }
         window.defer(cx, move |window, cx| {
             let _ = workspace.update(cx, |workspace, cx| then.open(fleet, rig, workspace, window, cx));
         });
@@ -454,8 +480,9 @@ mod tests {
     use gpui::{TestAppContext, VisualTestContext};
 
     use super::*;
-    use crate::actions::{Down, Restore};
+    use crate::actions::{Down, Restore, SwitchRig};
     use crate::tests::{demo_workspace, modal, sent};
+    use crate::title_bar::rig_label;
 
     fn fleet(w: &Entity<Workspace>, cx: &mut VisualTestContext) -> Entity<FleetModel> {
         w.read_with(cx, |w, _| w.fleet().clone())
@@ -546,5 +573,39 @@ mod tests {
         });
         cx.dispatch_action(Down);
         assert!(modal::<Picker<RigPicker>>(&w, cx).is_some());
+    }
+
+    /// The title bar's rig switcher names the selected agent's rig, and
+    /// picking another selects its first live agent.
+    #[gpui::test]
+    async fn the_rig_switcher_selects_the_rigs_first_agent(cx: &mut TestAppContext) {
+        let (w, cx) = demo_workspace(cx);
+        let fleet = fleet(&w, cx);
+        let label = |cx: &mut VisualTestContext| fleet.read_with(cx, |f, _| rig_label(&f.store));
+        assert_eq!(label(cx), "docs");
+
+        let switcher = cx
+            .debug_bounds("TITLE-RIG-SWITCHER")
+            .expect("the rig switcher is drawn");
+        cx.simulate_click(switcher.center(), gpui::Modifiers::none());
+        let picker = modal::<Picker<RigPicker>>(&w, cx).expect("a click picks a rig");
+        assert_eq!(picker.read_with(cx, |p, _| p.delegate.matches.len()), 2);
+        cx.simulate_input("infra");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(modal::<Picker<RigPicker>>(&w, cx).is_none());
+        let (selected, first) = fleet.read_with(cx, |f, _| {
+            (f.store.selected.clone(), first_agent(&f.store, "infra"))
+        });
+        assert!(first.is_some());
+        assert_eq!(selected, first);
+        assert_eq!(label(cx), "infra");
+
+        // From the keyboard too, back to docs.
+        cx.dispatch_action(SwitchRig);
+        cx.simulate_input("docs");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(label(cx), "docs");
     }
 }

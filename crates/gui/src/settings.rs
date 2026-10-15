@@ -7,7 +7,7 @@
 //! The settings also back the [`ThemeSettingsProvider`] that Zed's `theme`
 //! and `ui` crates read fonts, sizes and density from.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use gpui::{App, Font, Global, Pixels, SharedString, Task, font, px};
 use serde::Deserialize;
@@ -335,16 +335,13 @@ pub fn save_to(file: PathBuf, cx: &mut App) {
 /// stays as written.
 pub fn save_theme(name: &str, cx: &mut App) -> Result<(), String> {
     let file = cx.global::<AppSettings>().file.clone();
-    let text = file
-        .as_ref()
-        .and_then(|f| std::fs::read_to_string(f).ok())
-        .unwrap_or_default();
+    let text = match &file {
+        Some(file) => read_settings(file)?,
+        None => String::new(),
+    };
     let text = with_theme(&text, name, SystemAppearance::global(cx).0)?;
     if let Some(file) = &file {
-        file.parent()
-            .map_or(Ok(()), std::fs::create_dir_all)
-            .and_then(|()| std::fs::write(file, &text))
-            .map_err(|e| format!("cannot save {}: {e}", file.display()))?;
+        write_settings(file, &text).map_err(|e| format!("cannot save {}: {e}", file.display()))?;
         reload(&text, cx);
     } else {
         let mut next = get(cx).clone();
@@ -352,6 +349,38 @@ pub fn save_theme(name: &str, cx: &mut App) -> Result<(), String> {
         set(next, cx);
     }
     Ok(())
+}
+
+/// settings.json's text, empty while there is none. Any other failure
+/// is an error: saving over a file that could not be read would lose it.
+fn read_settings(file: &Path) -> Result<String, String> {
+    match std::fs::read_to_string(file) {
+        Ok(text) => Ok(text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(format!("cannot read {}: {e}", file.display())),
+    }
+}
+
+/// Writes settings.json whole or not at all: into a file beside it, then
+/// renamed over it, so a crash halfway never leaves it cut short.
+fn write_settings(file: &Path, text: &str) -> std::io::Result<()> {
+    // Through a symlink (settings kept with your dotfiles), the file it
+    // points at, so the link stays.
+    let file = &std::fs::canonicalize(file).unwrap_or_else(|_| file.to_path_buf());
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut part = file.as_os_str().to_owned();
+    part.push(".saving");
+    let part = PathBuf::from(part);
+    std::fs::write(&part, text)?;
+    // Keep who may read it, as an edit in place would.
+    if let Ok(meta) = std::fs::metadata(file) {
+        let _ = std::fs::set_permissions(&part, meta.permissions());
+    }
+    std::fs::rename(&part, file).inspect_err(|_| {
+        let _ = std::fs::remove_file(&part);
+    })
 }
 
 /// settings.json's text with `name` as its theme for `appearance`.
@@ -586,5 +615,62 @@ mod tests {
     #[test]
     fn lives_in_the_xdg_config_dir() {
         assert!(settings_file().ends_with("ainet/settings.json"));
+    }
+}
+
+#[cfg(all(test, not(target_os = "macos")))]
+mod app_tests {
+    use gpui::TestAppContext;
+
+    use super::*;
+    use crate::tests::init_test;
+
+    #[gpui::test]
+    fn saving_a_theme_never_loses_the_file(cx: &mut TestAppContext) {
+        init_test(cx);
+        let dir = std::env::temp_dir().join(format!("ainet-gui-save-theme-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("settings.json");
+
+        // Unreadable (not UTF-8): an error, and the file as it was.
+        let bytes = b"{ \"ui_font_size\": 15, \"note\": \"\xff\" }".to_vec();
+        std::fs::write(&file, &bytes).unwrap();
+        let saved = cx.update(|cx| {
+            save_to(file.clone(), cx);
+            save_theme("One Light", cx)
+        });
+        assert!(saved.is_err_and(|e| e.starts_with("cannot read")));
+        assert_eq!(std::fs::read(&file).unwrap(), bytes);
+
+        // Missing: written anew, nothing left beside it.
+        std::fs::remove_file(&file).unwrap();
+        cx.update(|cx| save_theme("One Light", cx)).unwrap();
+        assert_eq!(
+            parse(&std::fs::read_to_string(&file).unwrap()).unwrap().theme,
+            Some(ThemeSelection::Static("One Light".into()))
+        );
+        let names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["settings.json"]);
+
+        // Through a symlink: the file it points at changes, the link stays.
+        #[cfg(unix)]
+        {
+            let real = dir.join("real.json");
+            std::fs::write(&real, "{ \"ui_font_size\": 15 }").unwrap();
+            std::fs::remove_file(&file).unwrap();
+            std::os::unix::fs::symlink(&real, &file).unwrap();
+            cx.update(|cx| save_theme("One Dark", cx)).unwrap();
+            assert!(std::fs::symlink_metadata(&file).unwrap().file_type().is_symlink());
+            let text = std::fs::read_to_string(&real).unwrap();
+            assert!(
+                text.contains("\"ui_font_size\": 15") && text.contains("One Dark"),
+                "{text}"
+            );
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

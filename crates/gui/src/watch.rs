@@ -1,7 +1,8 @@
 //! Following a config file, or a directory of them, without a file-system
-//! watcher: a cheap check of modification times and sizes every [`POLL`],
-//! off the UI thread.
+//! watcher: a cheap check of modification times, sizes and contents every
+//! [`POLL`], off the UI thread.
 
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -10,19 +11,29 @@ use gpui::{App, Task};
 /// How often watched files are checked.
 pub const POLL: Duration = Duration::from_millis(750);
 
-/// What tells one version of a file from the next; `None` when it is gone.
-type Stamp = Option<(SystemTime, u64)>;
+/// What tells one version of a file from the next: its modification
+/// time, size and a hash of its contents (a quick re-save of the same
+/// size can keep the time on a coarse file system); `None` when it is
+/// gone. Config files are small, so reading them each time costs little.
+type Stamp = Option<(SystemTime, u64, u64)>;
+
+fn stamp_of(path: &Path, bytes: &[u8]) -> Stamp {
+    let meta = std::fs::metadata(path).ok()?;
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    Some((meta.modified().ok()?, meta.len(), hasher.finish()))
+}
 
 fn stamp(path: &Path) -> Stamp {
-    let meta = std::fs::metadata(path).ok()?;
-    Some((meta.modified().ok()?, meta.len()))
+    stamp_of(path, &std::fs::read(path).ok()?)
 }
 
 /// The file's contents and stamp, or `None` if it is unchanged since
 /// `last`. A file that is gone reads as `Some(None)`.
 fn read_if_changed(path: &Path, last: Stamp) -> Option<(Stamp, Option<String>)> {
-    let now = stamp(path);
-    (now != last).then(|| (now, std::fs::read_to_string(path).ok()))
+    let bytes = std::fs::read(path).ok();
+    let now = bytes.as_deref().and_then(|b| stamp_of(path, b));
+    (now != last).then(|| (now, bytes.and_then(|b| String::from_utf8(b).ok())))
 }
 
 /// Calls `on_change` with the file's new contents (`None` once it is
@@ -108,6 +119,34 @@ mod tests {
         assert_ne!(dir_stamp(&dir), one, "an edit");
         std::fs::remove_file(dir.join("a.json")).unwrap();
         assert!(dir_stamp(&dir).is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A re-save of the same size within the file system's time
+    /// resolution: the contents tell.
+    #[test]
+    fn notices_a_same_size_edit_at_the_same_time() {
+        let dir = std::env::temp_dir().join(format!("ainet-gui-watch-same-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("theme.json");
+        let at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let save = |text: &str| {
+            std::fs::write(&file, text).unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(&file)
+                .unwrap()
+                .set_modified(at)
+                .unwrap();
+        };
+        save("{ \"bg\": \"#101418\" }");
+        let (first, _) = read_if_changed(&file, None).unwrap();
+        save("{ \"bg\": \"#203040\" }");
+        let (_, text) = read_if_changed(&file, first).expect("seen");
+        assert!(text.unwrap().contains("#203040"));
+        let dir_first = dir_stamp(&dir);
+        save("{ \"bg\": \"#304050\" }");
+        assert_ne!(dir_stamp(&dir), dir_first);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

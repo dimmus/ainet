@@ -81,21 +81,33 @@ pub fn rows(store: &Store, open: &HashSet<u64>) -> Vec<Row> {
     rows
 }
 
-/// How the list changes from `old` rows to `new`: the range of old rows
-/// replaced and how many new rows take their place, keeping the rows both
-/// start and end with, so the scroll position holds.
-pub fn splice(old: &[Row], new: &[Row]) -> Option<(Range<usize>, usize)> {
-    if old == new {
-        return None;
+/// How a list changes from `old` rows to `new`, as splices to make in
+/// order: first the rows that dropped off the front (the Store keeps
+/// only its newest, so at its cap each arrival pushes the oldest out),
+/// then the range of the rest replaced and how many new rows take its
+/// place, keeping the rows both start and end with. Rows on either side
+/// keep their place, so the scroll position holds.
+pub fn splices<T: PartialEq>(old: &[T], new: &[T]) -> Vec<(Range<usize>, usize)> {
+    let mut out = Vec::new();
+    let dropped = new
+        .first()
+        .and_then(|first| old.iter().position(|row| row == first))
+        .unwrap_or(0);
+    if dropped > 0 {
+        out.push((0..dropped, 0));
     }
-    let start = old.iter().zip(new).take_while(|(a, b)| a == b).count();
-    let end = old[start..]
-        .iter()
-        .rev()
-        .zip(new[start..].iter().rev())
-        .take_while(|(a, b)| a == b)
-        .count();
-    Some((start..old.len() - end, new.len() - start - end))
+    let old = &old[dropped..];
+    if old != new {
+        let start = old.iter().zip(new).take_while(|(a, b)| a == b).count();
+        let end = old[start..]
+            .iter()
+            .rev()
+            .zip(new[start..].iter().rev())
+            .take_while(|(a, b)| a == b)
+            .count();
+        out.push((start..old.len() - end, new.len() - start - end));
+    }
+    out
 }
 
 /// What just happened to the stream, for [`sticks`].
@@ -305,8 +317,11 @@ impl CommsItem {
         let store = &self.fleet.read(cx).store;
         self.open.retain(|id| store.messages.iter().any(|m| m.id == *id));
         let rows = rows(store, &self.open);
-        if let Some((range, count)) = splice(&self.rows, &rows) {
-            self.list.splice(range, count);
+        let changes = splices(&self.rows, &rows);
+        if !changes.is_empty() {
+            for (range, count) in changes {
+                self.list.splice(range, count);
+            }
             self.rows = rows;
             self.stick(Moved::Changed);
         }
@@ -1032,22 +1047,46 @@ mod pure_tests {
     #[test]
     fn splices_keep_the_rows_on_either_side() {
         let (a, b, c, d) = (Row::Message(1), Row::Chat(1), Row::Message(2), Row::Chat(2));
-        assert_eq!(splice(&[a, b], &[a, b]), None);
-        assert_eq!(splice(&[a, b], &[a, b, c]), Some((2..2, 1)), "arrived");
-        assert_eq!(splice(&[a, b, c], &[b, c, d]), Some((0..3, 3)));
-        assert_eq!(splice(&[a, b, c], &[b, c]), Some((0..1, 0)), "the oldest went");
+        assert_eq!(splices(&[a, b], &[a, b]), []);
+        assert_eq!(splices(&[a, b], &[a, b, c]), [(2..2, 1)], "arrived");
+        assert_eq!(
+            splices(&[a, b, c], &[b, c, d]),
+            [(0..1, 0), (2..2, 1)],
+            "at the cap: the oldest went, one arrived"
+        );
+        assert_eq!(splices(&[a, b, c], &[b, c]), [(0..1, 0)], "the oldest went");
         let reply = Row::Reply {
             root: 1,
             id: 2,
             depth: 1,
         };
-        assert_eq!(
-            splice(&[a, b], &[a, reply, b]),
-            Some((1..1, 1)),
-            "a thread opened"
-        );
-        assert_eq!(splice(&[a, reply, b], &[a, b]), Some((1..2, 0)));
-        assert_eq!(splice(&[], &[a]), Some((0..0, 1)));
+        assert_eq!(splices(&[a, b], &[a, reply, b]), [(1..1, 1)], "a thread opened");
+        assert_eq!(splices(&[a, reply, b], &[a, b]), [(1..2, 0)]);
+        assert_eq!(splices(&[], &[a]), [(0..0, 1)]);
+        assert_eq!(splices(&[a, b], &[]), [(0..2, 0)]);
+        assert_eq!(splices(&[a, b], &[c, d]), [(0..2, 2)], "all new");
+    }
+
+    /// A reader scrolled back stays on the row they read while the
+    /// Store, at its cap, drops the oldest row for each new one.
+    #[test]
+    fn a_rolling_window_keeps_the_scroll_anchor() {
+        use gpui::{ListAlignment, ListOffset};
+        let old: Vec<u64> = (1..=10).collect();
+        let new: Vec<u64> = (2..=11).collect();
+        let list = ListState::new(old.len(), ListAlignment::Top, px(100.));
+        let reading = ListOffset {
+            item_ix: 4,
+            offset_in_item: px(3.),
+        };
+        list.scroll_to(reading);
+        for (range, count) in splices(&old, &new) {
+            list.splice(range, count);
+        }
+        assert_eq!(list.item_count(), new.len());
+        let top = list.logical_scroll_top();
+        assert_eq!(new[top.item_ix], old[reading.item_ix], "the same post on top");
+        assert_eq!(top.offset_in_item, px(3.));
     }
 
     #[test]

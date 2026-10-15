@@ -8,7 +8,8 @@ Status: **phase 5 done** (the command palette over every action with
 its keys and the console's command language, the agent switcher opening
 terminals, the spec picker and Up form with its plan, restore, down,
 spawn and grow forms, the theme selector saving into settings.json, user
-themes reloading on change, and the tab switcher; see [GUI.md](GUI.md)),
+themes reloading on change, the title bar's rig switcher, and the tab
+switcher; review fixes applied; see [GUI.md](GUI.md)),
 phase 6 next; phase 4 done (the Fleet panel with
 critters and the agent menu, the Agent panel, the live terminal with
 Tile all, the Inbox with approval cards, questions and the glowing
@@ -470,7 +471,11 @@ snapshot and the seats to start fresh; `Down` asks with a snapshot on;
 `command::{up, down, restore, spawn, grow}`, which the typed commands
 now share. The theme selector previews, restores on escape and saves
 only `"theme"` into settings.json's text; user themes reload when their
-directory changes; `ctrl-tab` is Zed's tab switcher. Not yet: a picker
+directory changes; `ctrl-tab` is Zed's tab switcher; the title bar's
+rig switcher (`fleet::SwitchRig`) picks a rig and selects its first live
+agent. The demo's added answers (transcripts, specs, plans, listings,
+queue requests, chat topics) are the GUI's only (`Demo::full`): the
+console's `ainet --demo` answers as before. Not yet: a picker
 for `/adopt` or `/discover`, editing a rig's edges when growing, the
 palette's history kept across sessions (phase 7), and a rig's own menu
 in the Fleet with these entries.

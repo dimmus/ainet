@@ -448,6 +448,91 @@ mod tests {
             let title = pane.read_with(cx, |p, cx| p.active_item().unwrap().tab_content_text(cx));
             assert_eq!(title.as_ref(), "Inbox");
         }
+
+        fn run_line(line: &str, cx: &mut VisualTestContext) {
+            cx.simulate_keystrokes("ctrl-shift-p");
+            cx.simulate_input(line);
+            cx.simulate_keystrokes("enter");
+            cx.run_until_parked();
+        }
+
+        /// `/answer` answers the question waiting on you, as the TUI's
+        /// answers the one selected.
+        #[gpui::test]
+        async fn answer_answers_the_waiting_question(cx: &mut TestAppContext) {
+            use ainet_core::{Event, InboxItem, InboxKind};
+            use ainet_model::Msg;
+
+            let (w, cx) = demo_workspace(cx);
+            let fleet = w.read_with(cx, |w, _| w.fleet().clone());
+            run_line("/answer yes", cx);
+            assert!(
+                !matches!(sent(&w, cx).last(), Some(Request::AnswerQuestion { .. })),
+                "no question waits yet"
+            );
+            let agent = fleet.read_with(cx, |f, _| f.store.selected.clone().unwrap());
+            let item = InboxItem {
+                id: 950,
+                agent,
+                kind: InboxKind::Question,
+                summary: "Ship it?".into(),
+                detail: "Ship it today?".into(),
+                created: 0,
+                waiting: true,
+                options: vec![],
+                multi_select: false,
+            };
+            fleet.update(cx, |f, cx| {
+                f.receive(vec![Msg::Event(Box::new(Event::Inbox { item }))], cx)
+            });
+            run_line("/answer yes, today", cx);
+            assert!(
+                matches!(sent(&w, cx).last(),
+                    Some(Request::AnswerQuestion { item: 950, answer }) if answer == "yes, today"),
+                "{:?}",
+                sent(&w, cx).last()
+            );
+        }
+
+        /// `/view rig:<name>` and `/view <rig>` tile that rig's terminals,
+        /// whichever agent is selected.
+        #[gpui::test]
+        async fn view_a_rig_tiles_that_rigs_terminals(cx: &mut TestAppContext) {
+            use crate::terminal_item::TerminalItem;
+
+            let (w, cx) = demo_workspace(cx);
+            let fleet = w.read_with(cx, |w, _| w.fleet().clone());
+            let tiled = |cx: &mut VisualTestContext| {
+                w.read_with(cx, |w, cx| {
+                    let mut ids: Vec<String> = w
+                        .panes()
+                        .iter()
+                        .flat_map(|p| p.read(cx).items().map(|i| i.to_any()).collect::<Vec<_>>())
+                        .filter_map(|i| i.downcast::<TerminalItem>().ok())
+                        .map(|t| t.read(cx).agent_id().to_string())
+                        .collect();
+                    ids.sort();
+                    ids
+                })
+            };
+            let infra = fleet.read_with(cx, |f, _| {
+                assert_ne!(f.store.selected_agent().unwrap().rig.as_deref(), Some("infra"));
+                let mut ids = f.store.terminal_ids(Some("infra"));
+                ids.sort();
+                ids
+            });
+            assert!(!infra.is_empty());
+            run_line("/view rig:infra", cx);
+            assert_eq!(tiled(cx), infra);
+
+            let docs = fleet.read_with(cx, |f, _| f.store.terminal_ids(Some("docs")));
+            run_line("/view docs", cx);
+            assert!(docs.iter().all(|id| tiled(cx).contains(id)));
+
+            run_line("/view nowhere", cx);
+            let said = fleet.read_with(cx, |f, _| f.notices().last().map(|n| n.text.clone()));
+            assert_eq!(said.as_deref(), Some("no view or rig named nowhere"));
+        }
     }
 
     #[test]

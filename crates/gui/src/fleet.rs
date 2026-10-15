@@ -145,6 +145,8 @@ pub struct FleetModel {
     /// Whether a `Hello` is on its way to an incompatible daemon.
     rechecking: bool,
     tick: u64,
+    /// How many snapshots were applied: everything anew each time.
+    snapshots: u64,
     notices: VecDeque<Notice>,
     /// Inbox items that asked for you so far; the waiting badge glows
     /// anew for each.
@@ -185,12 +187,14 @@ impl FleetModel {
     /// The pretend fleet, moving on every [`TICK`].
     pub fn demo(cx: &mut Context<Self>) -> Self {
         let (sink, rx) = sink::channel();
-        let (link, snapshot) = Link::new(Backend::Demo(Box::default()), sink);
+        // The full demo: the app asks it for more than the console does.
+        let (link, snapshot) = Link::new(Backend::Demo(Box::new(ainet_model::Demo::full())), sink);
         let mut model = FleetModel::empty(true);
         model.link = Some(link);
         if let Some(snapshot) = snapshot {
             model.store.connected = true;
             model.store.apply(Msg::Snapshot(Box::new(snapshot)));
+            model.snapshots = 1;
         }
         model._tasks.push(drain(rx, cx));
         model
@@ -202,6 +206,13 @@ impl FleetModel {
     /// The animation clock: ticks so far.
     pub fn tick(&self) -> u64 {
         self.tick
+    }
+
+    /// How many snapshots were applied (ainetd's arrives after
+    /// connecting, and again on each reconnect), so views can tell what
+    /// a snapshot brought from what happened since.
+    pub fn snapshots(&self) -> u64 {
+        self.snapshots
     }
 
     /// ainetd at `socket`: starts it through the console binary (off the UI
@@ -239,6 +250,7 @@ impl FleetModel {
             problem: None,
             rechecking: false,
             tick: 0,
+            snapshots: 0,
             notices: VecDeque::new(),
             alerts: 0,
             shown: HashMap::new(),
@@ -638,7 +650,10 @@ impl FleetModel {
                 }
                 // Everything anew (first connect or reconnect): the
                 // terminals on show are fetched again, as the TUI's.
-                Change::Snapshot => self.pump.mark_all(self.shown.values().cloned()),
+                Change::Snapshot => {
+                    self.snapshots += 1;
+                    self.pump.mark_all(self.shown.values().cloned());
+                }
                 Change::Output(agent) if self.is_shown(&agent) => self.pump.mark(&agent),
                 // A request waiting on you (or a question): a toast and a
                 // glowing badge, as the TUI's flash and glowing Inbox tab.

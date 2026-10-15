@@ -13,7 +13,7 @@ use gpui::{
 use ui::{ContextMenu, DropdownMenu, Tooltip, WithScrollbar, prelude::*};
 
 use crate::actions::panel::chatroom_panel::ToggleFocus;
-use crate::comms::{hue, is_you, poster};
+use crate::comms::{hue, is_you, poster, splices};
 use crate::critter::{self, Critter};
 use crate::dock::Panel;
 use crate::fleet::{FleetModel, Tick};
@@ -42,8 +42,9 @@ pub struct ChatroomPanel {
     /// Chosen by you, so it is kept while it exists.
     chosen: bool,
     list: ListState,
-    /// How many posts the list holds.
-    shown: usize,
+    /// The posts the list holds, by id; `None` when the room changed and
+    /// the list starts over.
+    shown: Option<Vec<u64>>,
     compose: Entity<TextInput>,
     animation: critter::Animation,
     _subscriptions: Vec<Subscription>,
@@ -75,7 +76,7 @@ impl ChatroomPanel {
             room: None,
             chosen: false,
             list,
-            shown: 0,
+            shown: None,
             compose,
             animation: critter::Animation::default(),
             _subscriptions: subscriptions,
@@ -94,9 +95,13 @@ impl ChatroomPanel {
         &self.compose
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
+    pub fn list(&self) -> &ListState {
+        &self.list
+    }
+
     pub fn shown(&self) -> usize {
-        self.shown
+        self.shown.as_ref().map_or(0, Vec::len)
     }
 
     /// Shows `room`'s posts.
@@ -104,7 +109,7 @@ impl ChatroomPanel {
         self.chosen = true;
         if self.room.as_ref() != Some(&room) {
             self.room = Some(room);
-            self.shown = usize::MAX;
+            self.shown = None;
             self.sync(cx);
             self.update_placeholder(cx);
             cx.notify();
@@ -112,7 +117,9 @@ impl ChatroomPanel {
     }
 
     /// Follows the store: the room is still there (or another is picked),
-    /// and new posts are added at the end, keeping the scroll position.
+    /// and the list changes only where the room's posts did (new ones at
+    /// the end, the oldest dropped at the Store's cap), keeping the scroll
+    /// position.
     fn sync(&mut self, cx: &mut Context<Self>) {
         let store = &self.fleet.read(cx).store;
         let exists = self.room.as_ref().is_some_and(|r| store.chat_rooms().contains(r));
@@ -125,19 +132,23 @@ impl ChatroomPanel {
         };
         if room != self.room {
             self.room = room;
-            self.shown = usize::MAX;
+            self.shown = None;
             self.update_placeholder(cx);
         }
-        let count = match &self.room {
-            Some((rig, topic)) => self.fleet.read(cx).store.chat_in(rig, topic).len(),
-            None => 0,
+        let store = &self.fleet.read(cx).store;
+        let ids: Vec<u64> = match &self.room {
+            Some((rig, topic)) => store.chat_in(rig, topic).iter().map(|c| c.id).collect(),
+            None => Vec::new(),
         };
-        if self.shown == usize::MAX || count < self.shown {
-            self.list.reset(count);
-        } else if count > self.shown {
-            self.list.splice(self.shown..self.shown, count - self.shown);
+        match &self.shown {
+            None => self.list.reset(ids.len()),
+            Some(shown) => {
+                for (range, count) in splices(shown, &ids) {
+                    self.list.splice(range, count);
+                }
+            }
         }
-        self.shown = count;
+        self.shown = Some(ids);
     }
 
     fn update_placeholder(&mut self, cx: &mut Context<Self>) {
@@ -283,7 +294,7 @@ impl Render for ChatroomPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let focused = self.focus_handle.contains_focused(window, cx);
         let rooms = self.render_rooms(window, cx);
-        let posts = if self.shown == 0 {
+        let posts = if self.shown() == 0 {
             div()
                 .p_3()
                 .child(
@@ -407,5 +418,68 @@ mod tests {
         // Nothing typed, nothing sent.
         cx.simulate_keystrokes("enter");
         assert!(fleet.update(cx, |f, _| std::mem::take(&mut f.sent)).is_empty());
+    }
+
+    /// At the Store's cap each post pushes the oldest out, maybe from
+    /// another room: the list keeps every post on its own row and a
+    /// reader scrolled back on the post they read.
+    #[gpui::test]
+    async fn at_the_cap_the_list_follows_the_rooms_posts(cx: &mut TestAppContext) {
+        use ainet_core::{ChatMessage, Event};
+        use ainet_model::Msg;
+        use gpui::ListOffset;
+
+        let (workspace, panel, cx) = demo(cx);
+        let fleet = workspace.read_with(cx, |w, _| w.fleet().clone());
+        let post = |id: u64, rig: &str| {
+            Msg::Event(Box::new(Event::Chat {
+                message: ChatMessage {
+                    id,
+                    rig: rig.into(),
+                    topic: "general".into(),
+                    sender: "you (operator)".into(),
+                    body: format!("post {id}"),
+                    created: id as i64,
+                },
+            }))
+        };
+        let ids = |cx: &mut VisualTestContext| {
+            fleet.read_with(cx, |f, _| {
+                f.store
+                    .chat_in("docs", "general")
+                    .iter()
+                    .map(|c| c.id)
+                    .collect::<Vec<u64>>()
+            })
+        };
+        // Fill the Store with this room's posts, past its cap.
+        let full: Vec<Msg> = (0..2100).map(|i| post(10_000 + i, "docs")).collect();
+        fleet.update(cx, |f, cx| f.receive(full, cx));
+        cx.run_until_parked();
+        let before = ids(cx);
+        assert_eq!(panel.read_with(cx, |p, _| p.list().item_count()), before.len());
+        let reading = ListOffset {
+            item_ix: 100,
+            offset_in_item: px(0.),
+        };
+        panel.read_with(cx, |p, _| p.list().scroll_to(reading));
+        let on_top = |cx: &mut VisualTestContext| {
+            let ix = panel.read_with(cx, |p, _| p.list().logical_scroll_top().item_ix);
+            ids(cx)[ix]
+        };
+
+        // A post here, the oldest here out: as many rows, moved up one.
+        fleet.update(cx, |f, cx| f.receive(vec![post(20_000, "docs")], cx));
+        cx.run_until_parked();
+        let after = ids(cx);
+        assert_eq!(after.len(), before.len());
+        assert_eq!(panel.read_with(cx, |p, _| p.list().item_count()), after.len());
+        assert_eq!(on_top(cx), before[100], "still on the post read");
+
+        // A post elsewhere, the oldest here out: one row fewer.
+        fleet.update(cx, |f, cx| f.receive(vec![post(20_001, "infra")], cx));
+        cx.run_until_parked();
+        assert_eq!(panel.read_with(cx, |p, _| p.list().item_count()), after.len() - 1);
+        assert_eq!(on_top(cx), before[100], "still on the post read");
     }
 }

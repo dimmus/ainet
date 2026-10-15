@@ -119,6 +119,9 @@ actions!(
         Restore,
         /// Adds seats to a rig.
         Grow,
+        /// Switches to a rig: selects its first live agent, and the
+        /// panels follow.
+        SwitchRig,
         /// Talks to the operator, as the TUI's `ctrl-o`.
         Operator,
         /// Selects the next agent waiting for you.

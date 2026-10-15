@@ -113,6 +113,7 @@ impl EventsPanel {
         };
         h_flex()
             .id(("event", ix))
+            .debug_selector(move || format!("EVENTS-LINE-{ix}"))
             .gap_2()
             .px_3()
             .py_0p5()
@@ -243,6 +244,10 @@ mod tests {
             .read_with(cx, |w, cx| w.bottom_panel::<EventsPanel>(cx))
             .expect("the Events panel");
         let fleet = workspace.read_with(cx, |w, _| w.fleet().clone());
+        // On show, so its rows are drawn.
+        cx.dispatch_action(ToggleFocus);
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("EVENTS-LINE-0").is_none(), "nothing yet");
 
         // What the demo does is logged: a post in the chatroom.
         fleet.update(cx, |f, cx| {
@@ -263,6 +268,7 @@ mod tests {
             .expect("a line");
         assert_eq!(last.kind, Kind::Chat);
         assert_eq!(last.text, "#general docs · you (operator): hello all");
+        assert!(cx.debug_bounds("EVENTS-LINE-0").is_some(), "its row is drawn");
 
         // More than the log keeps: the oldest make way, the newest last.
         fleet.update(cx, |f, cx| {
