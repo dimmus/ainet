@@ -4,9 +4,9 @@ Plan for adding a native GUI to ainet, built on Zed's UI stack (GPUI and
 Zed's component library) and following Zed's look and interaction model,
 while the console version (CLI + TUI) stays exactly as it is.
 
-Status: **phase 4 steps 1–2 done** (the Fleet panel with critters and
-the agent menu, the Agent panel; see [GUI.md](GUI.md)), step 3 (the
-terminal element) next; phase 3 done (option A: panes, splits, docks,
+Status: **phase 4 steps 1–3 done** (the Fleet panel with critters and
+the agent menu, the Agent panel, the live terminal with Tile all; see
+[GUI.md](GUI.md)), step 4 (the Inbox) next; phase 3 done (option A: panes, splits, docks,
 modals, toasts, the text input and the picker); phase 2 done (themes,
 fonts, settings and keymaps); phase 1 done (`crates/gui`: the GPUI
 skeleton on Zed v1.24.2); phase 0 done (`crates/model`). Written 2026-10-15 against commit `c0dbb5a`.
@@ -368,6 +368,20 @@ activity, messages, queue), the `Critter` avatar element, a message modal,
 and `TerminalItem` as a stand-in tab that step 3 fills with the live
 terminal. Not yet: cost (ainetd does not report it), the TUI's spinner and
 pulsing glyph for working and waiting agents (a state dot instead).
+
+Step 3 done: `TerminalItem` with `TerminalElement` (cell metrics from the
+terminal font settings, merged backgrounds, runs shaped per style, theme
+ANSI colours, cursor shapes and blink, wide characters), resize after
+150 ms of quiet, screens fetched on output for shown terminals at most
+every 66 ms (the TUI's pump, moved into `ainet_model::Pump`), keys through
+the TUI's xterm table (moved into `ainet_model::terminal`), focus ⇄
+`Interact`, selection and copy, bracketed paste, scrollback on the wheel
+(`Screen { history }`, new `Link::history` / `Msg::History`), the
+terminal's menu, and `fleet::TileAll` as a grid of panes. Not yet: URL
+hover, IME composition in terminals (no input handler; keys come from
+key-down events), forwarding the mouse to programs that ask for it,
+colours in scrollback (ainetd sends history as plain text), `--view
+terminals`/`rig:` tiling at start.
 
 ### Phase 5 — Command palette, pickers, modals · ~1 week
 
