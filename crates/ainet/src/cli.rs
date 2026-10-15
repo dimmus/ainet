@@ -292,6 +292,12 @@ pub enum Cmd {
     Shutdown,
     /// Run ainetd in the foreground.
     Daemon,
+    /// Open the desktop app (`ainet-gui`, installed separately).
+    Gui {
+        /// Show a pretend fleet instead of connecting to ainetd.
+        #[arg(long)]
+        demo: bool,
+    },
     /// Called by Claude Code for each hook event; reads the payload on stdin.
     #[command(hide = true)]
     Hook,
@@ -1006,6 +1012,13 @@ mod tests {
     }
 
     #[test]
+    fn gui_takes_demo() {
+        let cli = parse(&["ainet", "gui", "--demo"]);
+        assert!(!cli.demo, "--demo belongs to the subcommand");
+        assert!(matches!(cli.cmd, Some(Cmd::Gui { demo: true })));
+    }
+
+    #[test]
     fn kept_commands() {
         assert!(matches!(
             parse(&["ainet", "spawn", "codex", "-C", "/tmp", "--", "--x"]).cmd,
@@ -1018,6 +1031,10 @@ mod tests {
         ));
         assert!(matches!(parse(&["ainet", "hook"]).cmd, Some(Cmd::Hook)));
         assert!(matches!(parse(&["ainet", "mcp"]).cmd, Some(Cmd::Mcp)));
+        assert!(matches!(
+            parse(&["ainet", "gui"]).cmd,
+            Some(Cmd::Gui { demo: false })
+        ));
         assert!(matches!(
             parse(&["ainet", "capture", "a", "b", "--lines", "5"]).cmd,
             Some(Cmd::Capture { lines: 5, .. })

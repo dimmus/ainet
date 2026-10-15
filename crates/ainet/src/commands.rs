@@ -116,6 +116,7 @@ pub fn run(cli: Cli, socket: PathBuf) -> Result<ExitCode> {
     // Commands that run without (or before) the daemon.
     match &cmd {
         Cmd::Daemon => return daemon().map(|_| ExitCode::SUCCESS),
+        Cmd::Gui { demo } => return gui(*demo),
         Cmd::Hook => return crate::hook::run(&conn.socket).map(|_| ExitCode::SUCCESS),
         Cmd::Mcp => return crate::mcp::run(conn).map(|_| ExitCode::SUCCESS),
         Cmd::InstallHooks => {
@@ -135,7 +136,13 @@ pub fn run(cli: Cli, socket: PathBuf) -> Result<ExitCode> {
     }
     conn.ensure_daemon()?;
     match cmd {
-        Cmd::Daemon | Cmd::Hook | Cmd::Mcp | Cmd::InstallHooks | Cmd::Critter { .. } | Cmd::Shutdown => {
+        Cmd::Daemon
+        | Cmd::Gui { .. }
+        | Cmd::Hook
+        | Cmd::Mcp
+        | Cmd::InstallHooks
+        | Cmd::Critter { .. }
+        | Cmd::Shutdown => {
             unreachable!("handled above")
         }
         Cmd::Terminal(TerminalCmd::Status) => unreachable!("handled above"),
@@ -508,6 +515,41 @@ fn tui_on(view: &str) -> Result<ExitCode> {
         Some(0) => ExitCode::SUCCESS,
         Some(c) => ExitCode::from(c.clamp(1, 255) as u8),
         None => ExitCode::FAILURE,
+    })
+}
+
+/// Replaces this process with the desktop app. `ainet-gui` is a separate
+/// (GPL) program that starts ainetd through this binary itself, so nothing
+/// here links it; it is looked up next to us, then on `PATH`.
+fn gui(demo: bool) -> Result<ExitCode> {
+    use std::os::unix::process::CommandExt;
+
+    let Some(bin) = gui_binary() else {
+        bail!(
+            "ainet-gui is not installed: build it with `cargo build -p ainet-gui` \
+             (or `just gui`) and put it next to ainet or on PATH"
+        );
+    };
+    let mut cmd = std::process::Command::new(&bin);
+    if demo {
+        cmd.arg("--demo");
+    }
+    // Only returns if the exec failed.
+    let err = cmd.exec();
+    Err(err).with_context(|| format!("start {}", bin.display()))
+}
+
+fn gui_binary() -> Option<PathBuf> {
+    let sibling = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|d| d.join("ainet-gui")))
+        .filter(|p| p.is_file());
+    sibling.or_else(|| {
+        std::env::var_os("PATH").and_then(|path| {
+            std::env::split_paths(&path)
+                .map(|d| d.join("ainet-gui"))
+                .find(|p| p.is_file())
+        })
     })
 }
 
