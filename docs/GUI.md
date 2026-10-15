@@ -11,9 +11,9 @@ note records the pin and how to move it. The plan and the reasons are in
 |---|---|
 | Zed release | **v1.24.2** (latest stable on 2026-10-15) |
 | Commit | `fb69067729cb16a7f6135e2c1600c26a28c59659` (see `crates/gui/Cargo.lock`) |
-| Crates used directly | `gpui`, `gpui_platform` (features `font-kit`, `wayland`, `x11`), `theme`, `ui`, `settings_content` (the theme JSON schema only); `gpui` with `test-support` as a dev-dependency |
+| Crates used directly | `gpui`, `gpui_platform` (features `font-kit`, `wayland`, `x11`), `theme`, `ui`, `ui_input` (`InputField`), `menu` (the list actions), `fuzzy` (the pickers' matcher), `settings_content` (the theme JSON schema only); `gpui` with `test-support` as a dev-dependency |
 | Zed's toolchain | Rust 1.98.1 (`rust-toolchain.toml` at the tag); `crates/gui` declares `rust-version = "1.98"`, the console crates keep 1.88 |
-| Licences | `gpui*` and its support crates Apache-2.0; `ui`, `ui_macros`, `theme`, `syntax_theme`, `icons`, `component`, `menu`, `settings_content` (with `settings_json`, `settings_macros`, `language_model_core`) GPL-3.0-or-later, so `ainet-gui` is GPL-3.0-or-later (THIRD_PARTY_NOTICES.md) |
+| Licences | `gpui*` and its support crates Apache-2.0; `ui`, `ui_macros`, `ui_input`, `theme`, `syntax_theme`, `icons`, `component`, `menu`, `fuzzy`, `settings_content` (with `settings_json`, `settings_macros`, `language_model_core`) GPL-3.0-or-later, so `ainet-gui` is GPL-3.0-or-later (THIRD_PARTY_NOTICES.md) |
 | Assets | Zed's `assets/themes` (One, Ayu, Gruvbox), `assets/icons` (top level), `assets/fonts` (IBM Plex Sans, Lilex) at the tag, copied into `crates/gui/assets` |
 
 All Zed dependencies in `crates/gui/Cargo.toml` (and the dev-dependency)
@@ -86,6 +86,72 @@ The patches live in the GUI's workspace only, so the console's build and
 - Keymaps: `crates/gui/src/keymap.rs` reads Zed's keymap format the way
   `settings::keymap_file` does (sections, `null` to unbind, partial loads
   of a broken file), without the settings crate.
+- The workspace: Zed's `workspace` crate (panes, splits, docks, modals,
+  notifications) pulls in its project, fs, git and client crates, and
+  `picker` and `editor` need `workspace`. The pieces are written small
+  for ainet instead, after Zed's (next section).
+- The text field: Zed's is its `editor` crate. `text_input/` is a small
+  one on GPUI's `EntityInputHandler`, and backs `ui_input::InputField`
+  through its `ErasedEditor` hook.
+
+## The workspace pieces
+
+Written after Zed's `workspace` and `picker` crates at the tag, with the
+same components (`ui::Tab`, `TabBar`, `ContextMenu`, `PopoverMenu`,
+`ListItem`, `HighlightedLabel`, `Tooltip`, `KeyBinding`) and the same
+behaviour where ainet has the feature. Pure logic stays testable without
+GPUI (the pane tree, divider dragging, the text buffer).
+
+| File | What | After Zed's |
+|---|---|---|
+| `item.rs` | `Item` (tab label, icon or critter slot, tooltip, `can_split`/`clone_on_split`, `activated`/`deactivated`/`on_removed`, `ItemEvent::CloseItem`/`UpdateTab`), `ItemHandle`, and `Placeholder`, the stand-in for phase 4's views | `workspace::item` |
+| `pane.rs` | `Pane`: a `TabBar` of `Tab`s (click activates, middle click or the hover close button closes, right click for Close/Close Others/Close All/Split), a split menu and a zoom button; closing the active tab activates the one used before it; `PaneEvent`s for the workspace | `workspace::pane` |
+| `pane_group.rs` | `PaneGroup<P>`: the split tree (generic, so tested with numbers), neighbours by drawn position, and the axis element whose dividers drag (double click evens them) | `workspace::pane_group` |
+| `dock.rs` | `Dock` (left, right, bottom) holding `Panel`s, opened and closed, resized by dragging its inner edge (double click: default size) | `workspace::dock` |
+| `panels.rs` | the Fleet, Agent and Activity panels (placeholders until phase 4) | — |
+| `modal_layer.rs` | one modal at a time; escape, a click outside or the modal's `DismissEvent` closes it and gives the keyboard back | `workspace::modal_layer` |
+| `toast_layer.rs` | the fleet's notices as toasts, bottom right: flashes for 5 s (the TUI's flash time), errors for 15 s, reports (titled) until dismissed; at most 3 | status toasts, notifications |
+| `text_input/` | `TextInput`: one line or several (soft-wrapped, `max_lines`), IME, mouse and key selection, clipboard, word moves, undo/redo, placeholder, masking, read-only; `InputEvent::{Edited, Submitted, Cancelled, Blurred}`; `erased.rs` registers it as `ui_input`'s editor | GPUI's `examples/input.rs`, `ui_input::ErasedEditor` |
+| `picker.rs` | `Picker<D: PickerDelegate>` in the modal layer: query input, fuzzy matches with highlighted characters (Zed's `fuzzy`), `menu::*` keys | `picker` |
+| `switcher.rs` | the agent switcher (`ctrl-p`), the first picker: picking selects the agent | `file_finder` |
+
+The workspace (`workspace.rs`) ties them together: the Fleet panel docks
+left (or right, `fleet_panel.dock`) with the Agent panel opposite and the
+Activity panel at the bottom, all open at start; the status bar has a
+button per dock at its ends, as Zed's. Dock sizes are kept **in memory**
+for the session, per panel (the Fleet panel's starts from
+`fleet_panel.width` and follows that setting until dragged); saving them
+with the open tabs and splits is phase 7's workspace restore. Moving the
+Fleet panel to the other side moves both side panels with their sizes and
+open state.
+
+Keys (Linux; macOS has the `cmd` equivalents), in the keymaps:
+
+| Keys | Action |
+|---|---|
+| `ctrl-tab`, `ctrl-shift-tab`, `ctrl-pagedown`, `ctrl-pageup` | next, previous tab |
+| `ctrl-w` | close the tab |
+| `ctrl-\`, `ctrl-alt-\` | split right, down |
+| `ctrl-alt-left/right/up/down` | the pane in that direction (Zed's are `ctrl-k` chords, which a terminal needs) |
+| `shift-escape` | zoom the active pane, or put it back |
+| `ctrl-b`, `ctrl-alt-b`, `ctrl-j` | left, right, bottom dock |
+| `ctrl-shift-c`, `ctrl-shift-i`, `ctrl-t` | Comms, Inbox, Map tabs (placeholders) |
+| `ctrl-p` | the agent switcher |
+| `escape`, `enter`, `up`, `down`, `home`, `end` | `menu::*`, for menus, pickers and modals |
+
+`workspace::ActivateNextPane`/`ActivatePreviousPane` and
+`pane::CloseOtherItems`/`CloseAllItems` have no default keys. In a text
+field (`TextInput` context) the usual editing keys apply (`ctrl-z`,
+`ctrl-shift-z`, `ctrl-backspace`, `ctrl-left`, …); `enter` submits and
+`escape` cancels, and with several lines (`TextInput && multiline`)
+`shift-enter` starts a new line, as in Zed's agent panel.
+
+Testing: the pieces have headless tests (`#[gpui::test]` with
+`VisualTestContext`): tabs, splits and focus, zoom, dock resizing by a
+simulated drag, the switcher modal, toasts expiring on the test clock,
+text editing through the platform input handler, and the picker.
+`crate::tests::init_test` sets the app up as `main` does, without the
+user's config.
 
 ## Upgrading Zed
 
@@ -158,7 +224,8 @@ not parse are listed in the status bar.
 
 Keys: `crates/gui/assets/keymaps/default-{linux,macos}.json`, in Zed's
 format, with the contexts `Workspace`, `FleetPanel`, `Terminal`, `Inbox`,
-`Comms` and `Picker`. `~/.config/ainet/keymap.json` adds to them and
+`Comms`, `Picker` and `TextInput` (see "The workspace pieces" for the
+pane, dock and text keys). `~/.config/ainet/keymap.json` adds to them and
 overrides them (`null` unbinds), and reloads on save; bindings it cannot
 read are listed in the status bar and the rest apply. `ctrl-alt-,` opens
 it (`cmd-k cmd-s` on macOS). In a focused terminal every ctrl-letter goes

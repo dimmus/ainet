@@ -4,10 +4,11 @@ Plan for adding a native GUI to ainet, built on Zed's UI stack (GPUI and
 Zed's component library) and following Zed's look and interaction model,
 while the console version (CLI + TUI) stays exactly as it is.
 
-Status: **phase 2 done** (themes, fonts, settings and keymaps, see
-[GUI.md](GUI.md)); phase 1 done (`crates/gui`: the GPUI skeleton on Zed
-v1.24.2); phase 0 done (`crates/model`); phase 3 next. Written
-2026-10-15 against commit `c0dbb5a`.
+Status: **phase 3 done** (option A: panes, splits, docks, modals,
+toasts, the text input and the picker, see [GUI.md](GUI.md)); phase 2
+done (themes, fonts, settings and keymaps); phase 1 done (`crates/gui`:
+the GPUI skeleton on Zed v1.24.2); phase 0 done (`crates/model`); phase 4
+next. Written 2026-10-15 against commit `c0dbb5a`.
 
 **Decided (2026-10-15): option A.** The GUI uses Zed's real `ui` and `theme`
 crates from a pinned Zed git revision, and the `ainet-gui` crate and binary
@@ -331,6 +332,15 @@ Under **A**: wire Zed's `ui`, `theme`, `settings`, `component`, `icons`,
 `THIRD_PARTY_NOTICES.md`. `Dock`/`Pane`/`Picker`/`TextInput` still have to
 be written (Zed's `workspace`, `picker` and `editor` are not usable as
 libraries).
+
+Done under A: `Item`, `Pane` (Zed's `TabBar`/`Tab`, hover close, middle
+click, tab menu), `PaneGroup` (split right/down, draggable dividers, focus
+by order and direction, zoom on `shift-escape`), `Dock`/`Panel` (left,
+right, bottom; toggled, dragged; sizes in memory until phase 7), the
+modal layer, toasts from the fleet's notices, `TextInput` (also behind
+Zed's `ui_input::InputField`), and `Picker` on Zed's `fuzzy`, with the
+agent switcher (`ctrl-p`) as its first use. Left for later: dragging tabs
+between panes, pinned and preview tabs, a `component_preview` window.
 
 ### Phase 4 — Views · ~2–3 weeks
 
