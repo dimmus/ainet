@@ -13,6 +13,7 @@ pub mod demo;
 pub mod describe;
 pub mod journal;
 pub mod link;
+pub mod map;
 pub mod palette;
 pub mod popup;
 pub mod store;

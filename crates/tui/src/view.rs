@@ -951,12 +951,7 @@ fn draw_map(f: &mut Frame, app: &App, area: Rect) {
                 // Along the drawn edge, from under the parent to over the child.
                 let (x0, y0, x1, y1) = (from.0, from.1 - 6.0, to.0, to.1 + 6.0);
                 let at = |t: f64| (x0 + (x1 - x0) * t, y0 + (y1 - y0) * t);
-                let phase = (tick + u64::from(ainet_critter::hash(&child.id)) % 40) % 40;
-                for k in 0..3 {
-                    let mut t = ((phase + k * 13) % 40) as f64 / 40.0;
-                    if upward {
-                        t = 1.0 - t;
-                    }
+                for t in ainet_model::map::pulses(tick, &child.id, upward) {
                     // A fading trail behind each message, then the message itself.
                     for (lag, fade) in [(0.06, 0.75), (0.03, 0.45)] {
                         let tt = if upward {
