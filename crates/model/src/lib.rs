@@ -16,6 +16,7 @@ pub mod link;
 pub mod map;
 pub mod palette;
 pub mod popup;
+pub mod sample;
 pub mod store;
 pub mod terminal;
 

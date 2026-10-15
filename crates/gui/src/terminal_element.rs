@@ -4,12 +4,18 @@
 //! the [`TerminalItem`] (which asks the agent's pane to take that size),
 //! then paints the screen ainet keeps for the agent: backgrounds merged
 //! along rows, text shaped per run of one style, the selection and the
-//! cursor. What to paint is worked out in `terminal_layout`.
+//! cursor. What to paint is worked out in `terminal_layout`; rows are laid
+//! out and shaped once and kept while they show the same (the item's
+//! [`RowCache`]), so a frame where a spinner turned shapes one row, not
+//! the screen.
+
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::rc::Rc;
 
 use gpui::{
     App, Bounds, ContentMask, Element, ElementId, Entity, FontFeatures, FontStyle, FontWeight,
-    GlobalElementId, InspectorElementId, IntoElement, LayoutId, PaintQuad, Pixels, Point, ShapedLine, Size,
-    Style, TextAlign, TextRun, UnderlineStyle, Window, fill, outline, point, px, relative, size,
+    GlobalElementId, Hsla, InspectorElementId, IntoElement, LayoutId, PaintQuad, Pixels, Point, ShapedLine,
+    Size, Style, TextAlign, TextRun, UnderlineStyle, Window, fill, outline, point, px, relative, size,
 };
 use theme::ActiveTheme;
 
@@ -62,6 +68,87 @@ pub struct Metrics {
     pub cell: Size<Pixels>,
 }
 
+/// One row laid out and shaped, wherever it shows: its backgrounds
+/// (column, cells, colour) and its runs of text by column.
+pub struct ShapedRow {
+    backgrounds: Vec<(u16, u16, Hsla)>,
+    lines: Vec<(u16, ShapedLine)>,
+}
+
+/// What the rows of a frame were shaped for: the palette and the font.
+/// Rows kept from frames of another look are shaped anew.
+fn look(palette: &Palette, metrics: &Metrics) -> u64 {
+    let mut h = DefaultHasher::new();
+    palette.hash(&mut h);
+    metrics.font.hash(&mut h);
+    metrics.font_size.hash(&mut h);
+    metrics.cell.width.hash(&mut h);
+    metrics.cell.height.hash(&mut h);
+    h.finish()
+}
+
+/// The text style of a run: the terminal font, bold or italic as the run
+/// is.
+fn text_run(r: &terminal_layout::Run, metrics: &Metrics) -> TextRun {
+    TextRun {
+        len: r.text.len(),
+        font: gpui::Font {
+            weight: if r.bold {
+                FontWeight::BOLD
+            } else {
+                metrics.font.weight
+            },
+            style: if r.italic {
+                FontStyle::Italic
+            } else {
+                FontStyle::Normal
+            },
+            ..metrics.font.clone()
+        },
+        color: r.color,
+        background_color: None,
+        underline: r.underline.then_some(UnderlineStyle {
+            color: Some(r.color),
+            thickness: px(1.),
+            wavy: false,
+        }),
+        strikethrough: None,
+    }
+}
+
+fn shape(r: &terminal_layout::Run, metrics: &Metrics, window: &mut Window) -> ShapedLine {
+    window.text_system().shape_line(
+        r.text.clone().into(),
+        metrics.font_size,
+        &[text_run(r, metrics)],
+        Some(metrics.cell.width),
+    )
+}
+
+/// Lays out and shapes row `row` of `screen`, `cols` cells of it.
+fn shape_row(
+    screen: &vt100::Screen,
+    row: u16,
+    cols: u16,
+    palette: &Palette,
+    metrics: &Metrics,
+    window: &mut Window,
+) -> ShapedRow {
+    let layout = terminal_layout::layout_row(screen, row, cols, palette);
+    ShapedRow {
+        backgrounds: layout
+            .backgrounds
+            .iter()
+            .map(|b| (b.col, b.cells, b.color))
+            .collect(),
+        lines: layout
+            .runs
+            .iter()
+            .map(|r| (r.col, shape(r, metrics, window)))
+            .collect(),
+    }
+}
+
 impl Metrics {
     pub fn new(window: &Window, cx: &App) -> Self {
         let theme_settings = theme::theme_settings(cx);
@@ -102,9 +189,9 @@ type Glyphs = (Point<Pixels>, ShapedLine);
 
 pub struct PrepaintState {
     geometry: Geometry,
-    backgrounds: Vec<PaintQuad>,
+    /// The rows to paint, each where it goes.
+    rows: Vec<(u16, Rc<ShapedRow>)>,
     selection: Vec<PaintQuad>,
-    lines: Vec<Glyphs>,
     cursor: Option<(PaintQuad, Option<Glyphs>)>,
 }
 
@@ -166,21 +253,26 @@ impl Element for TerminalElement {
         let palette = Palette::from_theme(theme.colors());
         let player = theme.players().local();
         let shape_setting = settings::get(cx).terminal.cursor_shape;
+        let mut cache = self.item.update(cx, |item, _| item.take_row_cache());
+        cache.frame(look(&palette, &metrics));
         let item = self.item.read(cx);
         let Some(screen) = item.screen(cx) else {
+            self.item.update(cx, |item, _| item.put_row_cache(cache));
             return PrepaintState {
                 geometry,
-                backgrounds: Vec::new(),
+                rows: Vec::new(),
                 selection: Vec::new(),
-                lines: Vec::new(),
                 cursor: None,
             };
         };
-        let layout = terminal_layout::layout(screen, geometry.rows, geometry.cols, &palette);
-        let backgrounds = layout
-            .backgrounds
-            .iter()
-            .map(|b| fill(geometry.cells(b.row, b.col, b.cells), b.color))
+        let rows = (0..geometry.rows)
+            .zip(terminal_layout::row_keys(screen, geometry.cols))
+            .map(|(row, key)| {
+                let shaped = cache.row(key, || {
+                    shape_row(screen, row, geometry.cols, &palette, &metrics, window)
+                });
+                (row, shaped)
+            })
             .collect();
         let selection = item
             .selection()
@@ -191,45 +283,6 @@ impl Element for TerminalElement {
                     .collect()
             })
             .unwrap_or_default();
-        let shape = |text: String, run: TextRun, window: &mut Window| {
-            window
-                .text_system()
-                .shape_line(text.into(), metrics.font_size, &[run], Some(metrics.cell.width))
-        };
-        let text_run = |r: &terminal_layout::Run| TextRun {
-            len: r.text.len(),
-            font: gpui::Font {
-                weight: if r.bold {
-                    FontWeight::BOLD
-                } else {
-                    metrics.font.weight
-                },
-                style: if r.italic {
-                    FontStyle::Italic
-                } else {
-                    FontStyle::Normal
-                },
-                ..metrics.font.clone()
-            },
-            color: r.color,
-            background_color: None,
-            underline: r.underline.then_some(UnderlineStyle {
-                color: Some(r.color),
-                thickness: px(1.),
-                wavy: false,
-            }),
-            strikethrough: None,
-        };
-        let lines = layout
-            .runs
-            .iter()
-            .map(|r| {
-                (
-                    geometry.at(r.row, r.col),
-                    shape(r.text.clone(), text_run(r), window),
-                )
-            })
-            .collect();
 
         let cursor = (self.cursor && !screen.hide_cursor())
             .then(|| screen.cursor_position())
@@ -271,18 +324,15 @@ impl Element for TerminalElement {
                             italic: c.italic(),
                             underline: false,
                         };
-                        (
-                            geometry.at(row, col),
-                            shape(run.text.clone(), text_run(&run), window),
-                        )
+                        (geometry.at(row, col), shape(&run, &metrics, window))
                     });
                 (quad, glyph)
             });
+        self.item.update(cx, |item, _| item.put_row_cache(cache));
         PrepaintState {
             geometry,
-            backgrounds,
+            rows,
             selection,
-            lines,
             cursor,
         }
     }
@@ -297,16 +347,22 @@ impl Element for TerminalElement {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let line_height = state.geometry.cell.height;
+        let geometry = state.geometry;
+        let line_height = geometry.cell.height;
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
-            for quad in state.backgrounds.drain(..) {
-                window.paint_quad(quad);
+            for (row, shaped) in &state.rows {
+                for &(col, cells, color) in &shaped.backgrounds {
+                    window.paint_quad(fill(geometry.cells(*row, col, cells), color));
+                }
             }
             for quad in state.selection.drain(..) {
                 window.paint_quad(quad);
             }
-            for (origin, line) in &state.lines {
-                let _ = line.paint(*origin, line_height, TextAlign::Left, None, window, cx);
+            for (row, shaped) in &state.rows {
+                for (col, line) in &shaped.lines {
+                    let origin = geometry.at(*row, *col);
+                    let _ = line.paint(origin, line_height, TextAlign::Left, None, window, cx);
+                }
             }
             if let Some((quad, glyph)) = state.cursor.take() {
                 window.paint_quad(quad);

@@ -970,10 +970,13 @@ mod tests {
     async fn critters_move_only_while_drawn(cx: &mut TestAppContext) {
         let (w, cx) = demo(cx);
         let panel = panel(&w, cx);
-        // Drawn: a tick asks for a redraw once.
-        assert!(panel.read_with(cx, |p, _| p.animation.take()));
-        cx.executor().advance_clock(TICK);
-        cx.run_until_parked();
+        // Drawn: each tick takes the flag the last drawing set and asks
+        // for a redraw, which sets it again (the panel is a cached view:
+        // only that redraw paints it).
+        for _ in 0..3 {
+            cx.executor().advance_clock(TICK);
+            cx.run_until_parked();
+        }
         assert!(panel.read_with(cx, |p, _| p.animation.take()), "drawn again");
         // Hidden with its dock: no more.
         cx.simulate_keystrokes("ctrl-b");

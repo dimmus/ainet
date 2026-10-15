@@ -5,9 +5,14 @@
 //! the animation clock: a [`Tick`] every [`TICK`], which moves the demo on
 //! and the critters of views that are showing some.
 //!
-//! Terminals on show register here: their screens are fetched when their
-//! agent prints something, at most every `terminal::FETCH_EVERY` each (the
-//! TUI's pump), and ainetd is told when you are at one (`Interact`).
+//! Terminals on show register here: their screens are streamed from ainetd
+//! (`Link::attach`: the screen, then what the agent prints, fed into the
+//! store's copy), or, from a daemon that cannot stream and in the demo,
+//! fetched when their agent prints something, at most every
+//! `terminal::FETCH_EVERY` each (the TUI's pump); ainetd is told when you
+//! are at one (`Interact`). A screen that changed is announced as
+//! [`ScreenChanged`] for the terminals showing it to redraw: the rest of
+//! the app does not re-render for terminal output.
 //!
 //! It also keeps the events log (what happened, from `ainet_model::journal`)
 //! and routes the replies to requests a view asked for itself
@@ -133,6 +138,13 @@ pub struct Tick;
 
 impl EventEmitter<Tick> for FleetModel {}
 
+/// An agent's screen (or its scrollback) changed: the terminals showing
+/// it redraw. The fleet itself does not notify for it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScreenChanged(pub String);
+
+impl EventEmitter<ScreenChanged> for FleetModel {}
+
 pub struct FleetModel {
     pub store: Store,
     link: Option<Link<ChannelSink>>,
@@ -155,6 +167,9 @@ pub struct FleetModel {
     shown: HashMap<EntityId, String>,
     /// Which shown screens are stale, and the sizes asked of their panes.
     pump: Pump,
+    /// The shown terminals streamed from ainetd, with their streams'
+    /// numbers; the pump leaves them alone.
+    streams: HashMap<String, u64>,
     /// The next round of fetches, while some screen waits for its turn.
     pump_task: Option<Task<()>>,
     /// The items that have the keyboard, per agent, and the agents ainetd
@@ -179,6 +194,14 @@ pub struct FleetModel {
     /// Every screen fetched, for tests.
     #[cfg(test)]
     pub fetched: Vec<(String, (u16, u16))>,
+    /// Pretend ainetd streams terminals, for tests: attaching gives these
+    /// numbers, and every attach and detach is recorded.
+    #[cfg(test)]
+    pub streamable: bool,
+    #[cfg(test)]
+    pub attached: Vec<String>,
+    #[cfg(test)]
+    pub detached: Vec<String>,
     _tasks: Vec<Task<()>>,
     _quit: Option<Subscription>,
 }
@@ -255,6 +278,7 @@ impl FleetModel {
             alerts: 0,
             shown: HashMap::new(),
             pump: Pump::new(),
+            streams: HashMap::new(),
             pump_task: None,
             at: HashMap::new(),
             told: HashSet::new(),
@@ -268,6 +292,12 @@ impl FleetModel {
             sent: Vec::new(),
             #[cfg(test)]
             fetched: Vec::new(),
+            #[cfg(test)]
+            streamable: false,
+            #[cfg(test)]
+            attached: Vec::new(),
+            #[cfg(test)]
+            detached: Vec::new(),
             _tasks: Vec::new(),
             _quit: None,
         }
@@ -438,16 +468,55 @@ impl FleetModel {
         }
     }
 
-    /// Item `item` shows agent `agent`'s terminal: its screen is fetched
-    /// now and whenever the agent prints something.
+    /// Item `item` shows agent `agent`'s terminal: it is streamed, or its
+    /// screen is fetched now and whenever the agent prints something.
     pub fn show_terminal(&mut self, item: EntityId, agent: &str, cx: &mut Context<Self>) {
         self.shown.insert(item, agent.to_string());
-        self.refresh_terminal(agent, cx);
+        self.stream_or_fetch(agent, cx);
     }
 
-    /// Item `item` no longer shows a terminal (hidden, closed or gone).
+    /// Item `item` no longer shows a terminal (hidden, closed or gone);
+    /// one no item shows any more stops streaming.
     pub fn hide_terminal(&mut self, item: EntityId) {
-        self.shown.remove(&item);
+        let Some(agent) = self.shown.remove(&item) else {
+            return;
+        };
+        if !self.is_shown(&agent) && self.streams.remove(&agent).is_some() {
+            #[cfg(test)]
+            self.detached.push(agent.clone());
+            if let Some(link) = &mut self.link {
+                link.detach(&agent);
+            }
+        }
+    }
+
+    /// Whether `agent`'s terminal is streamed rather than fetched.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn is_streamed(&self, agent: &str) -> bool {
+        self.streams.contains_key(agent)
+    }
+
+    /// Streams `agent`'s terminal if ainetd can and it is not already;
+    /// otherwise fetches its screen.
+    fn stream_or_fetch(&mut self, agent: &str, cx: &mut Context<Self>) {
+        if self.streams.contains_key(agent) {
+            return;
+        }
+        match self.attach(agent) {
+            Some(stream) => {
+                self.streams.insert(agent.to_string(), stream);
+            }
+            None => self.refresh_terminal(agent, cx),
+        }
+    }
+
+    fn attach(&mut self, agent: &str) -> Option<u64> {
+        #[cfg(test)]
+        if self.streamable {
+            self.attached.push(agent.to_string());
+            return Some(self.attached.len() as u64);
+        }
+        self.link.as_mut()?.attach(agent)
     }
 
     /// Whether some item shows `agent`'s terminal.
@@ -455,7 +524,8 @@ impl FleetModel {
         self.shown.values().any(|a| a == agent)
     }
 
-    /// `agent`'s screen is stale: fetch it as soon as its turn comes.
+    /// `agent`'s screen is stale: fetch it as soon as its turn comes
+    /// (streamed screens never are).
     pub fn refresh_terminal(&mut self, agent: &str, cx: &mut Context<Self>) {
         self.pump.mark(agent);
         self.pump(cx);
@@ -571,6 +641,11 @@ impl FleetModel {
         }
         let now = cx.background_executor().now();
         for (id, size) in self.pump.due(now) {
+            // A streamed screen comes as it changes (and anew at a new
+            // size).
+            if self.streams.contains_key(&id) {
+                continue;
+            }
             #[cfg(test)]
             self.fetched.push((id.clone(), size));
             if let (Some(link), Some(agent)) = (&self.link, self.store.agents.get(&id)) {
@@ -595,10 +670,11 @@ impl FleetModel {
     }
 
     /// Applies messages from the link, then re-renders once if anything
-    /// changed: output alone changes nothing on show (the screens it
-    /// fetches do), and agents print all the time.
+    /// changed. Terminal output re-renders nothing: the screens that
+    /// changed are announced ([`ScreenChanged`]) for their terminals alone.
     fn apply(&mut self, msgs: Vec<Msg>, cx: &mut Context<Self>) {
         let mut changed = false;
+        let mut screens: Vec<String> = Vec::new();
         for msg in msgs {
             // Read before applying: a change says what it was before.
             if let Some(happening) = journal::happened(&self.store, &msg) {
@@ -607,7 +683,11 @@ impl FleetModel {
             }
             let change = self.store.apply(msg);
             changed |= match &change {
-                Change::None | Change::Output(_) => false,
+                Change::None
+                | Change::Output(_)
+                | Change::Term(_)
+                | Change::History(_)
+                | Change::Detached { .. } => false,
                 Change::Flash(text, _) => !text.is_empty(),
                 _ => true,
             };
@@ -649,12 +729,38 @@ impl FleetModel {
                     }
                 }
                 // Everything anew (first connect or reconnect): the
-                // terminals on show are fetched again, as the TUI's.
+                // terminals on show are fetched again, as the TUI's, or
+                // streamed from a daemon that can.
                 Change::Snapshot => {
                     self.snapshots += 1;
-                    self.pump.mark_all(self.shown.values().cloned());
+                    let shown: HashSet<String> = self.shown.values().cloned().collect();
+                    for agent in shown {
+                        if !self.streams.contains_key(&agent) {
+                            self.stream_or_fetch(&agent, cx);
+                        }
+                    }
                 }
-                Change::Output(agent) if self.is_shown(&agent) => self.pump.mark(&agent),
+                Change::Output(agent) if self.is_shown(&agent) && !self.streams.contains_key(&agent) => {
+                    self.pump.mark(&agent)
+                }
+                Change::Term(agent) | Change::History(agent) => {
+                    if !screens.contains(&agent) {
+                        screens.push(agent);
+                    }
+                }
+                // The stream ended (the daemon went, the program ended):
+                // fetched from now on, until a snapshot tries again.
+                Change::Detached { id, stream } => {
+                    if self.streams.get(&id) == Some(&stream) {
+                        self.streams.remove(&id);
+                        if let Some(link) = &mut self.link {
+                            link.ended(&id, stream);
+                        }
+                        if self.is_shown(&id) {
+                            self.pump.mark(&id);
+                        }
+                    }
+                }
                 // A request waiting on you (or a question): a toast and a
                 // glowing badge, as the TUI's flash and glowing Inbox tab.
                 Change::InboxAdded { index, alert: true } => {
@@ -677,6 +783,9 @@ impl FleetModel {
             }
         }
         self.pump(cx);
+        for agent in screens {
+            cx.emit(ScreenChanged(agent));
+        }
         if changed {
             cx.notify();
         }
@@ -952,6 +1061,111 @@ mod tests {
             .advance_clock(ainet_model::terminal::FETCH_EVERY * 2);
         cx.run_until_parked();
         assert!(fetched(cx).is_empty());
+    }
+
+    #[gpui::test]
+    async fn streamed_terminals_are_not_fetched_until_their_stream_ends(cx: &mut TestAppContext) {
+        let fleet = cx.new(|_| FleetModel::empty(false));
+        fleet.update(cx, |f, _| f.streamable = true);
+        let a = "a".to_string();
+        let output = || Msg::Event(Box::new(ainet_core::Event::Output { agent: "a".into() }));
+        let take = |cx: &mut TestAppContext| {
+            fleet.update(cx, |f, _| {
+                (
+                    std::mem::take(&mut f.attached),
+                    std::mem::take(&mut f.fetched)
+                        .into_iter()
+                        .map(|(id, _)| id)
+                        .collect::<Vec<_>>(),
+                )
+            })
+        };
+        let (first, second) = (fleet.entity_id(), EntityId::from(u64::MAX));
+        fleet.update(cx, |f, cx| {
+            f.show_terminal(first, &a, cx);
+            // A second view of it shares the stream.
+            f.show_terminal(second, &a, cx);
+        });
+        assert_eq!(take(cx), (vec![a.clone()], vec![]), "attached, not fetched");
+        assert!(fleet.read_with(cx, |f, _| f.is_streamed(&a)));
+
+        // Output, keys and new sizes come down the stream.
+        fleet.update(cx, |f, cx| {
+            f.apply(vec![output()], cx);
+            f.input(&a, b"x", cx);
+            f.resize_terminal(&a, (30, 100), cx);
+        });
+        cx.executor()
+            .advance_clock(ainet_model::terminal::FETCH_EVERY * 2);
+        cx.run_until_parked();
+        assert_eq!(take(cx), (vec![], vec![]));
+
+        // An old stream's end is no news; this one's is: fetched instead.
+        let ended = |stream| Msg::Detached {
+            id: "a".into(),
+            stream,
+        };
+        fleet.update(cx, |f, cx| f.apply(vec![ended(7)], cx));
+        assert!(fleet.read_with(cx, |f, _| f.is_streamed(&a)));
+        fleet.update(cx, |f, cx| f.apply(vec![ended(1)], cx));
+        cx.executor()
+            .advance_clock(ainet_model::terminal::FETCH_EVERY * 2);
+        cx.run_until_parked();
+        assert_eq!(take(cx), (vec![], vec![a.clone()]));
+        assert!(!fleet.read_with(cx, |f, _| f.is_streamed(&a)));
+
+        // A daemon (re)connected streams it again.
+        let snapshot = Msg::Snapshot(Box::new(ainet_model::Demo::new().snapshot()));
+        fleet.update(cx, |f, cx| f.apply(vec![snapshot], cx));
+        assert_eq!(take(cx).0, std::slice::from_ref(&a));
+
+        // Hidden from one view it still streams; from both, it stops.
+        fleet.update(cx, |f, _| f.hide_terminal(first));
+        assert!(fleet.read_with(cx, |f, _| f.detached.is_empty()));
+        fleet.update(cx, |f, _| f.hide_terminal(second));
+        assert_eq!(
+            fleet.read_with(cx, |f, _| f.detached.clone()),
+            std::slice::from_ref(&a)
+        );
+        assert!(!fleet.read_with(cx, |f, _| f.is_streamed(&a)));
+    }
+
+    #[gpui::test]
+    async fn changed_screens_are_announced_not_notified(cx: &mut TestAppContext) {
+        let fleet = cx.new(|_| FleetModel::empty(false));
+        let notified = std::rc::Rc::new(std::cell::Cell::new(0));
+        let changed = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let _watch = cx.update(|cx| {
+            let (notified, changed) = (notified.clone(), changed.clone());
+            (
+                cx.observe(&fleet, move |_, _| notified.set(notified.get() + 1)),
+                cx.subscribe(&fleet, move |_, e: &ScreenChanged, _| {
+                    changed.borrow_mut().push(e.0.clone())
+                }),
+            )
+        });
+        let term = |id: &str| Msg::Term {
+            id: id.into(),
+            ansi: "hi".into(),
+            size: (2, 10),
+            rows: vec!["hi".into()],
+        };
+        let bytes = |id: &str| {
+            Msg::Event(Box::new(ainet_core::Event::Bytes {
+                agent: id.into(),
+                data: " there".into(),
+            }))
+        };
+        // However many pieces came for a screen, it is announced once.
+        fleet.update(cx, |f, cx| {
+            f.apply(vec![term("a"), bytes("a"), bytes("a"), term("b")], cx)
+        });
+        cx.run_until_parked();
+        assert_eq!(*changed.borrow(), ["a", "b"]);
+        assert_eq!(notified.get(), 0);
+        fleet.read_with(cx, |f, _| {
+            assert_eq!(f.store.terms["a"].screen().contents(), "hi there there")
+        });
     }
 
     #[gpui::test]

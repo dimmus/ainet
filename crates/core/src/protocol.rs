@@ -1,6 +1,7 @@
 //! The wire protocol: one JSON object per line over the daemon's Unix socket.
 //! Every request gets exactly one response, except `Subscribe`, after which
-//! the connection carries `Response::Event` lines until it closes.
+//! the connection carries `Response::Event` lines until it closes, and
+//! `Attach`, after which it carries one terminal's screens and output.
 //!
 //! Requests made on behalf of an agent (the MCP server, `ainet msg …` run in
 //! an agent's shell) carry that agent's id from `AINET_AGENT_ID` in their
@@ -49,13 +50,28 @@ pub enum Request {
     },
     /// The screen of an agent's terminal: plain rows, and with `formatted`
     /// the whole state as escape sequences for a local `vt100` parser.
-    /// `history` adds up to that many scrollback rows above the screen.
+    /// `history` adds up to that many scrollback rows above the screen;
+    /// with `formatted` too, a daemon that can also sends each of those rows
+    /// with its colours (`Response::Screen::styled_rows`).
     Screen {
         agent: String,
         #[serde(default)]
         formatted: bool,
         #[serde(default)]
         history: usize,
+    },
+    /// Streams an agent's terminal on this connection, which carries
+    /// nothing else from then on: first its screen (`Response::Screen`,
+    /// formatted), then everything the program prints, in order, as
+    /// `Response::Event { event: Event::Bytes }`, and the whole screen again
+    /// after a resize, when the client fell behind, and once the output
+    /// settles, until either side closes the connection (the daemon does
+    /// when the program ends). An agent without a pane of ainetd's gets an
+    /// error and the connection stays an ordinary one. Daemons from before
+    /// it answer with an error too (`bad request: unknown variant`);
+    /// clients then fetch `Screen` on `Event::Output`, as before.
+    Attach {
+        agent: String,
     },
     Close {
         agent: String,
@@ -436,6 +452,13 @@ pub enum Response {
         ansi: Option<String>,
         #[serde(default)]
         size: (u16, u16),
+        /// With `formatted` and `history`: each of `rows` with its colours
+        /// and attributes, as text with SGR sequences that starts from the
+        /// default attributes and ends reset, to print at the start of a
+        /// row. Absent from daemons that cannot (and for adopted tmux
+        /// panes), which leaves the plain rows.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        styled_rows: Option<Vec<String>>,
     },
     /// What `ainet hook` prints for Claude Code, if anything.
     HookReply {
@@ -505,6 +528,16 @@ pub enum Event {
     Output {
         agent: String,
     },
+    /// What an attached terminal's program printed (`Request::Attach`), in
+    /// order, as text: a character split between two reads is sent whole
+    /// with the second, and bytes that are not UTF-8 become U+FFFD (the
+    /// screen sent once the output settles mends what they spoilt). Sent
+    /// only on the attaching connection, never to subscribers, whose
+    /// clients may not know it.
+    Bytes {
+        agent: String,
+        data: String,
+    },
     Rig {
         rig: Rig,
     },
@@ -561,6 +594,37 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn attaching_is_an_addition_old_peers_can_ignore() {
+        let line = encode(&Request::Attach { agent: "a".into() });
+        assert_eq!(
+            std::str::from_utf8(&line).unwrap(),
+            "{\"op\":\"attach\",\"agent\":\"a\"}\n"
+        );
+        // A screen without colours in its scrollback is the screen old
+        // daemons send, and new ones send it unchanged to old clients.
+        let old = r#"{"type":"screen","rows":["hi"],"ansi":null,"size":[2,10]}"#;
+        let screen: Response = serde_json::from_str(old).unwrap();
+        assert!(matches!(
+            screen,
+            Response::Screen {
+                styled_rows: None,
+                ..
+            }
+        ));
+        assert_eq!(serde_json::to_string(&screen).unwrap(), old);
+        let bytes = encode(&Response::Event {
+            event: Event::Bytes {
+                agent: "a".into(),
+                data: "\u{1b}[1mhi".into(),
+            },
+        });
+        assert_eq!(
+            std::str::from_utf8(&bytes).unwrap(),
+            "{\"type\":\"event\",\"event\":{\"kind\":\"bytes\",\"agent\":\"a\",\"data\":\"\\u001b[1mhi\"}}\n"
+        );
     }
 
     #[test]

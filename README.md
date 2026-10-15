@@ -53,9 +53,11 @@ ainet up path/to/openrig/rig.yaml           # any OpenRig RigSpec
 ## Desktop app
 
 `ainet-gui` is a desktop front end in Zed's style (GPUI and Zed's own UI
-components), in early development: so far a window with Zed's title bar,
-docks and status bar over the same fleet state as the TUI, with Zed's
-themes plus Deepharness and Omarchy, Zed's fonts, and Zed-style settings
+components), in development: Zed's title bar, panes, docks and status bar
+over the same fleet state as the TUI (the Fleet and Agent panels, live
+terminals streamed from ainetd, the Inbox, Comms, the Queue, Chatroom
+and Events, the Map, the command palette), with Zed's themes plus
+Deepharness and Omarchy, Zed's fonts, and Zed-style settings
 (`~/.config/ainet/settings.json`) and keymaps
 (`~/.config/ainet/keymap.json`) that apply as you save. The plan is
 [docs/GUI-PLAN.md](docs/GUI-PLAN.md); the Zed pin and how to upgrade it,
@@ -148,7 +150,7 @@ check their queue.
 | `crates/daemon` | ainetd: panes, rigs, delivery, mailbox, chat, queue, watchdogs, hooks, discovery |
 | `crates/spec` | OpenRig RigSpec/AgentSpec parsing, validation, launch order, the built-in library |
 | `crates/claude` | Claude Code integration ported from Den: sessions, inbox socket, hook answers, `/always`, questions, transcripts, cost, agent-badge, hook install |
-| `crates/pty` | panes: spawn, write, resize, screen and scrollback |
+| `crates/pty` | panes: spawn, write, resize, screen and scrollback, attachments that hear the output |
 | `crates/model` | what a front end knows: the fleet store fed by ainetd's snapshot and events, the Fleet tree, the `/command` language, the demo fleet |
 | `crates/tui` | ratatui + tachyonfx + tui-term: Fleet, Terminals, Comms, Inbox, Map |
 | `crates/gui` | `ainet-gui`, the desktop app (GPL-3.0-or-later): GPUI and Zed's `ui`/`theme` |

@@ -237,6 +237,7 @@ impl App {
             | Change::Comms
             | Change::Term(_)
             | Change::History(_)
+            | Change::Detached { .. }
             // The TUI never asks for a reply of its own.
             | Change::Reply { .. }
             | Change::Listing { .. } => {}

@@ -7,7 +7,10 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use gpui::{AnyElement, Axis, Bounds, Entity, IntoElement, ParentElement, Pixels, Point, div, px};
+use gpui::{
+    AnyElement, AnyView, Axis, Bounds, Entity, IntoElement, ParentElement, Pixels, Point, StyleRefinement,
+    div, px,
+};
 use ui::prelude::*;
 
 use crate::pane::Pane;
@@ -299,11 +302,13 @@ impl PaneGroup<Entity<Pane>> {
 
 fn render_member(member: &Member<Entity<Pane>>, basis: usize) -> AnyElement {
     match member {
+        // Cached as Zed's: a pane draws again only when it (or an item it
+        // shows) changed, not when another pane's terminal did.
         Member::Pane(pane) => div()
             .relative()
             .flex_1()
             .size_full()
-            .child(pane.clone())
+            .child(AnyView::from(pane.clone()).cached(StyleRefinement::default().v_flex().size_full()))
             .into_any_element(),
         Member::Axis(axis) => {
             let children: Vec<AnyElement> = axis

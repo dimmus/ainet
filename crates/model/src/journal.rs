@@ -154,7 +154,7 @@ pub fn happened(store: &Store, msg: &Msg) -> Option<Happening> {
                 }
                 Some(_) => None,
             },
-            Event::Output { .. } | Event::Watchdog { .. } => None,
+            Event::Output { .. } | Event::Bytes { .. } | Event::Watchdog { .. } => None,
         },
         _ => None,
     }

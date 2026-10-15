@@ -4,13 +4,18 @@ Plan for adding a native GUI to ainet, built on Zed's UI stack (GPUI and
 Zed's component library) and following Zed's look and interaction model,
 while the console version (CLI + TUI) stays exactly as it is.
 
-Status: **phase 5 done** (the command palette over every action with
+Status: **phase 6 done** (measured first: refetching whole screens was
+the cost, so terminals on show are now streamed from ainetd with the new
+`Request::Attach`, falling back to fetching with older daemons; only the
+terminals whose screen changed redraw, panes and panels are cached
+views, rows are shaped once while they show the same; scrollback comes
+with its colours; numbers and details in [GUI.md](GUI.md)), phase 7
+next; phase 5 done (the command palette over every action with
 its keys and the console's command language, the agent switcher opening
 terminals, the spec picker and Up form with its plan, restore, down,
 spawn and grow forms, the theme selector saving into settings.json, user
 themes reloading on change, the title bar's rig switcher, and the tab
-switcher; review fixes applied; see [GUI.md](GUI.md)),
-phase 6 next; phase 4 done (the Fleet panel with
+switcher; review fixes applied; see [GUI.md](GUI.md)); phase 4 done (the Fleet panel with
 critters and the agent menu, the Agent panel, the live terminal with
 Tile all, the Inbox with approval cards, questions and the glowing
 waiting badge, Comms with threads and a compose box, the bottom dock's
@@ -40,7 +45,7 @@ are licensed **GPL-3.0-or-later**. Everything else in the workspace stays MIT.
 | Crate | Lines | Role | Matters for the GUI because |
 |---|---|---|---|
 | `core` | ~1.2k | types, wire protocol (`Request`/`Response`/`Event`), blocking `Client`, paths | the GUI speaks exactly this protocol; no daemon change is needed to start |
-| `daemon` | ~4.6k | ainetd: PTYs, rigs, mailbox, chat, queue, hooks | unchanged; optional streaming addition in phase 6 |
+| `daemon` | ~4.6k | ainetd: PTYs, rigs, mailbox, chat, queue, hooks | unchanged; streamed terminals (`Attach`) and coloured scrollback added in phase 6 |
 | `tui` | ~5.2k | ratatui front end | holds the **state model** the GUI needs, mixed with ratatui types |
 | `ainet` | ~4.3k | the binary: CLI, TUI launch, `daemon`, `hook`, `mcp` | stays the console binary; agents and hooks call it by path |
 | `critter` | 0.7k | 16×16 pixel critters | UI-agnostic (`pixels() -> Grid`), reusable as GPUI avatars as is |
@@ -152,7 +157,8 @@ GPUI. The GUI is built with `cargo build --manifest-path crates/gui/Cargo.toml`
   parameter) so both front ends share it.
 - Terminal screens: `Event::Output` marks a terminal dirty; a throttled
   (≤ 30 fps per terminal, visible terminals only) fetch reuses
-  `backend::fetcher`. Phase 6 adds an optional streaming path.
+  `backend::fetcher`. Phase 6 adds an optional streaming path (done:
+  `Request::Attach`, see GUI.md).
 
 ## 4. The GUI, Zed-style
 
@@ -390,9 +396,8 @@ the TUI's xterm table (moved into `ainet_model::terminal`), focus ⇄
 (`Screen { history }`, new `Link::history` / `Msg::History`), the
 terminal's menu, and `fleet::TileAll` as a grid of panes. Not yet: URL
 hover, IME composition in terminals (no input handler; keys come from
-key-down events), forwarding the mouse to programs that ask for it,
-colours in scrollback (ainetd sends history as plain text), `--view
-terminals`/`rig:` tiling at start.
+key-down events), forwarding the mouse to programs that ask for it, `--view
+terminals`/`rig:` tiling at start. (Colours in scrollback came in phase 6.)
 
 Step 4 done: `InboxItem`, cards after Zed's tool-call approval cards
 (critter, name, kind chip, summary, scrolling detail: command and edit
@@ -491,6 +496,34 @@ in the Fleet with these entries.
    adopt it later; old clients keep using `Screen`.
 3. Render only dirty terminals; cache shaped lines per row keyed by row
    content; cap critter animation to visible avatars.
+
+Done. Measured without a display (`terminal_cost` in `ainet-model`,
+`layout_cost` in the GUI, both ignored tests run by hand, on the new
+`ainet_model::sample` busy screen): a refetch moves the whole formatted
+screen (3.6 KB as a reply line at 24×90, 10.9 KB at 50×200) where the
+spinner frame it shows is 1–2 KB, and costs the front end 35–153 µs
+against 12–18 µs to feed the bytes; with 16 busy 50×200 terminals 2.5
+MB/s and about 85 ms of CPU a second between ainetd and the UI thread,
+every screen up to 66 ms late. So streaming was added, without bumping
+`protocol::VERSION`: `Request::Attach { agent }` answers with the
+formatted screen, then `Event::Bytes` on that connection only (UTF-8
+split across reads kept whole), the whole screen again after a resize,
+when the client fell behind, once output settles and every 5 s of
+continuous output; it ends when either side closes. The pane taps its
+reader under the parser's lock (`ainet_pty::Pane::attach`). An old daemon
+answers "bad request" and the link falls back to fetching until it
+reconnects; old clients never send it; the TUI still fetches. The GUI
+streams each shown terminal once, however many tabs show it, and falls
+back to fetching when a stream ends. Screens that change no longer
+notify the fleet: `ScreenChanged` redraws only their terminals, and panes
+and dock panels are cached views. The element keeps shaped rows keyed by
+a hash of their formatted cells (`RowCache`, two frames, anew on another
+palette or font): a spinner frame lays out one row. Critters already
+animated only when painted. Colour scrollback was cheap:
+`Screen { history, formatted: true }` also answers `styled_rows` (new
+`ainet_pty::styled_row`), which the GUI draws. Not yet: the TUI on the
+stream, a per-cell fast path for whole-screen layout (only the first
+frame and new rows pay it), measuring shaping on a real display.
 
 ### Phase 7 — Persistence, polish, packaging · ~1 week
 

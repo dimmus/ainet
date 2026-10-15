@@ -212,17 +212,19 @@ an inactive tab or rows scrolled away cost nothing.
 ## The terminal (phase 4 step 3)
 
 An agent's terminal is a tab, `TerminalItem`, showing the copy of its
-screen ainet keeps (a `vt100::Parser` per agent in the `Store`, filled by
-`Request::Screen { formatted: true }`, as the TUI's). ainetd owns the
-PTYs, so there is no alacritty and no local process: the GUI paints the
-screen, sends keys as `Input` and sizes as `Resize`, and asks for a fresh
-screen when the agent prints.
+screen ainet keeps (a `vt100::Parser` per agent in the `Store`), streamed
+from ainetd (`Request::Attach`: the screen, then what the program
+prints, fed into the copy as it comes; phase 6) or, from a daemon that
+cannot stream and in the demo, filled by `Request::Screen { formatted:
+true }` as the TUI's. ainetd owns the PTYs, so there is no alacritty and
+no local process: the GUI paints the screen, sends keys as `Input` and
+sizes as `Resize`.
 
 | File | What | After Zed's |
 |---|---|---|
 | `terminal_item.rs` | the tab: critter, name and a state dot; a strip with the seat address, state, "Typing · messages held" while focused, the scroll position and a message button (`fleet::MessageAgent`); keys, mouse, menu and actions | `terminal_view::TerminalView` |
-| `terminal_element.rs` | `TerminalElement`: measures a cell of the terminal font, fits rows × columns in its bounds, paints backgrounds, selection, text and cursor | `terminal_view::TerminalElement` |
-| `terminal_layout.rs` | the pure part: a screen as merged background rectangles and runs of text of one style (bold, italic, underline, inverse, dim; 16, 256 and true colours through the theme's terminal ANSI colours), wide characters, selections and their text, scrollback laid out as a screen | `layout_grid`, `convert_color` |
+| `terminal_element.rs` | `TerminalElement`: measures a cell of the terminal font, fits rows × columns in its bounds, paints backgrounds, selection, text and cursor; rows shaped once and kept while they show the same (`ShapedRow` in the item's `RowCache`) | `terminal_view::TerminalElement` |
+| `terminal_layout.rs` | the pure part: a screen as merged background rectangles and runs of text of one style (bold, italic, underline, inverse, dim; 16, 256 and true colours through the theme's terminal ANSI colours), wide characters, selections and their text, scrollback laid out as a screen (with its colours when ainetd sends them), `row_keys` and `RowCache` | `layout_grid`, `convert_color` |
 | `terminal_input.rs` | a GPUI `Keystroke` as the bytes xterm sends, through `ainet_model::terminal::encode_in` (the TUI's table) | `terminal::mappings::keys` |
 
 What it does:
@@ -244,14 +246,28 @@ What it does:
   program's blink request on), and typing restarts the blink.
 - **Size.** When the element's rows × columns change and then hold for
   150 ms (`RESIZE_AFTER`), the agent's pane is asked to take them with one
-  quiet `Resize` (dragging a divider asks once, at the end), and the screen
-  is fetched again. The demo draws its screens at the asked size.
+  quiet `Resize` (dragging a divider asks once, at the end); a streamed
+  screen comes anew at that size, a fetched one is fetched again. The
+  demo draws its screens at the asked size.
 - **Fresh screens.** A tab on show (active in its pane) registers with
-  `FleetModel::show_terminal`; `Event::Output` for its agent marks the
-  screen stale, and stale screens are fetched at most every 66 ms each
-  (`ainet_model::Pump`, the TUI's pump, which the TUI now uses too).
-  Hidden tabs cost nothing; in the demo, shown screens move with the
-  clock.
+  `FleetModel::show_terminal`, which streams the agent's terminal
+  (`Link::attach`, one stream per agent however many tabs show it,
+  closed when the last one hides). Without streaming (a daemon from
+  before it, an adopted tmux pane, the demo), `Event::Output` for its
+  agent marks the screen stale, and stale screens are fetched at most
+  every 66 ms each (`ainet_model::Pump`, the TUI's pump, which the TUI
+  now uses too). A stream that ends (ainetd went, the program ended)
+  falls back to fetching until the next snapshot tries again. Hidden tabs
+  cost nothing; in the demo, shown screens move with the clock.
+- **Drawing only what changed.** A new screen (or bytes for one) does not
+  notify the fleet: it emits `ScreenChanged(agent)`, once per batch, and
+  only the terminals showing that agent redraw. Panes and dock panels are
+  cached views (`AnyView::cached`, as Zed's pane group), so a terminal
+  that redraws does not redraw the other panes or the panels. In the
+  element, each row is keyed by what it shows (`row_keys`: a hash of
+  its formatted cells and the columns drawn) and laid out and shaped only
+  when the key is new; rows are kept for one more frame, and a new
+  palette or font (the theme, the font settings) shapes them all anew.
 - **Keys.** While the terminal has the keyboard, every key the keymap
   leaves alone goes to the agent as `Input`: the `Terminal` context
   unbinds the workspace's ctrl letters and the list keys (`escape`,
@@ -272,9 +288,11 @@ What it does:
   A terminal that gets the keyboard also becomes the Fleet's selection.
 - **Mouse.** A left drag selects (shift-click extends), `terminal::Copy`
   copies it, `terminal::Clear` drops it. The wheel scrolls back through the
-  scrollback: the first step asks for it (`Screen { history: n }`, plain
-  text, in chunks of 200 rows), which then shows in place of the screen,
-  without colours, with "N lines back" in the strip. Scrollback shorter
+  scrollback: the first step asks for it (`Screen { history: n,
+  formatted: true }`, in chunks of 200 rows), which then shows in place of
+  the screen with "N lines back" in the strip, in its colours from a
+  daemon that sends them (`styled_rows`), as plain text from one that
+  does not. Scrollback shorter
   than a screen is believed for 2 s (`SHORT_HISTORY_FOR`), so a trackpad
   gesture asks once, not per event. A selection reaching past the screen
   (the grid drawn before a resize takes, or a pane that keeps its size)
@@ -308,15 +326,131 @@ panes), `ctrl-tab` (the tab switcher), `alt-up`/`alt-down` (the Fleet's
 selection).
 
 Tests: `terminal_layout` (colours, attributes, merging, wide characters,
-selections, scrollback), `terminal_input` (the TUI's key table as GPUI
-keystrokes), `fleet` (output fetches at most so often, one `Resize` per
-size), and headless `terminal_item` tests: the demo's screen painted,
+selections, scrollback with and without colours, row keys, the row cache
+finding and forgetting rows, a resize or another palette laying rows out
+anew), `terminal_input` (the TUI's key table as GPUI keystrokes), `fleet`
+(output fetches at most so often, one `Resize` per size, streamed
+terminals never fetched until their stream ends and streamed again after
+a snapshot, changed screens announced once and not notified), and
+headless `terminal_item` tests: only the terminal whose screen changed
+redrawing, one changed row shaped again and a new theme shaping all,
+coloured scrollback, the demo's screen painted,
 focus sending `Interact` on and off (and nothing between two views of one
 agent), keys reaching the agent past the workspace's bindings, one
 `Resize` after the window is dragged through several sizes, the wheel
 asking for scrollback and typing coming back, selection and copy,
 bracketed paste, `SendCtrlC`, and Tile all. In tests the window must be
 activated (`window.activate_window()`) for focus events to fire.
+
+## Performance and live terminals (phase 6)
+
+Measured first, without a display, then changed where the numbers said.
+Two measurements, both `#[ignore]`d tests run by hand:
+
+```sh
+cargo test -p ainet-model --release --test terminal_cost -- --ignored --nocapture
+CARGO_PROFILE_DEV_OPT_LEVEL=3 cargo test --manifest-path crates/gui/Cargo.toml \
+    layout_cost -- --ignored --nocapture
+```
+
+They run on `ainet_model::sample`, a busy Claude Code screen (prose,
+tool calls, diffs on coloured backgrounds, the spinner and input box)
+and `sample::frame`, what one redraw of its spinner writes. Numbers from
+the 2-core development machine (release build):
+
+| Screen | formatted screen | `Screen` reply line | ainetd: format + encode | front end: decode + parse | one spinner frame streamed | front end: decode + feed |
+|---|---|---|---|---|---|---|
+| 24×90 | 1.8 KB | 3.6 KB | 47 µs | 35 µs | 1.1 KB | 12 µs |
+| 50×200 | 5.6 KB | 10.9 KB | 203 µs | 153 µs | 1.9 KB | 18 µs |
+
+With every terminal busy (ainetd says `Output` every 50 ms per pane, the
+pump fetches each at most every 66 ms):
+
+| Terminals | fetches/s | refetching, 24×90 | refetching, 50×200 | streaming, 24×90 | streaming, 50×200 |
+|---|---|---|---|---|---|
+| 1 | 15 | 52 KB/s | 160 KB/s | 22 KB/s | 37 KB/s |
+| 4 | 60 | 207 KB/s | 637 KB/s | 89 KB/s | 149 KB/s |
+| 8 | 120 | 415 KB/s | 1.3 MB/s | 178 KB/s | 299 KB/s |
+| 16 | 239 | 830 KB/s | 2.5 MB/s | 357 KB/s | 598 KB/s |
+
+(streaming counted at a frame every 50 ms per terminal, all sent). So a
+refetch moves the whole screen to show a spinner turning: 4–6 times the
+bytes of the output itself, and 8–9 times the front end's work per
+update; for 16 busy 50×200 terminals that is about 37 ms of the UI
+thread and 48 ms of ainetd per second, against about 6 ms and next to
+nothing streamed, and every screen is up to 66 ms late on top. The
+refetch was the cost worth removing, hence streaming.
+
+Laying a screen out in the element (`terminal_layout`, optimised, before
+any shaping, which needs a real text system and is not measured):
+
+| Screen | whole layout | row keys | a frame through the row cache, spinner moved |
+|---|---|---|---|
+| 24×90 | 189 µs (110 runs) | 34 µs | 62 µs (1 row laid out) |
+| 50×200 | 564 µs (303 runs) | 159 µs | 186 µs (1 row laid out) |
+
+Keys were first a hash of each cell through `Screen::cell`, which walks
+to the row on every call and cost as much as the layout; they are now
+read from `Screen::rows_formatted` in one pass. Shaping, the larger cost
+on a real display, is what the cache saves most: only rows whose key is
+new are shaped.
+
+**Streaming** (`Request::Attach { agent }`, added without bumping
+`protocol::VERSION`):
+
+- ainetd (`crates/daemon/src/stream.rs`) answers with the formatted
+  screen (`Response::Screen`), then every chunk the program prints as
+  `Response::Event { event: Event::Bytes { agent, data } }`, on that
+  connection only (never broadcast: older subscribers would not parse
+  it). A character split between two reads is held for the next (never
+  two U+FFFDs). The whole screen comes again after a resize, when the
+  client fell 256 chunks behind (the pane's tap drops what does not fit
+  and the stream resyncs), once the output pauses for 300 ms, and at
+  least every 5 s of continuous output, which also mends anything the
+  client's parser took differently. It ends when the client closes the
+  connection (detached) or the program ends (ainetd closes it).
+- The pane (`ainet_pty::Pane::attach`) taps its reader under the same lock
+  as the parser, so the screen handed over and the bytes after it never
+  overlap or leave a gap.
+- An agent ainetd has no pane for (an adopted tmux pane) gets an error
+  and the connection stays an ordinary one.
+- Old clients never send it. A new client and an old daemon: the daemon
+  cannot parse the request and answers `bad request: unknown variant`,
+  the link remembers that until it reconnects (`Link::attach` then
+  returns `None`), and the GUI fetches screens on `Output` as before.
+- `Link::attach`/`detach`/`ended` (a thread per stream, closed with
+  `shutdown`), `Msg::Detached { id, stream }` and `Change::Detached`; the
+  stream's number keeps a late end of an old stream from ending a new
+  one. `Store` feeds `Event::Bytes` into the agent's parser. The TUI keeps
+  fetching (`Change::Detached` is no news to it); its behaviour is
+  unchanged.
+
+**Colour scrollback.** `Screen { history: n, formatted: true }` now also
+answers `styled_rows` from ainetd's own panes: each row as text with SGR
+sequences from the default attributes (`ainet_pty::styled_row`, written
+for this: vt100's `rows_formatted` positions the cursor absolutely and so
+cannot be moved to another row). Old daemons leave it out (plain rows, as
+before); old clients never ask with `formatted` and get the reply they
+always did. The GUI draws them on a screen wide enough not to wrap,
+painting its first columns.
+
+**Critters.** Already only visible ones animate: a view redraws on the
+fleet's tick only if it painted a critter since the last one
+(`critter::Animation`), so hidden panels and tabs cost one flag check a
+tick. With cached views, the redraw a tick asks for repaints only that
+view.
+
+Tests: `ainet-pty` (an attachment keeps an exact copy of the screen,
+resizes and lag resync, dropping detaches, styled rows draw the same
+anywhere), `ainet-daemon` (`tests/attach.rs`, a real ainetd: screen then
+bytes, a screen once settled and after a resize, closing either end
+detaches, a refused attach leaves the connection usable, coloured
+scrollback only when asked; `stream` unit test: characters split between
+reads), `ainet-core` (the wire shapes old peers see), `ainet-model`
+(`tests/attach.rs` against pretend daemons: streaming into the store
+until detached, an old daemon's refusal and the fallback to fetching, a
+stream that ends; `Store` feeding bytes and keeping styled history), and
+the GUI tests listed under the terminal.
 
 ## The Inbox (phase 4 step 4)
 

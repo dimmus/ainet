@@ -277,18 +277,36 @@ pub(crate) fn screen(d: &Shared, key: &str, formatted: bool, history: usize) -> 
         return err(format!("no agent {key}"));
     };
     if let Some(p) = d.panes.get(&id) {
-        let rows = if history > 0 { p.history(history) } else { p.rows() };
+        // Scrollback with colours when asked for formatted.
+        let (rows, styled_rows) = match (history, formatted) {
+            (0, _) => (p.rows(), None),
+            (_, false) => (p.history(history), None),
+            (_, true) => {
+                let (rows, styled) = p.history_styled(history);
+                (rows, Some(styled))
+            }
+        };
         let (ansi, size) = if formatted {
             let (a, s) = p.formatted();
             (Some(a), s)
         } else {
             (None, p.size())
         };
-        return Response::Screen { rows, ansi, size };
+        return Response::Screen {
+            rows,
+            ansi,
+            size,
+            styled_rows,
+        };
     }
     if let Some(target) = d.tmux.get(&id) {
         return match crate::discover::tmux_capture(target, history, formatted) {
-            Ok((rows, ansi, size)) => Response::Screen { rows, ansi, size },
+            Ok((rows, ansi, size)) => Response::Screen {
+                rows,
+                ansi,
+                size,
+                styled_rows: None,
+            },
             Err(e) => err(e),
         };
     }

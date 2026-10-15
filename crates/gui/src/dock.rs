@@ -9,7 +9,7 @@
 
 use gpui::{
     Action, AnyView, App, Context, Entity, FocusHandle, Focusable, MouseButton, MouseDownEvent, MouseUpEvent,
-    Pixels, Window, deferred, px,
+    Pixels, StyleRefinement, Window, deferred, px,
 };
 use ui::prelude::*;
 
@@ -337,7 +337,13 @@ impl Render for Dock {
                 DockPosition::Right => el.w(size).h_full().border_l_1(),
                 DockPosition::Bottom => el.h(size).w_full().border_t_1(),
             })
-            .child(div().size_full().overflow_hidden().child(view))
+            // Cached: a panel draws again only when it changed.
+            .child(
+                div()
+                    .size_full()
+                    .overflow_hidden()
+                    .child(view.cached(StyleRefinement::default().size_full())),
+            )
             .child(self.resize_handle(cx))
             .into_any_element()
     }

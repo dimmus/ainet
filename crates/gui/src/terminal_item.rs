@@ -26,13 +26,13 @@ use ui::{ContextMenu, Indicator, Tooltip, prelude::*};
 
 use crate::actions::{MessageAgent, terminal};
 use crate::critter::{Animation, Critter};
-use crate::fleet::{FleetModel, Tick};
+use crate::fleet::{FleetModel, ScreenChanged, Tick};
 use crate::item::{Item, ItemEvent, TabContentParams};
 use crate::panels::state_color;
 use crate::settings::{self, Blinking};
-use crate::terminal_element::{Geometry, TerminalElement};
+use crate::terminal_element::{Geometry, ShapedRow, TerminalElement};
 use crate::terminal_input::keystroke_bytes;
-use crate::terminal_layout::{self, Selection};
+use crate::terminal_layout::{self, RowCache, Selection};
 
 /// How long the layout must hold still before the agent's pane is asked
 /// to take its size: dragging a divider asks once, at the end.
@@ -52,8 +52,8 @@ const SHORT_HISTORY_FOR: Duration = Duration::from_secs(2);
 
 /// Scrollback shown in place of the screen, and what it was laid out for.
 struct HistoryView {
-    /// (scroll, rows, cols, lines available).
-    key: (usize, u16, u16, usize),
+    /// (scroll, rows, cols, lines available, with colours).
+    key: (usize, u16, u16, usize, bool),
     parser: vt100::Parser,
 }
 
@@ -90,6 +90,8 @@ pub struct TerminalItem {
     blink_on: bool,
     blink: Option<Task<()>>,
     context_menu: Option<DeployedMenu>,
+    /// Rows shaped on the frames before, for the element to reuse.
+    row_cache: RowCache<ShapedRow>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -109,6 +111,12 @@ impl TerminalItem {
             cx.observe(&fleet, |_, _, cx| {
                 cx.emit(ItemEvent::UpdateTab);
                 cx.notify();
+            }),
+            // Its screen moved on: only this terminal redraws.
+            cx.subscribe(&fleet, |this: &mut Self, _, changed: &ScreenChanged, cx| {
+                if changed.0 == this.agent {
+                    cx.notify();
+                }
             }),
             cx.subscribe(&fleet, |this: &mut Self, _, _: &Tick, cx| {
                 if this.animation.take() {
@@ -148,6 +156,7 @@ impl TerminalItem {
             blink_on: true,
             blink: None,
             context_menu: None,
+            row_cache: RowCache::default(),
             _subscriptions: subscriptions,
         }
     }
@@ -170,6 +179,22 @@ impl TerminalItem {
                 .get(&self.agent)
                 .map(|p| p.screen()),
         }
+    }
+
+    /// The rows shaped so far, lent to the element while it lays the
+    /// screen out ([`TerminalItem::put_row_cache`] gives them back).
+    pub fn take_row_cache(&mut self) -> RowCache<ShapedRow> {
+        std::mem::take(&mut self.row_cache)
+    }
+
+    pub fn put_row_cache(&mut self, cache: RowCache<ShapedRow>) {
+        self.row_cache = cache;
+    }
+
+    /// Rows found in the cache and rows shaped, so far.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn row_cache_counts(&self) -> (usize, usize) {
+        (self.row_cache.hits, self.row_cache.misses)
     }
 
     pub fn selection(&self) -> Option<&Selection> {
@@ -211,21 +236,23 @@ impl TerminalItem {
             return;
         };
         let fleet = self.fleet.clone();
-        let Some(lines) = fleet.read(cx).store.history.get(&self.agent) else {
+        let store = &fleet.read(cx).store;
+        let Some(lines) = store.history.get(&self.agent) else {
             return;
         };
+        let styled = store.styled_history.get(&self.agent).map(Vec::as_slice);
         let max = terminal_layout::max_scroll(lines.len(), g.rows);
         if max == 0 {
             self.short_history = Some(cx.background_executor().now());
         }
         self.scroll = self.scroll.min(max);
-        let key = (self.scroll, g.rows, g.cols, lines.len());
+        let key = (self.scroll, g.rows, g.cols, lines.len(), styled.is_some());
         if self.scroll == 0 {
             self.history = None;
         } else if self.history.as_ref().is_none_or(|h| h.key != key) {
             self.history = Some(HistoryView {
                 key,
-                parser: terminal_layout::history_screen(lines, self.scroll, g.rows, g.cols),
+                parser: terminal_layout::history_screen(lines, styled, self.scroll, g.rows, g.cols),
             });
         }
     }
@@ -1044,6 +1071,7 @@ mod tests {
                 vec![Msg::History {
                     id: agent.clone(),
                     rows: vec!["only".into()],
+                    styled: None,
                 }],
                 cx,
             )
@@ -1143,5 +1171,97 @@ mod tests {
         // Again: the same grid, not a second one.
         cx.dispatch_action(crate::actions::TileAll);
         assert_eq!(shown(cx), want);
+    }
+
+    /// A screen of `text` lines, as one comes from ainetd.
+    fn screen_msg(agent: &str, text: &str) -> Msg {
+        Msg::Term {
+            id: agent.to_string(),
+            ansi: text.replace('\n', "\r\n"),
+            size: (24, 80),
+            rows: text.lines().map(str::to_string).collect(),
+        }
+    }
+
+    #[gpui::test]
+    async fn only_terminals_whose_screen_changed_draw_again(cx: &mut TestAppContext) {
+        let (w, _, cx) = terminal(cx);
+        let fleet = fleet(&w, cx);
+        cx.dispatch_action(crate::actions::TileAll);
+        cx.run_until_parked();
+        let items: Vec<Entity<TerminalItem>> = w.read_with(cx, |w, cx| {
+            w.panes()
+                .iter()
+                .filter_map(|p| p.read(cx).active_item()?.to_any().downcast::<TerminalItem>().ok())
+                .collect()
+        });
+        assert!(items.len() > 1);
+        let counts = |cx: &mut VisualTestContext| {
+            items
+                .iter()
+                .map(|t| t.read_with(cx, |t, _| t.row_cache_counts()))
+                .collect::<Vec<_>>()
+        };
+        let a = items[0].read_with(cx, |t, _| t.agent_id().to_string());
+        let notified = std::rc::Rc::new(std::cell::Cell::new(0));
+        let _watch = cx.update(|_, cx| {
+            let notified = notified.clone();
+            cx.observe(&fleet, move |_, _| notified.set(notified.get() + 1))
+        });
+
+        // A new screen for one agent: its terminal draws, no other does,
+        // and the fleet itself changed nothing to redraw for.
+        let before = counts(cx);
+        let text = "one\ntwo\nthree";
+        fleet.update(cx, |f, cx| f.receive(vec![screen_msg(&a, text)], cx));
+        cx.run_until_parked();
+        let after = counts(cx);
+        assert_ne!(after[0], before[0], "it drew");
+        assert_eq!(after[1..], before[1..], "the others did not");
+        assert_eq!(notified.get(), 0);
+
+        // One row changed: only that row is shaped again.
+        let (hits, misses) = after[0];
+        fleet.update(cx, |f, cx| f.receive(vec![screen_msg(&a, "one\nTWO\nthree")], cx));
+        cx.run_until_parked();
+        let (more_hits, more_misses) = counts(cx)[0];
+        assert_eq!(more_misses, misses + 1);
+        assert!(more_hits > hits + 2, "the other rows came from the cache");
+
+        // Another theme: every row is shaped anew, in its colours (the
+        // blank ones once, as they look the same).
+        cx.update(|_, cx| crate::settings::reload(r#"{ "theme": "One Light" }"#, cx));
+        cx.run_until_parked();
+        let (_, themed) = counts(cx)[0];
+        assert_eq!(themed, more_misses + 4, "one, TWO, three and a blank row");
+    }
+
+    #[gpui::test]
+    async fn scrollback_keeps_its_colours(cx: &mut TestAppContext) {
+        let (w, item, cx) = terminal(cx);
+        let fleet = fleet(&w, cx);
+        let agent = item.read_with(cx, |t, _| t.agent_id().to_string());
+        let rows: Vec<String> = (1..=60).map(|i| format!("line {i}")).collect();
+        let styled: Vec<String> = (1..=60).map(|i| format!("\x1b[0;32mline\x1b[0m {i}")).collect();
+        // Scrolled back, the scrollback is asked for (the demo's comes
+        // plain); ainetd's comes with colours.
+        item.update(cx, |t, cx| t.scroll_by(5, cx));
+        cx.run_until_parked();
+        fleet.update(cx, |f, cx| {
+            f.receive(
+                vec![Msg::History {
+                    id: agent.clone(),
+                    rows,
+                    styled: Some(styled),
+                }],
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        let green = item.read_with(cx, |t, cx| {
+            assert!(t.scrolled() > 0);
+            t.screen(cx).unwrap().cell(0, 0).unwrap().fgcolor()
+        });
+        assert_eq!(green, vt100::Color::Idx(2));
     }
 }

@@ -66,6 +66,9 @@ pub enum Change {
     Term(String),
     /// Scrollback for an agent's terminal arrived.
     History(String),
+    /// A streamed terminal (`Link::attach`) stopped streaming: which, and
+    /// the stream's number.
+    Detached { id: String, stream: u64 },
     /// Messages, chat or the queue changed.
     Comms,
     /// A notice for the user.
@@ -134,6 +137,9 @@ pub struct Store {
     /// The scrollback last fetched per agent: rows above the screen, then
     /// the screen, as plain text.
     pub history: HashMap<String, Vec<String>>,
+    /// The same rows with their colours, when the daemon sent them: text
+    /// with SGR sequences, each starting from the default attributes.
+    pub styled_history: HashMap<String, Vec<String>>,
     pub connected: bool,
 }
 
@@ -175,10 +181,15 @@ impl Store {
                 self.screens.insert(id.clone(), rows);
                 Change::Term(id)
             }
-            Msg::History { id, rows } => {
+            Msg::History { id, rows, styled } => {
+                match styled.filter(|s| s.len() == rows.len()) {
+                    Some(styled) => self.styled_history.insert(id.clone(), styled),
+                    None => self.styled_history.remove(&id),
+                };
                 self.history.insert(id.clone(), rows);
                 Change::History(id)
             }
+            Msg::Detached { id, stream } => Change::Detached { id, stream },
             Msg::Flash(text, err) => Change::Flash(text, err),
             Msg::Popup(title, text) => Change::Popup(title, text),
             Msg::Reply { token, reply } => Change::Reply { token, reply },
@@ -221,6 +232,15 @@ impl Store {
                 Change::InboxResolved
             }
             Event::Output { agent } => Change::Output(agent),
+            // A streamed terminal (`Link::attach`): its screen moves on
+            // with what the program printed.
+            Event::Bytes { agent, data } => match self.terms.get_mut(&agent) {
+                Some(parser) => {
+                    parser.process(data.as_bytes());
+                    Change::Term(agent)
+                }
+                None => Change::None,
+            },
             Event::Rig { rig } => {
                 self.rigs.insert(rig.name.clone(), rig);
                 self.rebuild();
@@ -1249,8 +1269,48 @@ mod tests {
         let change = store.apply(Msg::History {
             id: "a".into(),
             rows: vec!["older".into(), "hello".into()],
+            styled: Some(vec!["\x1b[0;31molder\x1b[m".into(), "hello".into()]),
         });
         assert_eq!(change, Change::History("a".into()));
         assert_eq!(store.history["a"], ["older", "hello"]);
+        assert_eq!(store.styled_history["a"][0], "\x1b[0;31molder\x1b[m");
+        // From a daemon without colours, plain only.
+        store.apply(Msg::History {
+            id: "a".into(),
+            rows: vec!["older".into()],
+            styled: None,
+        });
+        assert!(!store.styled_history.contains_key("a"));
+    }
+
+    #[test]
+    fn streamed_bytes_move_the_screen_on() {
+        let mut store = Store::new();
+        let bytes = |data: &str| {
+            Msg::Event(Box::new(Event::Bytes {
+                agent: "a".into(),
+                data: data.into(),
+            }))
+        };
+        // Before its screen came there is nothing to add to.
+        assert_eq!(store.apply(bytes("lost")), Change::None);
+        store.apply(Msg::Term {
+            id: "a".into(),
+            ansi: "one".into(),
+            size: (3, 20),
+            rows: vec!["one".into()],
+        });
+        assert_eq!(store.apply(bytes("\r\ntwo")), Change::Term("a".into()));
+        assert_eq!(store.terms["a"].screen().contents(), "one\ntwo");
+        assert_eq!(
+            store.apply(Msg::Detached {
+                id: "a".into(),
+                stream: 7
+            }),
+            Change::Detached {
+                id: "a".into(),
+                stream: 7
+            }
+        );
     }
 }

@@ -12,5 +12,8 @@ ainet-critter.workspace = true
 anyhow.workspace = true
 vt100.workspace = true
 
+[dev-dependencies]
+serde_json.workspace = true
+
 [lints]
 workspace = true

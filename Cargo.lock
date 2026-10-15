@@ -66,6 +66,7 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+ "vt100",
 ]
 
 [[package]]
@@ -75,6 +76,7 @@ dependencies = [
  "ainet-core",
  "ainet-critter",
  "anyhow",
+ "serde_json",
  "vt100",
 ]
 
