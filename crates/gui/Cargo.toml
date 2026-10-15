@@ -1,0 +1,34 @@
+[package]
+name = "ainet-gui"
+description = "The ainet desktop app: a Zed-style control room for teams of coding agents, on GPUI and Zed's UI components"
+version.workspace = true
+edition.workspace = true
+# GPUI and Zed's ui/theme crates follow Zed's toolchain.
+rust-version = "1.98"
+# Links Zed's GPL-3.0-or-later `ui` and `theme` crates; the rest of the
+# workspace stays MIT. See docs/GUI-PLAN.md.
+license = "GPL-3.0-or-later"
+repository.workspace = true
+
+[[bin]]
+name = "ainet-gui"
+path = "src/main.rs"
+
+[dependencies]
+ainet-core.workspace = true
+ainet-model.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+futures = "0.3"
+# Zed, pinned to one release; upgrade all four together (docs/GUI.md).
+gpui = { git = "https://github.com/zed-industries/zed", tag = "v1.24.2" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", tag = "v1.24.2", features = ["font-kit", "wayland", "x11"] }
+theme = { git = "https://github.com/zed-industries/zed", tag = "v1.24.2" }
+ui = { git = "https://github.com/zed-industries/zed", tag = "v1.24.2" }
+
+[dev-dependencies]
+# Headless app and window contexts for tests (`#[gpui::test]`).
+gpui = { git = "https://github.com/zed-industries/zed", tag = "v1.24.2", features = ["test-support"] }
+
+[lints]
+workspace = true

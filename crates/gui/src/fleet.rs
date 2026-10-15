@@ -1,0 +1,300 @@
+//! The fleet as a GPUI entity: `ainet-model`'s [`Store`], kept current by a
+//! [`Link`] to ainetd (or the demo), plus the notices a front end shows as
+//! toasts. Views read it and re-render when it notifies.
+
+use std::collections::VecDeque;
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+use ainet_model::{Backend, Change, Link, Msg, Store, Tally, daemon};
+use futures::StreamExt;
+use futures::channel::mpsc::UnboundedReceiver;
+use gpui::{AppContext as _, AsyncApp, Context, Task, WeakEntity};
+
+use crate::sink::{self, ChannelSink};
+
+/// How often the demo fleet moves on, as in the TUI.
+pub const TICK: Duration = Duration::from_millis(120);
+
+/// How long a flash stays in the status bar.
+const FLASH_FOR: Duration = Duration::from_secs(5);
+
+/// How many notices are kept for later toasts and a log.
+const KEEP_NOTICES: usize = 64;
+
+/// Where the connection to the fleet stands.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Connection {
+    /// The pretend fleet; nothing is real.
+    Demo,
+    /// Looking for the console binary and starting ainetd.
+    Starting,
+    Connected,
+    /// Following the socket, but ainetd is not answering; it retries.
+    Offline,
+    /// ainetd could not be started; why. The socket is still followed, so a
+    /// daemon started by hand is picked up.
+    Failed(String),
+}
+
+/// Something the user should hear about: a daemon flash, a report, a change
+/// in the connection.
+#[derive(Clone, Debug)]
+pub struct Notice {
+    /// For reports (`ainet ps`-like replies): their title.
+    pub title: Option<String>,
+    pub text: String,
+    pub error: bool,
+    pub at: Instant,
+}
+
+pub struct FleetModel {
+    pub store: Store,
+    link: Option<Link<ChannelSink>>,
+    demo: bool,
+    /// Why ainetd could not be started, until it connects anyway.
+    problem: Option<String>,
+    tick: u64,
+    notices: VecDeque<Notice>,
+    _tasks: Vec<Task<()>>,
+}
+
+impl FleetModel {
+    /// The pretend fleet, moving on every [`TICK`].
+    pub fn demo(cx: &mut Context<Self>) -> Self {
+        let (sink, rx) = sink::channel();
+        let (link, snapshot) = Link::new(Backend::Demo(Box::default()), sink);
+        let mut model = FleetModel::empty(true);
+        model.link = Some(link);
+        if let Some(snapshot) = snapshot {
+            model.store.connected = true;
+            model.store.apply(Msg::Snapshot(Box::new(snapshot)));
+        }
+        model._tasks.push(drain(rx, cx));
+        model
+            ._tasks
+            .push(cx.spawn(async move |this, cx| ticker(this, cx).await));
+        model
+    }
+
+    /// ainetd at `socket`: starts it through the console binary (off the UI
+    /// thread), then follows it. If it cannot be started, the reason shows
+    /// in the status bar and on stderr, and the socket is followed anyway.
+    pub fn daemon(socket: PathBuf, cx: &mut Context<Self>) -> Self {
+        let mut model = FleetModel::empty(false);
+        let start = cx.background_spawn({
+            let socket = socket.clone();
+            async move { start_daemon(&socket) }
+        });
+        model._tasks.push(cx.spawn(async move |this, cx| {
+            let outcome = start.await;
+            let _ = this.update(cx, |model, cx| model.follow(socket, outcome, cx));
+        }));
+        model
+    }
+
+    fn empty(demo: bool) -> Self {
+        FleetModel {
+            store: Store::new(),
+            link: None,
+            demo,
+            problem: None,
+            tick: 0,
+            notices: VecDeque::new(),
+            _tasks: Vec::new(),
+        }
+    }
+
+    fn follow(&mut self, socket: PathBuf, started: Result<(), String>, cx: &mut Context<Self>) {
+        if let Err(problem) = started {
+            eprintln!("ainet-gui: {problem}");
+            self.problem = Some(problem);
+        }
+        let (sink, rx) = sink::channel();
+        let (link, _) = Link::new(Backend::Daemon(socket), sink);
+        self.link = Some(link);
+        self._tasks.push(drain(rx, cx));
+        cx.notify();
+    }
+
+    pub fn connection(&self) -> Connection {
+        if self.demo {
+            Connection::Demo
+        } else if self.store.connected {
+            Connection::Connected
+        } else if let Some(problem) = &self.problem {
+            Connection::Failed(problem.clone())
+        } else if self.link.is_none() {
+            Connection::Starting
+        } else {
+            Connection::Offline
+        }
+    }
+
+    pub fn tally(&self) -> Tally {
+        self.store.tally()
+    }
+
+    /// The latest flash, while it is fresh.
+    pub fn flash(&self) -> Option<&Notice> {
+        self.notices
+            .back()
+            .filter(|n| n.title.is_none() && n.at.elapsed() < FLASH_FOR)
+    }
+
+    /// Selects an agent in the Fleet.
+    pub fn select(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.store.agents.contains_key(id) && self.store.selected.as_deref() != Some(id) {
+            self.store.selected = Some(id.to_string());
+            cx.notify();
+        }
+    }
+
+    /// Applies messages from the link, then re-renders once.
+    fn apply(&mut self, msgs: Vec<Msg>, cx: &mut Context<Self>) {
+        for msg in msgs {
+            match self.store.apply(msg) {
+                Change::Flash(text, error) => self.notice(None, text, error, cx),
+                Change::Popup(title, text) => self.notice(Some(title), text, false, cx),
+                Change::Connected(up) => {
+                    if up {
+                        self.problem = None;
+                    }
+                    let text = if up {
+                        "connected to ainetd"
+                    } else {
+                        "lost ainetd; retrying"
+                    };
+                    self.notice(None, text.into(), !up, cx);
+                }
+                _ => {}
+            }
+        }
+        cx.notify();
+    }
+
+    fn notice(&mut self, title: Option<String>, text: String, error: bool, cx: &mut Context<Self>) {
+        if self.notices.len() == KEEP_NOTICES {
+            self.notices.pop_front();
+        }
+        let flash = title.is_none();
+        self.notices.push_back(Notice {
+            title,
+            text,
+            error,
+            at: Instant::now(),
+        });
+        // Re-render once the flash has gone stale, so it leaves the status bar.
+        if flash {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(FLASH_FOR).await;
+                let _ = this.update(cx, |_, cx| cx.notify());
+            })
+            .detach();
+        }
+    }
+
+    fn on_tick(&mut self) {
+        self.tick += 1;
+        if let Some(link) = &mut self.link {
+            link.tick(self.tick);
+        }
+    }
+}
+
+/// Finds the console binary and starts ainetd with it. Blocking: runs on
+/// the background executor.
+fn start_daemon(socket: &std::path::Path) -> Result<(), String> {
+    let Some(ainet) = daemon::console_binary() else {
+        return Err(
+            "cannot start ainetd: the console binary `ainet` is not next to ainet-gui, on PATH or in $AINET_BIN"
+                .into(),
+        );
+    };
+    daemon::ensure_daemon(socket, &ainet).map_err(|e| format!("cannot start ainetd: {e:#}"))
+}
+
+/// Applies whatever the link sends, in batches, until the link is gone.
+fn drain(mut rx: UnboundedReceiver<Msg>, cx: &mut Context<FleetModel>) -> Task<()> {
+    cx.spawn(async move |this, cx| {
+        while let Some(first) = rx.next().await {
+            let mut batch = vec![first];
+            while let Ok(msg) = rx.try_recv() {
+                batch.push(msg);
+            }
+            if this.update(cx, |model, cx| model.apply(batch, cx)).is_err() {
+                return;
+            }
+        }
+    })
+}
+
+/// Moves the demo fleet on; stops when the model is dropped.
+async fn ticker(this: WeakEntity<FleetModel>, cx: &mut AsyncApp) {
+    loop {
+        cx.background_executor().timer(TICK).await;
+        if this.update(cx, |model, _| model.on_tick()).is_err() {
+            return;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::TestAppContext;
+
+    use super::*;
+
+    #[gpui::test]
+    async fn keeps_flashes_reports_and_connection_changes(cx: &mut TestAppContext) {
+        let fleet = cx.new(|_| FleetModel::empty(false));
+        fleet.update(cx, |f, cx| {
+            f.apply(
+                vec![
+                    Msg::Connected(true),
+                    Msg::Popup("ps".into(), "2 rigs".into()),
+                    Msg::Flash("bad seat".into(), true),
+                ],
+                cx,
+            )
+        });
+        fleet.read_with(cx, |f, _| {
+            let texts: Vec<_> = f.notices.iter().map(|n| n.text.as_str()).collect();
+            assert_eq!(texts, ["connected to ainetd", "2 rigs", "bad seat"]);
+            assert_eq!(f.notices[1].title.as_deref(), Some("ps"));
+            let flash = f.flash().expect("a fresh flash");
+            assert!(flash.error && flash.text == "bad seat");
+            assert_eq!(f.connection(), Connection::Connected);
+        });
+
+        // Only so many are kept.
+        fleet.update(cx, |f, cx| {
+            let many = (0..KEEP_NOTICES + 5)
+                .map(|i| Msg::Flash(format!("n{i}"), false))
+                .collect();
+            f.apply(many, cx)
+        });
+        fleet.read_with(cx, |f, _| {
+            assert_eq!(f.notices.len(), KEEP_NOTICES);
+            assert_eq!(f.notices.back().unwrap().text, format!("n{}", KEEP_NOTICES + 4));
+        });
+    }
+
+    #[gpui::test]
+    async fn a_failed_start_shows_until_ainetd_answers(cx: &mut TestAppContext) {
+        let fleet = cx.new(|_| FleetModel::empty(false));
+        fleet.read_with(cx, |f, _| assert_eq!(f.connection(), Connection::Starting));
+        fleet.update(cx, |f, cx| {
+            f.problem = Some("cannot start ainetd: no ainet".into());
+            cx.notify();
+        });
+        fleet.read_with(cx, |f, _| {
+            assert_eq!(
+                f.connection(),
+                Connection::Failed("cannot start ainetd: no ainet".into())
+            )
+        });
+        fleet.update(cx, |f, cx| f.apply(vec![Msg::Connected(true)], cx));
+        fleet.read_with(cx, |f, _| assert_eq!(f.connection(), Connection::Connected));
+    }
+}
