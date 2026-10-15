@@ -290,17 +290,41 @@ mod tests {
     }
 
     #[gpui::test]
-    fn a_focused_terminal_gets_every_ctrl_letter(cx: &mut TestAppContext) {
+    fn a_focused_terminal_gets_every_ctrl_letter_and_the_list_keys(cx: &mut TestAppContext) {
         cx.update(|cx| {
             for path in ["keymaps/default-linux.json", "keymaps/default-macos.json"] {
                 let (bound, _) = bindings(&parse(&Assets::text(path).unwrap()).unwrap(), cx);
                 let keymap = gpui::Keymap::new(bound);
                 let stack = ["Workspace", "Terminal"].map(|c| gpui::KeyContext::parse(c).unwrap());
-                for key in ('a'..='z').map(String::from).chain(["\\".into()]) {
-                    let keystroke = gpui::Keystroke::parse(&format!("ctrl-{key}")).unwrap();
+                let ctrl = ('a'..='z')
+                    .map(String::from)
+                    .chain(["\\".into()])
+                    .map(|k| format!("ctrl-{k}"));
+                let plain = [
+                    "escape",
+                    "enter",
+                    "tab",
+                    "shift-tab",
+                    "backspace",
+                    "up",
+                    "down",
+                    "left",
+                    "right",
+                    "home",
+                    "end",
+                    "pageup",
+                    "pagedown",
+                    "delete",
+                    "a",
+                    "j",
+                    "space",
+                ]
+                .map(String::from);
+                for keys in ctrl.chain(plain) {
+                    let keystroke = gpui::Keystroke::parse(&keys).unwrap();
                     let (found, _) = keymap.bindings_for_input(&[keystroke], &stack);
                     let names: Vec<_> = found.iter().map(|b| b.action().name()).collect();
-                    assert!(names.is_empty(), "{path}: ctrl-{key} is bound to {names:?}");
+                    assert!(names.is_empty(), "{path}: {keys} is bound to {names:?}");
                 }
             }
         });

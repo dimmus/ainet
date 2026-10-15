@@ -88,6 +88,13 @@
       "ctrl-w": null,
       "ctrl-y": null,
       "ctrl-\\": null,
+      // The list keys (menu::*) are the agent's too.
+      "escape": null,
+      "enter": null,
+      "up": null,
+      "down": null,
+      "home": null,
+      "end": null,
       "ctrl-shift-c": "terminal::Copy",
       "ctrl-shift-v": "terminal::Paste",
       "shift-insert": "terminal::Paste",

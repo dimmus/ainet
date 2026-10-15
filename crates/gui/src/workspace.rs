@@ -9,7 +9,7 @@
 //! splitting, moving between and zooming panes, opening tabs, modals, and
 //! the pane actions when the keyboard is outside the panes.
 
-use ainet_model::{AgentCommand, command};
+use ainet_model::{AgentCommand, command, terminal};
 use gpui::{
     Bounds, DragMoveEvent, Entity, FocusHandle, Focusable, Pixels, PromptLevel, Subscription, WeakEntity,
     canvas,
@@ -21,8 +21,8 @@ use crate::actions::{
     ActivatePaneUp, ActivatePreviousItem, ActivatePreviousPane, Capture, CloseActiveItem, CloseAgent,
     CloseAllItems, CloseOtherItems, CloseWindow, Continue, MessageAgent, OpenComms, OpenInbox, OpenKeymap,
     OpenMap, OpenSettings, OpenTerminal, Relaunch, SelectNext, SelectPrev, ShowTranscript, SplitDown,
-    SplitRight, ToggleBottomDock, ToggleCritterSize, ToggleLeftDock, ToggleRightDock, ToggleSwitcher,
-    ToggleTypingGuard, ToggleZoom, terminal,
+    SplitRight, TileAll, ToggleBottomDock, ToggleCritterSize, ToggleLeftDock, ToggleRightDock,
+    ToggleSwitcher, ToggleTypingGuard, ToggleZoom, terminal as terminal_actions,
 };
 use crate::agent_panel::AgentPanel;
 use crate::args::View;
@@ -30,7 +30,7 @@ use crate::decorations::client_side_decorations;
 use crate::dock::{Dock, DockPosition, DraggedDock, Panel, RESIZE_HANDLE_SIZE};
 use crate::fleet::FleetModel;
 use crate::fleet_panel::FleetPanel;
-use crate::item::Placeholder;
+use crate::item::{ItemHandle, Placeholder};
 use crate::message::MessageModal;
 use crate::modal_layer::{ModalLayer, ModalView};
 use crate::pane::{Pane, PaneEvent};
@@ -40,6 +40,7 @@ use crate::picker::Picker;
 use crate::settings::{self, DockSide};
 use crate::status_bar::StatusBar;
 use crate::switcher::AgentSwitcher;
+use crate::terminal_element::Metrics as TerminalMetrics;
 use crate::terminal_item::TerminalItem;
 use crate::title_bar::TitleBar;
 use crate::toast_layer::ToastLayer;
@@ -485,9 +486,109 @@ impl Workspace {
             }
         }
         let (fleet, id) = (self.fleet.clone(), id.to_string());
-        let item = cx.new(|cx| TerminalItem::new(fleet, id, cx));
+        let item = cx.new(|cx| TerminalItem::new(fleet, id, window, cx));
         self.active_pane
             .update(cx, |p, cx| p.add_item(Box::new(item), true, true, window, cx));
+    }
+
+    /// Lays out every live terminal of the selected agent's rig (all of
+    /// them if it has none) as a grid of panes, as the TUI's Terminals
+    /// view: the first in the active pane, the rest split off it in rows
+    /// of terminal-shaped tiles. Panes left from tiling before, holding
+    /// only these terminals, make way.
+    pub fn tile_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.zoom_out(cx);
+        let store = &self.fleet.read(cx).store;
+        let rig = store.selected_agent().and_then(|a| a.rig.clone());
+        let ids = store.terminal_ids(rig.as_deref());
+        let Some(first) = ids.first().cloned() else {
+            let text = match rig {
+                Some(rig) => format!("no live terminals in rig {rig}"),
+                None => "no live terminals".to_string(),
+            };
+            self.fleet.update(cx, |fleet, cx| fleet.show(text, false, cx));
+            return;
+        };
+        let terminal_of = |item: &dyn ItemHandle, cx: &App| {
+            item.to_any()
+                .downcast::<TerminalItem>()
+                .ok()
+                .map(|t| t.read(cx).agent_id().to_string())
+        };
+        for pane in self.panes() {
+            let only_these = pane
+                .read(cx)
+                .items()
+                .all(|item| terminal_of(item, cx).is_some_and(|agent| ids.contains(&agent)));
+            if pane != self.active_pane && only_these {
+                pane.update(cx, |p, cx| p.close_all_items(window, cx));
+                self.center.remove(&pane);
+            }
+        }
+
+        // Shaped by the room the center has, in terminal cells.
+        let (width, height) = match self.center.bounding_box_for_pane(&self.active_pane) {
+            Some(b) => (b.size.width, b.size.height),
+            None => (self.bounds.size.width, self.bounds.size.height),
+        };
+        let cell = TerminalMetrics::new(window, cx).cell;
+        let cols = terminal::grid_cols(
+            ids.len(),
+            f64::from(width / cell.width),
+            f64::from(height / cell.height),
+            None,
+        );
+        let rows: Vec<&[String]> = ids.chunks(cols).collect();
+
+        let anchor = self.active_pane.clone();
+        let existing = anchor
+            .read(cx)
+            .items()
+            .position(|item| terminal_of(item, cx).as_deref() == Some(&first));
+        match existing {
+            Some(ix) => anchor.update(cx, |p, cx| p.activate_item(ix, false, window, cx)),
+            None => {
+                let item = self.new_terminal(&first, window, cx);
+                anchor.update(cx, |p, cx| p.add_item(item, true, false, window, cx));
+            }
+        }
+        // The rows first, one below the other, then each row's tiles.
+        let mut row_starts = vec![anchor.clone()];
+        for row in &rows[1..] {
+            let above = row_starts.last().cloned().unwrap_or_else(|| anchor.clone());
+            let item = self.new_terminal(&row[0], window, cx);
+            row_starts.push(self.split_with(&above, SplitDirection::Down, item, window, cx));
+        }
+        for (row, start) in rows.iter().zip(row_starts) {
+            let mut last = start;
+            for id in &row[1..] {
+                let item = self.new_terminal(id, window, cx);
+                last = self.split_with(&last, SplitDirection::Right, item, window, cx);
+            }
+        }
+        self.active_pane = anchor.clone();
+        window.focus(&anchor.focus_handle(cx), cx);
+        cx.notify();
+    }
+
+    fn new_terminal(&self, id: &str, window: &mut Window, cx: &mut Context<Self>) -> Box<dyn ItemHandle> {
+        let (fleet, id) = (self.fleet.clone(), id.to_string());
+        Box::new(cx.new(|cx| TerminalItem::new(fleet, id, window, cx)))
+    }
+
+    /// Splits `pane` with a new pane holding `item`.
+    fn split_with(
+        &mut self,
+        pane: &Entity<Pane>,
+        direction: SplitDirection,
+        item: Box<dyn ItemHandle>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<Pane> {
+        let new = self.add_pane(window, cx);
+        new.update(cx, |p, cx| p.add_item(item, true, false, window, cx));
+        self.center.split(pane, &new, direction);
+        new
     }
 
     /// The selected agent's id.
@@ -680,6 +781,7 @@ impl Render for Workspace {
             })
             .on_action(cx.listener(|this, _: &ToggleSwitcher, window, cx| this.toggle_switcher(window, cx)))
             // The selected agent's actions, from the Fleet's keys and menu.
+            .on_action(cx.listener(|this, _: &TileAll, window, cx| this.tile_all(window, cx)))
             .on_action(cx.listener(|this, _: &OpenTerminal, window, cx| {
                 if let Some(id) = this.selected(cx) {
                     this.open_terminal(&id, window, cx);
@@ -740,7 +842,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &ToggleZoom, window, cx| {
                 this.on_active_pane(window, cx, Pane::toggle_zoom)
             }))
-            .on_action(cx.listener(|this, _: &terminal::ToggleZoom, window, cx| {
+            .on_action(cx.listener(|this, _: &terminal_actions::ToggleZoom, window, cx| {
                 this.on_active_pane(window, cx, Pane::toggle_zoom)
             }))
             .on_action(cx.listener(|this, _: &ActivateNextPane, window, cx| {

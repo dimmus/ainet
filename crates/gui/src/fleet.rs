@@ -4,22 +4,31 @@
 //! re-render when it notifies; requests go out through it. It also keeps
 //! the animation clock: a [`Tick`] every [`TICK`], which moves the demo on
 //! and the critters of views that are showing some.
+//!
+//! Terminals on show register here: their screens are fetched when their
+//! agent prints something, at most every `terminal::FETCH_EVERY` each (the
+//! TUI's pump), and ainetd is told when you are at one (`Interact`).
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use ainet_core::Request;
 use ainet_core::client::Client;
-use ainet_model::{Backend, Change, Command, Link, Msg, Store, Tally, daemon};
+use ainet_model::{Backend, Change, Command, Link, Msg, Pump, Store, Tally, daemon};
 use futures::StreamExt;
 use futures::channel::mpsc::UnboundedReceiver;
-use gpui::{AppContext as _, AsyncApp, Context, EventEmitter, Task, WeakEntity};
+use gpui::{AppContext as _, AsyncApp, Context, EntityId, EventEmitter, Subscription, Task, WeakEntity};
 
 use crate::sink::{self, ChannelSink};
 
 /// How often the demo fleet and the critters move on, as in the TUI.
 pub const TICK: Duration = Duration::from_millis(120);
+
+/// How long the keyboard must stay before ainetd hears which terminals you
+/// are at: moving between two views of one agent, or through a pane on the
+/// way to its tab, tells it nothing.
+pub const INTERACT_SETTLE: Duration = Duration::from_millis(50);
 
 /// How many notices are kept for later toasts and a log.
 const KEEP_NOTICES: usize = 64;
@@ -84,10 +93,26 @@ pub struct FleetModel {
     rechecking: bool,
     tick: u64,
     notices: VecDeque<Notice>,
-    /// Every request sent, for tests.
+    /// The terminals on show: the agent each item (by entity) shows.
+    shown: HashMap<EntityId, String>,
+    /// Which shown screens are stale, and the sizes asked of their panes.
+    pump: Pump,
+    /// The next round of fetches, while some screen waits for its turn.
+    pump_task: Option<Task<()>>,
+    /// The items that have the keyboard, per agent, and the agents ainetd
+    /// was told you are at; told after the focus settles.
+    at: HashMap<String, HashSet<EntityId>>,
+    told: HashSet<String>,
+    telling: Option<Task<()>>,
+    /// Every request sent, quiet ones and screen fetches with scrollback
+    /// included, for tests.
     #[cfg(test)]
     pub sent: Vec<(Request, String)>,
+    /// Every screen fetched, for tests.
+    #[cfg(test)]
+    pub fetched: Vec<(String, (u16, u16))>,
     _tasks: Vec<Task<()>>,
+    _quit: Option<Subscription>,
 }
 
 impl FleetModel {
@@ -129,6 +154,7 @@ impl FleetModel {
             let outcome = start.await;
             let _ = this.update(cx, |model, cx| model.follow(socket, outcome, cx));
         }));
+        model._quit = Some(cx.on_app_quit(Self::leave_terminals));
         model
     }
 
@@ -148,9 +174,18 @@ impl FleetModel {
             rechecking: false,
             tick: 0,
             notices: VecDeque::new(),
+            shown: HashMap::new(),
+            pump: Pump::new(),
+            pump_task: None,
+            at: HashMap::new(),
+            told: HashSet::new(),
+            telling: None,
             #[cfg(test)]
             sent: Vec::new(),
+            #[cfg(test)]
+            fetched: Vec::new(),
             _tasks: Vec::new(),
+            _quit: None,
         }
     }
 
@@ -237,11 +272,162 @@ impl FleetModel {
         }
     }
 
-    /// Asks for a fresh screen of `id`'s terminal, at `size` (rows, cols)
-    /// for the demo, which draws one. It lands in the store's screens.
-    pub fn fetch_screen(&self, id: &str, size: (u16, u16)) {
-        if let (Some(link), Some(agent)) = (&self.link, self.store.agents.get(id)) {
-            link.fetch(agent, self.tick, size);
+    /// A request only ainetd acts on (keystrokes, resizes), sent quietly.
+    pub fn quiet(&mut self, req: Request) {
+        #[cfg(test)]
+        self.sent.push((req.clone(), String::new()));
+        if let Some(link) = &self.link {
+            link.quiet(req);
+        }
+    }
+
+    /// Item `item` shows agent `agent`'s terminal: its screen is fetched
+    /// now and whenever the agent prints something.
+    pub fn show_terminal(&mut self, item: EntityId, agent: &str, cx: &mut Context<Self>) {
+        self.shown.insert(item, agent.to_string());
+        self.refresh_terminal(agent, cx);
+    }
+
+    /// Item `item` no longer shows a terminal (hidden, closed or gone).
+    pub fn hide_terminal(&mut self, item: EntityId) {
+        self.shown.remove(&item);
+    }
+
+    /// Whether some item shows `agent`'s terminal.
+    pub fn is_shown(&self, agent: &str) -> bool {
+        self.shown.values().any(|a| a == agent)
+    }
+
+    /// `agent`'s screen is stale: fetch it as soon as its turn comes.
+    pub fn refresh_terminal(&mut self, agent: &str, cx: &mut Context<Self>) {
+        self.pump.mark(agent);
+        self.pump(cx);
+    }
+
+    /// `agent`'s terminal was laid out at `size` (rows, cols): asks its
+    /// pane to take that size, once per change, and fetches the screen.
+    pub fn resize_terminal(&mut self, agent: &str, size: (u16, u16), cx: &mut Context<Self>) {
+        if self.pump.resize(agent, size) {
+            self.quiet(Request::Resize {
+                agent: agent.to_string(),
+                rows: size.0,
+                cols: size.1,
+            });
+            self.pump(cx);
+        }
+    }
+
+    /// The size `agent`'s pane was asked to take.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn terminal_size(&self, agent: &str) -> (u16, u16) {
+        self.pump.size(agent)
+    }
+
+    /// Types `bytes` into `agent`'s terminal; its screen is fetched after.
+    pub fn input(&mut self, agent: &str, bytes: &[u8], cx: &mut Context<Self>) {
+        self.quiet(Request::Input {
+            agent: agent.to_string(),
+            data: String::from_utf8_lossy(bytes).into_owned(),
+        });
+        self.refresh_terminal(agent, cx);
+    }
+
+    /// Asks for up to `lines` rows of `agent`'s scrollback; they land in
+    /// the store's `history`.
+    pub fn fetch_history(&mut self, agent: &str, lines: usize) {
+        #[cfg(test)]
+        self.sent.push((
+            Request::Screen {
+                agent: agent.to_string(),
+                formatted: false,
+                history: lines,
+            },
+            String::new(),
+        ));
+        if let (Some(link), Some(a)) = (&self.link, self.store.agents.get(agent)) {
+            link.history(a, self.tick, lines);
+        }
+    }
+
+    /// Item `item`, showing `agent`'s terminal, got or lost the keyboard.
+    /// ainetd holds messages for an agent while you are at its terminal;
+    /// it is told once the focus settles ([`INTERACT_SETTLE`]).
+    pub fn set_at_terminal(&mut self, item: EntityId, agent: &str, on: bool, cx: &mut Context<Self>) {
+        let items = self.at.entry(agent.to_string()).or_default();
+        if on {
+            items.insert(item);
+        } else {
+            items.remove(&item);
+        }
+        if self.telling.is_none() {
+            self.telling = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(INTERACT_SETTLE).await;
+                let _ = this.update(cx, |fleet, cx| fleet.tell_interact(cx));
+            }));
+        }
+    }
+
+    /// Tells ainetd which terminals you are at, where that changed.
+    fn tell_interact(&mut self, cx: &mut Context<Self>) {
+        self.telling = None;
+        self.at.retain(|_, items| !items.is_empty());
+        let mut agents: Vec<String> = self.at.keys().chain(&self.told).cloned().collect();
+        agents.sort();
+        agents.dedup();
+        for agent in agents {
+            let on = self.at.contains_key(&agent);
+            if on != self.told.contains(&agent) {
+                if on {
+                    self.told.insert(agent.clone());
+                } else {
+                    self.told.remove(&agent);
+                }
+                self.request(Request::Interact { agent, on }, String::new(), cx);
+            }
+        }
+    }
+
+    /// On quitting: ainetd stops holding messages for the terminals you
+    /// were at, before the app is gone (the usual request would go out on
+    /// a thread the exit cuts short).
+    fn leave_terminals(&mut self, cx: &mut Context<Self>) -> Task<()> {
+        self.at.clear();
+        let agents: Vec<String> = self.told.drain().collect();
+        let Some(socket) = self.socket.clone().filter(|_| !agents.is_empty()) else {
+            return Task::ready(());
+        };
+        cx.background_spawn(async move {
+            for agent in agents {
+                let _ = Client::connect(&socket).and_then(|mut client| {
+                    client.set_timeout(Some(Duration::from_millis(500)))?;
+                    client.call(&Request::Interact { agent, on: false })
+                });
+            }
+        })
+    }
+
+    /// Fetches the stale screens whose turn it is, and comes back when the
+    /// next one's turn comes.
+    fn pump(&mut self, cx: &mut Context<Self>) {
+        if self.pump_task.is_some() {
+            return;
+        }
+        let now = cx.background_executor().now();
+        for (id, size) in self.pump.due(now) {
+            #[cfg(test)]
+            self.fetched.push((id.clone(), size));
+            if let (Some(link), Some(agent)) = (&self.link, self.store.agents.get(&id)) {
+                link.fetch(agent, self.tick, size);
+            }
+        }
+        if let Some(wait) = self.pump.wait(now) {
+            self.pump_task = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(wait).await;
+                let _ = this.update(cx, |fleet, cx| {
+                    fleet.pump_task = None;
+                    fleet.pump(cx);
+                });
+            }));
         }
     }
 
@@ -272,9 +458,11 @@ impl FleetModel {
                     };
                     self.notice(None, text.into(), !up, cx);
                 }
+                Change::Output(agent) if self.is_shown(&agent) => self.pump.mark(&agent),
                 _ => {}
             }
         }
+        self.pump(cx);
         cx.notify();
     }
 
@@ -312,6 +500,11 @@ impl FleetModel {
         self.tick += 1;
         if let Some(link) = &mut self.link {
             link.tick(self.tick);
+        }
+        // The demo's terminals move with the clock, not on output.
+        if self.demo && !self.shown.is_empty() {
+            self.pump.mark_all(self.shown.values().cloned());
+            self.pump(cx);
         }
         cx.emit(Tick);
     }
@@ -407,6 +600,60 @@ mod tests {
             assert_eq!(f.notices.len(), KEEP_NOTICES);
             assert_eq!(f.notices.back().unwrap().text, format!("n{}", KEEP_NOTICES + 4));
         });
+    }
+
+    #[gpui::test]
+    async fn shown_terminals_are_fetched_on_output_at_most_so_often(cx: &mut TestAppContext) {
+        let fleet = cx.new(|_| FleetModel::empty(false));
+        let (a, b) = ("a".to_string(), "b".to_string());
+        let output = |id: &str| Msg::Event(Box::new(ainet_core::Event::Output { agent: id.into() }));
+        let fetched = |cx: &mut TestAppContext| {
+            fleet.update(cx, |f, _| {
+                std::mem::take(&mut f.fetched)
+                    .into_iter()
+                    .map(|(id, _)| id)
+                    .collect::<Vec<_>>()
+            })
+        };
+        let item = fleet.entity_id();
+        fleet.update(cx, |f, cx| f.show_terminal(item, &a, cx));
+        assert_eq!(fetched(cx), [a.as_str()], "fetched when it shows");
+
+        // Output soon after waits its turn, once however much came.
+        fleet.update(cx, |f, cx| f.apply(vec![output(&a), output(&a), output(&b)], cx));
+        cx.run_until_parked();
+        assert!(fetched(cx).is_empty());
+        cx.executor()
+            .advance_clock(ainet_model::terminal::FETCH_EVERY * 2);
+        cx.run_until_parked();
+        assert_eq!(fetched(cx), [a.as_str()], "b is not on show");
+
+        // A new size is asked once, and fetched at it.
+        cx.executor()
+            .advance_clock(ainet_model::terminal::FETCH_EVERY * 2);
+        fleet.update(cx, |f, cx| {
+            f.resize_terminal(&a, (30, 100), cx);
+            f.resize_terminal(&a, (30, 100), cx);
+        });
+        let fetched_at = fleet.update(cx, |f, _| std::mem::take(&mut f.fetched));
+        assert_eq!(fetched_at, [(a.clone(), (30, 100))]);
+        let resizes = fleet.read_with(cx, |f, _| {
+            f.sent
+                .iter()
+                .filter(|(r, _)| matches!(r, Request::Resize { .. }))
+                .count()
+        });
+        assert_eq!(resizes, 1);
+
+        // Hidden: output no longer fetches.
+        fleet.update(cx, |f, cx| {
+            f.hide_terminal(item);
+            f.apply(vec![output(&a)], cx);
+        });
+        cx.executor()
+            .advance_clock(ainet_model::terminal::FETCH_EVERY * 2);
+        cx.run_until_parked();
+        assert!(fetched(cx).is_empty());
     }
 
     #[gpui::test]

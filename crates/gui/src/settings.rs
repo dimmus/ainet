@@ -30,7 +30,8 @@ pub const TEMPLATE: &str = r#"// ainet desktop settings. Every field is optional
   // "ui_font_family": ".ZedSans",
   // "ui_font_size": 16,
   // "ui_density": "default", // or "compact", "comfortable"
-  // "terminal": { "font_family": ".ZedMono", "font_size": 15, "line_height": "standard" },
+  // "terminal": { "font_family": ".ZedMono", "font_size": 15, "line_height": "standard",
+  //               "cursor_shape": "block", "blinking": "on" },
   // "fleet_panel": { "dock": "left", "width": 260 },
   // "critters": { "size": "large" },
   // "confirm_quit": false,
@@ -115,6 +116,8 @@ pub struct TerminalSettings {
     pub font_family: SharedString,
     pub font_size: f32,
     pub line_height: LineHeight,
+    pub cursor_shape: CursorShape,
+    pub blinking: Blinking,
 }
 
 impl Default for TerminalSettings {
@@ -123,8 +126,33 @@ impl Default for TerminalSettings {
             font_family: ".ZedMono".into(),
             font_size: 15.,
             line_height: LineHeight::Standard,
+            cursor_shape: CursorShape::Block,
+            blinking: Blinking::On,
         }
     }
+}
+
+/// The cursor of a focused terminal, with Zed's names.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CursorShape {
+    #[default]
+    Block,
+    Bar,
+    Underline,
+    Hollow,
+}
+
+/// Whether a focused terminal's cursor blinks, with Zed's names. ainetd
+/// does not pass on a program's own blink request, so
+/// `terminal_controlled` keeps the cursor still.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Blinking {
+    Off,
+    #[default]
+    On,
+    TerminalControlled,
 }
 
 /// A terminal's line height, written as in Zed's settings.
@@ -141,8 +169,7 @@ pub enum LineHeight {
 }
 
 impl LineHeight {
-    /// The ratio to the font size. Read by the terminal view (phase 4).
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// The ratio to the font size.
     pub fn ratio(self) -> f32 {
         match self {
             LineHeight::Comfortable => 1.618,
@@ -392,7 +419,7 @@ mod tests {
             {
               "theme": "One Dark", /* inline */
               "ui_font_size": 14,
-              "terminal": { "line_height": { "custom": 1.5 }, },
+              "terminal": { "line_height": { "custom": 1.5 }, "cursor_shape": "bar", "blinking": "off" },
               "fleet_panel": { "dock": "right" },
               "ui_density": "compact",
               "critters": { "size": "small" },
@@ -409,6 +436,8 @@ mod tests {
             "unset fields keep defaults"
         );
         assert_eq!(s.terminal.line_height.ratio(), 1.5);
+        assert_eq!(s.terminal.cursor_shape, CursorShape::Bar);
+        assert_eq!(s.terminal.blinking, Blinking::Off);
         assert_eq!(
             s.fleet_panel,
             FleetPanelSettings {
@@ -423,8 +452,8 @@ mod tests {
 
     #[test]
     fn ignores_unknown_fields() {
-        let s =
-            parse(r#"{ "vim_mode": true, "terminal": { "blinking": "on" }, "ui_font_size": 18 }"#).unwrap();
+        let s = parse(r#"{ "vim_mode": true, "terminal": { "copy_on_select": true }, "ui_font_size": 18 }"#)
+            .unwrap();
         assert_eq!(s.ui_font_size, 18.);
     }
 
@@ -436,6 +465,7 @@ mod tests {
             r#"{ "theme": 3 }"#,
             r#"{ "ui_density": "dense" }"#,
             r#"{ "terminal": { "line_height": "tall" } }"#,
+            r#"{ "terminal": { "cursor_shape": "beam" } }"#,
             r#"{ "ui_font_size": 14 "#,
             "[1, 2]",
         ] {

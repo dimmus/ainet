@@ -37,6 +37,10 @@ serde_json_lenient = "0.2"
 smallvec = "1"
 # Grapheme and word boundaries for the text input.
 unicode-segmentation = "1.13"
+# Cell widths, to cut scrollback lines at a terminal's edge.
+unicode-width = "0.2"
+# Agents' terminal screens, as `ainet-model` keeps them.
+vt100 = "0.16"
 # Zed, pinned to one release; upgrade all of them together (docs/GUI.md).
 gpui = { git = "https://github.com/zed-industries/zed", tag = "v1.24.2" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", tag = "v1.24.2", features = ["font-kit", "wayland", "x11"] }
