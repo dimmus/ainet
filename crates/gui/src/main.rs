@@ -11,6 +11,7 @@ mod docks;
 mod fleet;
 mod keymap;
 mod problems;
+mod quit;
 mod settings;
 mod sink;
 mod status_bar;
@@ -20,14 +21,15 @@ mod watch;
 mod workspace;
 mod zed_theme;
 
+use std::cell::Cell;
+use std::rc::Rc;
+
 use clap::Parser;
 use gpui::{
-    App, AppContext, Bounds, PromptLevel, TitlebarOptions, WindowBounds, WindowDecorations, WindowOptions,
-    point, px, size,
+    App, AppContext, Bounds, TitlebarOptions, WindowBounds, WindowDecorations, WindowOptions, point, px, size,
 };
 use theme::{ActiveTheme, SystemAppearance};
 
-use crate::actions::Quit;
 use crate::args::Args;
 use crate::assets::Assets;
 use crate::fleet::FleetModel;
@@ -43,16 +45,32 @@ fn main() -> std::process::ExitCode {
         );
         return std::process::ExitCode::FAILURE;
     }
-    gpui_platform::application()
-        .with_assets(assets::Assets)
-        .run(move |cx: &mut App| {
+    // GPUI panics when the display named is not there (a stale DISPLAY in
+    // tmux or ssh, a compositor that has gone): say so in one line instead.
+    std::panic::set_hook(Box::new(|info| {
+        let why = info.payload_as_str().unwrap_or("unknown error");
+        eprintln!("ainet-gui: cannot connect to the display: {why}");
+        std::process::exit(1);
+    }));
+    let failed = Rc::new(Cell::new(false));
+    gpui_platform::application().with_assets(assets::Assets).run({
+        let failed = failed.clone();
+        move |cx: &mut App| {
+            // Connected: panics from here on are bugs, reported as usual.
+            drop(std::panic::take_hook());
             init(ConfigFiles::user(), cx);
             if let Err(e) = open_window(&args, cx) {
                 eprintln!("ainet-gui: cannot open a window: {e:#}");
+                failed.set(true);
                 cx.quit();
             }
-        });
-    std::process::ExitCode::SUCCESS
+        }
+    });
+    if failed.get() {
+        std::process::ExitCode::FAILURE
+    } else {
+        std::process::ExitCode::SUCCESS
+    }
 }
 
 /// Whether a Wayland or X11 display is named in the environment. Only Linux
@@ -67,6 +85,7 @@ fn has_display(wayland: &Option<std::ffi::OsString>, x11: &Option<std::ffi::OsSt
 struct ConfigFiles {
     settings: Option<std::path::PathBuf>,
     keymap: Option<std::path::PathBuf>,
+    themes: Option<std::path::PathBuf>,
 }
 
 impl ConfigFiles {
@@ -74,13 +93,14 @@ impl ConfigFiles {
         ConfigFiles {
             settings: Some(settings::settings_file()),
             keymap: Some(keymap::keymap_file()),
+            themes: Some(themes::user_dir()),
         }
     }
 }
 
 /// Fonts, themes, settings, the keymap and the app-wide actions.
 fn init(files: ConfigFiles, cx: &mut App) {
-    let mut startup = themes::init(cx);
+    let mut startup = themes::init(files.themes.as_deref(), cx);
     if let Err(e) = Assets::load_fonts(cx) {
         startup.push(format!("{e:#}"));
     }
@@ -90,35 +110,13 @@ fn init(files: ConfigFiles, cx: &mut App) {
     settings::init(files.settings, cx);
     keymap::init(files.keymap, cx);
 
-    cx.on_action(quit);
+    cx.on_action(quit::quit);
     cx.on_window_closed(|cx, _| {
         if cx.windows().is_empty() {
             cx.quit();
         }
     })
     .detach();
-}
-
-/// Quits, asking first in the active window if `confirm_quit` is set.
-fn quit(_: &Quit, cx: &mut App) {
-    let window = cx.active_window().or_else(|| cx.windows().into_iter().next());
-    let Some(window) = window.filter(|_| settings::get(cx).confirm_quit) else {
-        cx.quit();
-        return;
-    };
-    let asked = window.update(cx, |_, window, cx| {
-        window.prompt(PromptLevel::Info, "Quit ainet?", None, &["Quit", "Cancel"], cx)
-    });
-    match asked {
-        Ok(answer) => cx
-            .spawn(async move |cx| {
-                if answer.await == Ok(0) {
-                    cx.update(|cx| cx.quit());
-                }
-            })
-            .detach(),
-        Err(_) => cx.quit(),
-    }
 }
 
 /// The fleet the window shows: the demo, or ainetd at the chosen socket.
@@ -297,6 +295,26 @@ mod tests {
         });
     }
 
+    #[gpui::test]
+    async fn closing_the_last_window_asks_when_confirm_quit_is_set(cx: &mut TestAppContext) {
+        init_test(cx);
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let fleet = cx.new(FleetModel::demo);
+            Workspace::new(fleet, None, window, cx)
+        });
+        cx.update(|_, cx| settings::reload(r#"{ "confirm_quit": true }"#, cx));
+        cx.dispatch_action(actions::CloseWindow);
+        assert!(cx.has_pending_prompt());
+        cx.simulate_prompt_answer("Cancel");
+        cx.run_until_parked();
+        // The window manager's close asks too, and is refused meanwhile.
+        assert!(!cx.simulate_close());
+        assert!(cx.has_pending_prompt());
+        cx.simulate_prompt_answer("Cancel");
+        cx.run_until_parked();
+        assert_eq!(cx.update(|_, cx| cx.windows().len()), 1);
+    }
+
     #[cfg(not(target_os = "macos"))]
     #[gpui::test]
     async fn default_keys_toggle_docks_and_step_through_the_fleet(cx: &mut TestAppContext) {
@@ -309,9 +327,9 @@ mod tests {
         let docks = |cx: &mut gpui::VisualTestContext| workspace.read_with(cx, |w, _| w.docks());
         assert_eq!(docks(cx), workspace::Docks::default());
         cx.simulate_keystrokes("ctrl-b");
-        assert!(!docks(cx).left && docks(cx).right);
+        assert!(!docks(cx).fleet && docks(cx).agent);
         cx.simulate_keystrokes("ctrl-alt-b");
-        assert!(!docks(cx).right, "{:?}", docks(cx));
+        assert!(!docks(cx).agent, "{:?}", docks(cx));
         cx.simulate_keystrokes("ctrl-j");
         assert!(!docks(cx).bottom, "{:?}", docks(cx));
         cx.simulate_keystrokes("ctrl-b ctrl-alt-b ctrl-j");
@@ -321,9 +339,22 @@ mod tests {
             settings::reload(r#"{ "fleet_panel": { "dock": "right" } }"#, cx);
         });
         cx.simulate_keystrokes("ctrl-alt-b");
-        assert!(docks(cx).left && !docks(cx).right);
+        assert!(docks(cx).agent && !docks(cx).fleet);
         cx.simulate_keystrokes("ctrl-alt-b");
         cx.update(|_, cx| settings::reload("", cx));
+
+        // Hidden on the left, then moved right: it stays hidden, and the
+        // workspace takes the keyboard so its keys still work.
+        cx.simulate_keystrokes("ctrl-b");
+        cx.update(|_, cx| {
+            settings::reload(r#"{ "fleet_panel": { "dock": "right" } }"#, cx);
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("ctrl-j");
+        assert!(!docks(cx).fleet && !docks(cx).bottom, "{:?}", docks(cx));
+        cx.simulate_keystrokes("ctrl-j ctrl-alt-b");
+        cx.update(|_, cx| settings::reload("", cx));
+        assert_eq!(docks(cx), workspace::Docks::default());
 
         // The Fleet panel has the keyboard: down and up move the selection.
         let fleet = workspace.read_with(cx, |w, _| w.fleet().clone());

@@ -16,23 +16,25 @@ use crate::decorations::client_side_decorations;
 use crate::docks;
 use crate::fleet::FleetModel;
 use crate::keymap;
+use crate::quit;
 use crate::settings::{self, DockSide};
 use crate::status_bar::StatusBar;
 use crate::title_bar::TitleBar;
 
-/// Which docks are open.
+/// Which docks are open. By panel, not by side, so moving the Fleet to the
+/// other side (a setting) keeps it open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Docks {
-    pub left: bool,
-    pub right: bool,
+    pub fleet: bool,
+    pub agent: bool,
     pub bottom: bool,
 }
 
 impl Default for Docks {
     fn default() -> Self {
         Docks {
-            left: true,
-            right: true,
+            fleet: true,
+            agent: true,
             bottom: true,
         }
     }
@@ -63,6 +65,15 @@ impl Workspace {
         let fleet_focus = cx.focus_handle();
         // The Fleet has the keyboard until a terminal or tab takes it.
         window.focus(&fleet_focus, cx);
+        // The window manager's close goes the way of `CloseWindow`.
+        window.on_window_should_close(cx, |window, cx| {
+            if quit::must_ask_on_close(cx) {
+                quit::ask(window, cx);
+                false
+            } else {
+                true
+            }
+        });
         Workspace {
             fleet,
             title_bar,
@@ -89,20 +100,16 @@ impl Workspace {
     /// Zed, opening the Fleet focuses it, and closing it hands the keyboard
     /// back to the workspace so its keys keep working.
     fn toggle_side(&mut self, left: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let open = if left {
-            &mut self.docks.left
-        } else {
-            &mut self.docks.right
-        };
-        *open = !*open;
-        let open = *open;
-        let fleet_side = settings::get(cx).fleet_panel.dock == DockSide::Left;
-        if left == fleet_side {
-            if open {
+        let fleet = left == (settings::get(cx).fleet_panel.dock == DockSide::Left);
+        if fleet {
+            self.docks.fleet = !self.docks.fleet;
+            if self.docks.fleet {
                 window.focus(&self.fleet_focus, cx);
             } else if self.fleet_focus.contains_focused(window, cx) {
                 window.focus(&self.focus, cx);
             }
+        } else {
+            self.docks.agent = !self.docks.agent;
         }
         cx.notify();
     }
@@ -129,15 +136,19 @@ impl Focusable for Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.docks.fleet && self.fleet_focus.contains_focused(window, cx) {
+            // The Fleet is hidden but kept the keyboard: hand it to the
+            // workspace, or its keys would go nowhere.
+            window.focus(&self.focus, cx);
+        }
         let (ui_font, ui_font_size) = settings::ui_font(cx);
         window.set_rem_size(ui_font_size);
         let colors = cx.theme().colors();
         let panel = settings::get(cx).fleet_panel.clone();
         let fleet = self.fleet.read(cx);
         let fleet_on_left = panel.dock == DockSide::Left;
-        let side = |left: bool| if left { self.docks.left } else { self.docks.right };
         let focused = self.fleet_focus.contains_focused(window, cx);
-        let fleet_panel = side(fleet_on_left).then(|| {
+        let fleet_panel = self.docks.fleet.then(|| {
             docks::fleet_panel(
                 &self.fleet,
                 &self.fleet_focus,
@@ -147,7 +158,10 @@ impl Render for Workspace {
                 cx,
             )
         });
-        let agent_panel = side(!fleet_on_left).then(|| docks::agent_panel(fleet, !fleet_on_left, cx));
+        let agent_panel = self
+            .docks
+            .agent
+            .then(|| docks::agent_panel(fleet, !fleet_on_left, cx));
         let (left, right) = if fleet_on_left {
             (
                 fleet_panel.map(IntoElement::into_any_element),
@@ -178,7 +192,7 @@ impl Render for Workspace {
         let content = v_flex()
             .key_context("Workspace")
             .track_focus(&self.focus)
-            .on_action(|_: &CloseWindow, window, _| window.remove_window())
+            .on_action(|_: &CloseWindow, window, cx| quit::close_window(window, cx))
             .on_action(cx.listener(|this, _: &ToggleLeftDock, window, cx| this.toggle_side(true, window, cx)))
             .on_action(
                 cx.listener(|this, _: &ToggleRightDock, window, cx| this.toggle_side(false, window, cx)),

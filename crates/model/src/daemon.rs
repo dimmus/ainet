@@ -46,7 +46,9 @@ pub fn ensure_daemon(socket: &Path, ainet: &Path) -> Result<()> {
     )
 }
 
-fn check_version(socket: &Path) -> Result<()> {
+/// Says `Hello` to the daemon at `socket`: fails unless it is running and
+/// speaks our protocol version.
+pub fn check_version(socket: &Path) -> Result<()> {
     let mut client =
         Client::connect(socket).with_context(|| format!("ainetd is not running ({})", socket.display()))?;
     client.set_timeout(Some(Duration::from_secs(10)))?;

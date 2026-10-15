@@ -526,13 +526,22 @@ fn gui(demo: bool) -> Result<ExitCode> {
 
     let Some(bin) = gui_binary() else {
         bail!(
-            "ainet-gui is not installed: build it with `cargo build -p ainet-gui` \
-             (or `just gui`) and put it next to ainet or on PATH"
+            "ainet-gui is not installed: build it with \
+             `cargo build --manifest-path crates/gui/Cargo.toml` (or `just gui`) \
+             and put it next to ainet or on PATH"
         );
     };
     let mut cmd = std::process::Command::new(&bin);
     if demo {
         cmd.arg("--demo");
+    }
+    // The GUI starts ainetd through `$AINET_BIN`: make that this binary, so
+    // it is not some other `ainet` found next to ainet-gui or on PATH.
+    if std::env::var_os("AINET_BIN").is_none_or(|v| v.is_empty()) {
+        cmd.env(
+            "AINET_BIN",
+            std::env::current_exe().context("find the ainet binary")?,
+        );
     }
     // Only returns if the exec failed.
     let err = cmd.exec();

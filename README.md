@@ -62,7 +62,7 @@ themes plus Deepharness and Omarchy, Zed's fonts, and Zed-style settings
 [docs/GUI.md](docs/GUI.md).
 
 ```bash
-just gui-demo                 # cargo run -p ainet-gui -- --demo
+just gui-demo                 # cargo run --manifest-path crates/gui/Cargo.toml -- --demo
 just gui                      # against ainetd, started through the console binary
 ainet gui [--demo]            # runs ainet-gui installed next to ainet or on PATH
 ainet-gui --socket PATH --view rig:docs
@@ -87,9 +87,11 @@ It needs Rust 1.98 or newer (Zed's toolchain); the console crates still
 build with 1.88. The first build compiles GPUI and takes a while.
 
 **Licence:** `ainet-gui` links Zed's GPL-3.0-or-later crates, so the
-`ainet-gui` crate and binary are **GPL-3.0-or-later**. Everything else in
+`ainet-gui` crate and binary are **GPL-3.0-or-later**
+([crates/gui/LICENSE-GPL](crates/gui/LICENSE-GPL)). Everything else in
 this repository, including the `ainet` console binary, stays MIT and never
-depends on it.
+depends on it. `crates/gui` is its own Cargo workspace, so building the
+console never fetches Zed.
 
 ## Teams
 
@@ -201,6 +203,7 @@ team, rig bundles, missions and slices, permission policies, remote hosts.
 ## License
 
 MIT, except `crates/gui` (`ainet-gui`), which is GPL-3.0-or-later because
-it links Zed's GPL crates. Critter code and design are ported from Den and
+it links Zed's GPL crates; the GPL's text is in
+[crates/gui/LICENSE-GPL](crates/gui/LICENSE-GPL). Critter code and design are ported from Den and
 agent-badge (MIT); the desktop app uses Zed's crates and icons; see
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

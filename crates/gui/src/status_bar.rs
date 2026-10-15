@@ -37,7 +37,7 @@ impl Status {
             Connection::Starting => "starting ainetd…".into(),
             Connection::Connected => "ainetd connected".into(),
             Connection::Offline => "ainetd offline · retrying".into(),
-            Connection::Failed(problem) => problem.clone(),
+            Connection::Failed(problem) | Connection::Incompatible(problem) => problem.clone(),
         }
     }
 
@@ -75,7 +75,7 @@ impl Render for StatusBar {
         let problems = problems::lines(cx);
         let (dot, _) = connection_badge(&status.connection);
         let connection_color = match status.connection {
-            Connection::Failed(_) => Color::Error,
+            Connection::Failed(_) | Connection::Incompatible(_) => Color::Error,
             _ => Color::Muted,
         };
         let mut counts = Vec::new();

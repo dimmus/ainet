@@ -44,11 +44,12 @@ taken from its git repository at tag v1.24.2 (docs/GUI.md):
 | `gpui`, `gpui_platform`, `gpui_linux`, `gpui_wgpu`, `gpui_macros`, `gpui_util`, `gpui_shared_string`, `refineable`, `derive_refineable`, `collections`, `sum_tree`, `scheduler`, `http_client`, `ztracing`, `ztracing_macro`, `util`, `path`, `cloud_llm_client` | Apache-2.0 |
 | `ui`, `ui_macros`, `theme`, `syntax_theme`, `icons`, `component`, `menu`, `settings_content`, `settings_json`, `settings_macros`, `language_model_core` | GPL-3.0-or-later |
 
-(`cargo tree -p ainet-gui -e normal` lists them; the set changes when Zed is
-upgraded.)
+(`cargo tree --manifest-path crates/gui/Cargo.toml -e normal` lists them;
+the set changes when Zed is upgraded.)
 
 Because it links the GPL crates, the `ainet-gui` crate and binary are
-licensed GPL-3.0-or-later. No other crate in this repository depends on
+licensed GPL-3.0-or-later; the licence's text is in
+`crates/gui/LICENSE-GPL`. No other crate in this repository depends on
 `ainet-gui` or on Zed's GPL crates; they stay MIT.
 
 `crates/gui/src/decorations.rs` and `crates/gui/src/title_bar.rs` are

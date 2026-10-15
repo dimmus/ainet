@@ -53,7 +53,8 @@
   },
   {
     // Keys typed into a focused terminal go to the agent, so the
-    // workspace's ctrl keys step aside here.
+    // workspace's ctrl keys step aside here (a test checks every
+    // ctrl-letter).
     "context": "Terminal",
     "bindings": {
       "ctrl-a": null,

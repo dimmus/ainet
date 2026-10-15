@@ -15,30 +15,32 @@ run:
 daemon:
     AINET_LOG=debug cargo run -- daemon
 
-# Format, lint, test the console crates: what CI should run. Leaves out
-# the GUI, so it never compiles GPUI (see check-gui).
+# Format, lint, test the console crates: what CI should run. The GUI is a
+# workspace of its own, so this never compiles or fetches GPUI (see
+# check-gui).
 check:
     cargo fmt --all --check
-    cargo clippy --workspace --exclude ainet-gui --all-targets -- -D warnings
-    cargo test --workspace --exclude ainet-gui
+    cargo clippy --workspace --all-targets -- -D warnings
+    cargo test --workspace
 
 # The desktop app against ainetd (starts it through the console binary).
+# crates/gui is its own workspace, hence --manifest-path.
 gui:
     cargo build -p ainet
-    cargo run -p ainet-gui
+    cargo run --manifest-path crates/gui/Cargo.toml
 
 # The desktop app against the pretend fleet.
 gui-demo:
-    cargo run -p ainet-gui -- --demo
+    cargo run --manifest-path crates/gui/Cargo.toml -- --demo
 
 # Format, lint, test the desktop app (slow the first time: builds GPUI).
 check-gui:
-    cargo fmt --all --check
-    cargo clippy -p ainet-gui --all-targets -- -D warnings
-    cargo test -p ainet-gui
+    cargo fmt --manifest-path crates/gui/Cargo.toml --check
+    cargo clippy --manifest-path crates/gui/Cargo.toml --all-targets -- -D warnings
+    cargo test --manifest-path crates/gui/Cargo.toml
 
 test:
-    cargo nextest run --workspace --exclude ainet-gui || cargo test --workspace --exclude ainet-gui
+    cargo nextest run --workspace || cargo test --workspace
 
 # Rebuild and rerun the demo on every save (needs bacon).
 watch:

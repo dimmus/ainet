@@ -121,7 +121,8 @@ install task adds an `ainet-cli` symlink to it, and `invoked_as()` in
 
 `default-members` stays `["crates/ainet"]`, so `cargo build`, `cargo
 install --path crates/ainet` and CI for the console version never compile
-GPUI. The GUI is built with `cargo build -p ainet-gui` / `just gui`.
+GPUI. The GUI is built with `cargo build --manifest-path crates/gui/Cargo.toml`
+/ `just gui` (`crates/gui` is a workspace of its own, see GUI.md).
 
 ### Threading model in the GUI
 
@@ -300,6 +301,12 @@ untouched in behaviour.
    with `notify`; changes re-apply the theme/fonts live.
 4. Keymap: default JSON per platform, user overrides, contexts, reload on
    change; `KeyBinding` hints read from it.
+
+Done, with two items of §4 left for later: user themes
+(`~/.config/ainet/themes/*.json`) are read at start-up but not reloaded on
+change (phase 5, with the theme selector), and `settings.json` has no JSON
+schema yet (phase 7: without an editor in the app, a schema only helps in
+an external editor that is told about it).
 
 ### Phase 3 — Component library · ~1–2 weeks (B) / ~2 days (A)
 

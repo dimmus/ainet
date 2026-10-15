@@ -10,7 +10,7 @@ note records the pin and how to move it. The plan and the reasons are in
 | | |
 |---|---|
 | Zed release | **v1.24.2** (latest stable on 2026-10-15) |
-| Commit | `fb69067729cb16a7f6135e2c1600c26a28c59659` (see `Cargo.lock`) |
+| Commit | `fb69067729cb16a7f6135e2c1600c26a28c59659` (see `crates/gui/Cargo.lock`) |
 | Crates used directly | `gpui`, `gpui_platform` (features `font-kit`, `wayland`, `x11`), `theme`, `ui`, `settings_content` (the theme JSON schema only); `gpui` with `test-support` as a dev-dependency |
 | Zed's toolchain | Rust 1.98.1 (`rust-toolchain.toml` at the tag); `crates/gui` declares `rust-version = "1.98"`, the console crates keep 1.88 |
 | Licences | `gpui*` and its support crates Apache-2.0; `ui`, `ui_macros`, `theme`, `syntax_theme`, `icons`, `component`, `menu`, `settings_content` (with `settings_json`, `settings_macros`, `language_model_core`) GPL-3.0-or-later, so `ainet-gui` is GPL-3.0-or-later (THIRD_PARTY_NOTICES.md) |
@@ -19,12 +19,35 @@ note records the pin and how to move it. The plan and the reasons are in
 All Zed dependencies in `crates/gui/Cargo.toml` (and the dev-dependency)
 name the same `tag`; never mix tags or revisions.
 
+## A workspace of its own
+
+`crates/gui` is a Cargo workspace by itself, with its own `Cargo.lock`; the
+root workspace (the MIT console crates) lists it under `exclude`. Cargo
+resolves a whole workspace even to build one package, so if the GUI were a
+member, building `ainet` would fetch Zed's repository and the patched git
+crates below. As it is, `cargo build`, `cargo install --path crates/ainet`
+and `just check` never see Zed, offline or vendored.
+
+So GUI commands name its manifest, from the repository root:
+
+```bash
+cargo build --manifest-path crates/gui/Cargo.toml
+cargo run   --manifest-path crates/gui/Cargo.toml -- --demo
+cargo test  --manifest-path crates/gui/Cargo.toml
+```
+
+(or run plain `cargo build` etc. inside `crates/gui`). `.cargo/config.toml`
+points both workspaces at the root `target/`, so `ainet` and `ainet-gui`
+land side by side (where `ainet gui` looks) and the shared crates are not
+built twice. `crates/gui/Cargo.toml` repeats the root's lints and profiles,
+since a workspace reads its own; keep them in step.
+
 ## Patches copied from Zed
 
-Cargo applies `[patch.crates-io]` only from the root manifest, so the
-patches Zed builds with do not follow its crates into ours. The root
-`Cargo.toml` copies the ones GPUI's dependency tree needs, from Zed's root
-`Cargo.toml` at the tag:
+Cargo applies `[patch.crates-io]` only from a workspace's root manifest,
+so the patches Zed builds with do not follow its crates into ours.
+`crates/gui/Cargo.toml` copies the ones GPUI's dependency tree needs, from
+Zed's root `Cargo.toml` at the tag:
 
 | Crate | Source | Used by |
 |---|---|---|
@@ -35,11 +58,11 @@ patches Zed builds with do not follow its crates into ours. The root
 Zed patches more (`tree-sitter-language`, `livekit`, `libwebrtc`,
 `webrtc-sys`, `windows-capture`, `notify`, `notify-types`, `scratch`); none
 of them is in `ainet-gui`'s tree today. When a new Zed crate is added, check
-`cargo tree -p ainet-gui -i <crate>` for each of them and copy the ones that
-appear.
+`cargo tree --manifest-path crates/gui/Cargo.toml -i <crate>` for each of
+them and copy the ones that appear.
 
-These patches only affect crates that use the patched packages; the console
-crates use none of them, so `cargo build` of `ainet` is unchanged.
+The patches live in the GUI's workspace only, so the console's build and
+`Cargo.lock` are unchanged by them.
 
 ## What we implement instead of Zed's crates
 
@@ -73,11 +96,12 @@ crates use none of them, so `cargo build` of `ainet` is unchanged.
    `curl -fsSL https://raw.githubusercontent.com/zed-industries/zed/<tag>/Cargo.toml`.
    Compare its `[patch.crates-io]` with ours; update the revisions of the
    three we copy and add any new entry whose crate appears in
-   `cargo tree -p ainet-gui`.
+   `cargo tree --manifest-path crates/gui/Cargo.toml`.
 4. Check Zed's `rust-toolchain.toml` at the tag and raise `rust-version` in
    `crates/gui/Cargo.toml` if it moved.
-5. `cargo update -p gpui` (refreshes the git checkout in `Cargo.lock`), then
-   `cargo build -p ainet-gui`. The new source is under
+5. `cargo update --manifest-path crates/gui/Cargo.toml -p gpui` (refreshes
+   the git checkout in `crates/gui/Cargo.lock`), then
+   `cargo build --manifest-path crates/gui/Cargo.toml`. The new source is under
    `~/.cargo/git/checkouts/zed-*/<short-rev>/`; read it for API changes, in
    particular `crates/theme/src/theme_settings_provider.rs`,
    `crates/workspace/src/workspace.rs` (`client_side_decorations`),
@@ -89,11 +113,13 @@ crates use none of them, so `cargo build` of `ainet` is unchanged.
    `crates/theme_settings/src/{schema.rs,theme_settings.rs}` between the
    two tags and carry the changes into `crates/gui/src/zed_theme.rs`. Check
    `script/linux` for new system packages (README, "Desktop app").
-7. Run the GUI gate: `cargo fmt --all --check`,
-   `cargo clippy -p ainet-gui --all-targets -- -D warnings`,
-   `cargo test -p ainet-gui`; and the console gate, which must not change:
-   `cargo clippy --workspace --exclude ainet-gui --all-targets -- -D warnings`,
-   `cargo test --workspace --exclude ainet-gui`.
+7. Run the GUI gate (`just check-gui`):
+   `cargo fmt --manifest-path crates/gui/Cargo.toml --check`,
+   `cargo clippy --manifest-path crates/gui/Cargo.toml --all-targets -- -D warnings`,
+   `cargo test --manifest-path crates/gui/Cargo.toml`; and the console gate
+   (`just check`), which must not change: `cargo fmt --all --check`,
+   `cargo clippy --workspace --all-targets -- -D warnings`,
+   `cargo test --workspace`.
 8. Update the table at the top of this file and commit the bump on its own.
 
 ## Settings, themes and keys
@@ -119,16 +145,25 @@ palette, `crates/gui/assets/themes/deepharness/deepharness.json`), and
 **Omarchy**, made at start-up from Omarchy's current `colors.toml` the way
 the TUI reads it. Both come from `themes::family_json` and the palette in
 `ainet-model`; after changing the palette, regenerate the bundled file with
-`AINET_WRITE_THEME=1 cargo test -p ainet-gui bundled_deepharness`. Their
+`AINET_WRITE_THEME=1 cargo test --manifest-path crates/gui/Cargo.toml bundled_deepharness`. Their
 player colours are the TUI's agent hues, so `themes::agent_color` gives an
 agent the same colour as in the TUI (other themes give their own player
 colours).
+
+Your own themes: put Zed theme files (the JSON a Zed theme extension ships
+in its `themes/` directory) in `~/.config/ainet/themes/*.json` and name a
+theme from them in `theme`. They are read at start-up, after the bundled
+ones, so a file can replace a bundled theme of the same name; files that do
+not parse are listed in the status bar.
 
 Keys: `crates/gui/assets/keymaps/default-{linux,macos}.json`, in Zed's
 format, with the contexts `Workspace`, `FleetPanel`, `Terminal`, `Inbox`,
 `Comms` and `Picker`. `~/.config/ainet/keymap.json` adds to them and
 overrides them (`null` unbinds), and reloads on save; bindings it cannot
-read are listed in the status bar and the rest apply. The actions are in
+read are listed in the status bar and the rest apply. `ctrl-alt-,` opens
+it (`cmd-k cmd-s` on macOS). In a focused terminal every ctrl-letter goes
+to the agent, so the workspace's ctrl keys (`ctrl-b`, `ctrl-j`, `ctrl-q`, …)
+do nothing there; a test keeps it so. The actions are in
 `crates/gui/src/actions.rs`; `ui::KeyBinding::for_action` shows any of
 them as a hint.
 
@@ -137,8 +172,11 @@ them as a hint.
 - The first build compiles a few hundred crates (GPUI, wgpu, font
   rasterisation, Wayland and X11 clients); budget tens of minutes on a small
   machine. Incremental builds of `crates/gui` are quick.
-- `cargo test -p ainet-gui` builds GPUI a second time with `test-support`.
-- `ainet-gui` is outside `default-members`: plain `cargo build`, `cargo
-  install --path crates/ainet` and `just check` never compile GPUI.
+- Testing the GUI builds GPUI a second time with `test-support`.
+- The GUI is outside the console's workspace: plain `cargo build`, `cargo
+  install --path crates/ainet` and `just check` never fetch or compile
+  GPUI.
+- `ainet gui` runs `ainet-gui` with `AINET_BIN` set to itself, so the GUI
+  starts ainetd through the same console binary the user ran.
 - `AINET_WINDOW_DECORATIONS=server` asks the window manager for its own
   title bar instead of ours (Zed's `ZED_WINDOW_DECORATIONS`).

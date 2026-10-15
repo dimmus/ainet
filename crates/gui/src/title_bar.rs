@@ -3,15 +3,13 @@
 //! client-side, and shows the app name, the rig switcher (a placeholder
 //! until phase 5) and the connection.
 
-use gpui::{
-    Action, Decorations, Entity, MouseButton, WindowButton, WindowButtonLayout, WindowControlArea, svg,
-};
+use gpui::{Decorations, Entity, MouseButton, WindowButton, WindowButtonLayout, WindowControlArea, svg};
 use theme::{CLIENT_SIDE_DECORATION_BORDER, CLIENT_SIDE_DECORATION_ROUNDING};
 use ui::utils::platform_title_bar_height;
 use ui::{Indicator, Tooltip, prelude::*};
 
-use crate::actions::CloseWindow;
 use crate::fleet::{Connection, FleetModel};
+use crate::quit;
 
 pub struct TitleBar {
     fleet: Entity<FleetModel>,
@@ -37,6 +35,7 @@ pub fn connection_badge(connection: &Connection) -> (Color, &'static str) {
         Connection::Connected => (Color::Success, "connected"),
         Connection::Offline => (Color::Warning, "offline"),
         Connection::Failed(_) => (Color::Error, "ainetd not running"),
+        Connection::Incompatible(_) => (Color::Error, "ainetd incompatible"),
     }
 }
 
@@ -248,7 +247,9 @@ fn window_controls(buttons: Vec<WindowButton>, window: &Window, cx: &App) -> Any
                             match button {
                                 WindowButton::Minimize => window.minimize_window(),
                                 WindowButton::Maximize => window.zoom_window(),
-                                WindowButton::Close => window.dispatch_action(CloseWindow.boxed_clone(), cx),
+                                // Directly, not as an action: the action needs
+                                // the focus inside the workspace.
+                                WindowButton::Close => quit::close_window(window, cx),
                             }
                         })
                 })

@@ -7,6 +7,7 @@
     "bindings": {
       "ctrl-q": "ainet::Quit",
       "ctrl-,": "workspace::OpenSettings",
+      "ctrl-alt-,": "workspace::OpenKeymap",
       "ctrl-shift-p": "command_palette::Toggle"
     }
   },
@@ -52,18 +53,23 @@
   },
   {
     // Keys typed into a focused terminal go to the agent, so the
-    // workspace's ctrl keys step aside here.
+    // workspace's and the app's ctrl keys step aside here (a test checks
+    // every ctrl-letter). Agents use ctrl-b and ctrl-j; ctrl-\ is SIGQUIT.
     "context": "Terminal",
     "bindings": {
       "ctrl-a": null,
+      "ctrl-b": null,
       "ctrl-e": null,
       "ctrl-g": null,
+      "ctrl-j": null,
       "ctrl-n": null,
       "ctrl-o": null,
       "ctrl-p": null,
+      "ctrl-q": null,
       "ctrl-t": null,
       "ctrl-w": null,
       "ctrl-y": null,
+      "ctrl-\\": null,
       "ctrl-shift-c": "terminal::Copy",
       "ctrl-shift-v": "terminal::Paste",
       "shift-insert": "terminal::Paste",

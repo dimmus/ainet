@@ -1,0 +1,5 @@
+# One target dir for the console workspace and the GUI's own
+# (crates/gui/Cargo.toml), so `ainet gui` finds ainet-gui next to ainet and
+# the shared crates are not built twice.
+[build]
+target-dir = "target"

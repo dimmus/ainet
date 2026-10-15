@@ -288,6 +288,23 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_focused_terminal_gets_every_ctrl_letter(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            for path in ["keymaps/default-linux.json", "keymaps/default-macos.json"] {
+                let (bound, _) = bindings(&parse(&Assets::text(path).unwrap()).unwrap(), cx);
+                let keymap = gpui::Keymap::new(bound);
+                let stack = ["Workspace", "Terminal"].map(|c| gpui::KeyContext::parse(c).unwrap());
+                for key in ('a'..='z').map(String::from).chain(["\\".into()]) {
+                    let keystroke = gpui::Keystroke::parse(&format!("ctrl-{key}")).unwrap();
+                    let (found, _) = keymap.bindings_for_input(&[keystroke], &stack);
+                    let names: Vec<_> = found.iter().map(|b| b.action().name()).collect();
+                    assert!(names.is_empty(), "{path}: ctrl-{key} is bound to {names:?}");
+                }
+            }
+        });
+    }
+
+    #[gpui::test]
     fn the_user_keymap_overrides_and_reports_what_it_cannot_read(cx: &mut TestAppContext) {
         cx.update(|cx| {
             load("", cx);

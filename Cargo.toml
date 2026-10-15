@@ -1,6 +1,9 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+# The desktop app is its own workspace (crates/gui/Cargo.toml): it pulls in
+# Zed's GPL crates from git, which building the MIT console must never need.
+exclude = ["crates/gui"]
 default-members = ["crates/ainet"]
 
 [workspace.package]
@@ -42,13 +45,6 @@ all = { level = "warn", priority = -1 }
 lto = "thin"
 codegen-units = 1
 strip = true
-
-# The GUI's Zed dependencies need the same patched crates Zed builds with
-# (copied from Zed's root Cargo.toml at the pinned tag; see docs/GUI.md).
-[patch.crates-io]
-async-process = { git = "https://github.com/zed-industries/async-process.git", rev = "0b6d6713570af61806e1e5cb40e0f757cb93fd9d" }
-async-task = { git = "https://github.com/smol-rs/async-task.git", rev = "b4486cd71e4e94fbda54ce6302444de14f4d190e" }
-calloop = { git = "https://github.com/zed-industries/calloop", rev = "3759371fee14c40066d64777e2a36b6ffcc22590" }
 
 # Dependencies are compiled with optimisations even in debug builds, so the
 # TUI's animations stay smooth while you iterate on our own code.

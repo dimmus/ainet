@@ -1,31 +1,36 @@
+# Its own workspace, outside the console's (which excludes it): building
+# `ainet` never fetches Zed. `.cargo/config.toml` shares one target dir.
+[workspace]
+resolver = "3"
+
 [package]
 name = "ainet-gui"
 description = "The ainet desktop app: a Zed-style control room for teams of coding agents, on GPUI and Zed's UI components"
-version.workspace = true
-edition.workspace = true
+version = "0.1.0"
+edition = "2024"
 # GPUI and Zed's ui/theme crates follow Zed's toolchain.
 rust-version = "1.98"
 # Links Zed's GPL-3.0-or-later `ui` and `theme` crates; the rest of the
 # workspace stays MIT. See docs/GUI-PLAN.md.
 license = "GPL-3.0-or-later"
-repository.workspace = true
+repository = "https://github.com/dimmus/ainet"
 
 [[bin]]
 name = "ainet-gui"
 path = "src/main.rs"
 
 [dependencies]
-ainet-core.workspace = true
-ainet-critter.workspace = true
-ainet-model.workspace = true
-anyhow.workspace = true
-clap.workspace = true
+ainet-core = { path = "../core" }
+ainet-critter = { path = "../critter" }
+ainet-model = { path = "../model" }
+anyhow = "1"
+clap = { version = "4.6", features = ["derive"] }
 futures = "0.3"
 # Bundled themes, icons, fonts and keymaps, embedded in debug builds too so
 # the binary is always self-contained.
 rust-embed = { version = "8.11", features = ["debug-embed", "include-exclude"] }
-serde.workspace = true
-serde_json.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 # Zed's lenient JSON: comments and trailing commas in settings and keymaps.
 serde_json_lenient = "0.2"
 # Zed, pinned to one release; upgrade all of them together (docs/GUI.md).
@@ -43,5 +48,26 @@ gpui = { git = "https://github.com/zed-industries/zed", tag = "v1.24.2", feature
 # To check that every `ui::IconName` has a bundled icon.
 strum = "0.28"
 
-[lints]
-workspace = true
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+
+# The GUI's Zed dependencies need the same patched crates Zed builds with
+# (copied from Zed's root Cargo.toml at the pinned tag; see docs/GUI.md).
+# Cargo reads patches and profiles only from a workspace root, so they live
+# here, not in the console's manifest.
+[patch.crates-io]
+async-process = { git = "https://github.com/zed-industries/async-process.git", rev = "0b6d6713570af61806e1e5cb40e0f757cb93fd9d" }
+async-task = { git = "https://github.com/smol-rs/async-task.git", rev = "b4486cd71e4e94fbda54ce6302444de14f4d190e" }
+calloop = { git = "https://github.com/zed-industries/calloop", rev = "3759371fee14c40066d64777e2a36b6ffcc22590" }
+
+# As the console's profiles (the root Cargo.toml).
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[profile.dev.package."*"]
+opt-level = 2
