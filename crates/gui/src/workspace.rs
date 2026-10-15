@@ -1373,6 +1373,120 @@ mod tests {
         assert_eq!(tabs(&pane, cx).0.len(), 0);
     }
 
+    /// Right-clicks tab `tab` (its number in its pane) and clicks the
+    /// menu's `entry`.
+    fn pick_from_tab_menu(tab: usize, entry: &str, cx: &mut VisualTestContext) {
+        cx.run_until_parked();
+        let bounds = cx
+            .debug_bounds(format!("TAB-{tab}").leak())
+            .unwrap_or_else(|| panic!("tab {tab} is drawn"));
+        cx.simulate_mouse_down(bounds.center(), MouseButton::Right, Modifiers::none());
+        cx.simulate_mouse_up(bounds.center(), MouseButton::Right, Modifiers::none());
+        cx.run_until_parked();
+        let entry = cx
+            .debug_bounds(format!("MENU_ITEM-{entry}").leak())
+            .unwrap_or_else(|| panic!("{entry} is in the menu"));
+        cx.simulate_click(entry.center(), Modifiers::none());
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    async fn a_tabs_menu_acts_on_that_tab(cx: &mut TestAppContext) {
+        let (w, cx) = workspace(cx);
+        cx.update(|window, _| window.activate_window());
+        let first = active_pane(&w, cx);
+        cx.simulate_keystrokes("ctrl-shift-c ctrl-shift-i ctrl-t");
+        assert_eq!(
+            tabs(&first, cx),
+            (
+                vec!["Fleet".into(), "Comms".into(), "Inbox".into(), "Map".into()],
+                3
+            )
+        );
+        // Tabs are numbered per pane, so a pane made by splitting is
+        // closed again before tabs are picked by number.
+        let close = |pane: Entity<Pane>, cx: &mut VisualTestContext| {
+            cx.update(|window, cx| pane.update(cx, |p, cx| p.close_all_items(window, cx)));
+            assert_eq!(w.read_with(cx, |w, _| w.panes()), std::slice::from_ref(&first));
+        };
+
+        // Split Right and Split Down from the Fleet tab, which is not the
+        // active one: the copy is of it.
+        pick_from_tab_menu(0, "Split Right", cx);
+        let right = active_pane(&w, cx);
+        assert_ne!(right, first);
+        assert_eq!(tabs(&right, cx).0, ["Fleet"]);
+        assert_eq!(tabs(&first, cx).1, 0, "the Fleet tab was activated to split");
+        close(right, cx);
+        pick_from_tab_menu(0, "Split Down", cx);
+        let below = active_pane(&w, cx);
+        assert_eq!(tabs(&below, cx).0, ["Fleet"]);
+        assert_eq!(w.read_with(cx, |w, _| w.panes()), [first.clone(), below.clone()]);
+        close(below, cx);
+
+        // Close Others from Inbox.
+        pick_from_tab_menu(2, "Close Others", cx);
+        assert_eq!(tabs(&first, cx).0, ["Inbox"]);
+
+        // Close from a tab that is not the active one.
+        cx.simulate_keystrokes("ctrl-t");
+        assert_eq!(tabs(&first, cx), (vec!["Inbox".into(), "Map".into()], 1));
+        pick_from_tab_menu(0, "Close", cx);
+        assert_eq!(tabs(&first, cx), (vec!["Map".into()], 0));
+
+        // Close All; the last pane stays, empty.
+        cx.simulate_keystrokes("ctrl-shift-c");
+        pick_from_tab_menu(1, "Close All", cx);
+        assert!(tabs(&first, cx).0.is_empty());
+        assert_eq!(w.read_with(cx, |w, _| w.panes()), [first]);
+    }
+
+    #[gpui::test]
+    async fn the_status_bars_buttons_show_and_close_their_panels(cx: &mut TestAppContext) {
+        let (w, cx) = workspace(cx);
+        cx.update(|window, _| window.activate_window());
+        let click = |name: &'static str, cx: &mut VisualTestContext| {
+            cx.run_until_parked();
+            let bounds = cx.debug_bounds(name).unwrap_or_else(|| panic!("{name} is drawn"));
+            cx.simulate_click(bounds.center(), Modifiers::none());
+            cx.run_until_parked();
+        };
+        let bottom = |cx: &mut VisualTestContext| {
+            w.read_with(cx, |w, cx| {
+                let dock = w.dock(DockPosition::Bottom).read(cx);
+                (dock.is_open(), dock.active_panel_name())
+            })
+        };
+        assert_eq!(bottom(cx), (true, Some("QueuePanel")));
+
+        // Another panel's button shows that panel, with the keyboard.
+        click("DOCK-BUTTON-EventsPanel", cx);
+        assert_eq!(bottom(cx), (true, Some("EventsPanel")));
+        let events = w.read_with(cx, |w, cx| w.bottom_panel::<EventsPanel>(cx).unwrap());
+        assert!(cx.update(|window, cx| events.focus_handle(cx).contains_focused(window, cx)));
+        // The lit one closes its dock; then it opens it on its panel.
+        click("DOCK-BUTTON-EventsPanel", cx);
+        assert_eq!(bottom(cx), (false, Some("EventsPanel")));
+        click("DOCK-BUTTON-EventsPanel", cx);
+        assert_eq!(bottom(cx), (true, Some("EventsPanel")));
+        click("DOCK-BUTTON-QueuePanel", cx);
+        assert_eq!(bottom(cx), (true, Some("QueuePanel")));
+
+        // The side docks' buttons, at either end of the bar.
+        let docks = |cx: &mut VisualTestContext| w.read_with(cx, |w, cx| w.docks(cx));
+        click("DOCK-BUTTON-FleetPanel", cx);
+        assert!(!docks(cx).fleet);
+        click("DOCK-BUTTON-FleetPanel", cx);
+        assert!(docks(cx).fleet);
+        let fleet = w.read_with(cx, |w, cx| w.fleet_panel().focus_handle(cx));
+        assert!(cx.update(|window, _| fleet.is_focused(window)));
+        click("DOCK-BUTTON-AgentPanel", cx);
+        assert!(!docks(cx).agent);
+        click("DOCK-BUTTON-AgentPanel", cx);
+        let after = docks(cx);
+        assert!(after.agent && after.fleet && after.bottom, "{after:?}");
+    }
+
     #[gpui::test]
     async fn splits_move_the_keyboard_between_panes(cx: &mut TestAppContext) {
         let (w, cx) = workspace(cx);

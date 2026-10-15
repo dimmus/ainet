@@ -38,6 +38,8 @@ mod queue_panel;
 mod quit;
 mod report;
 mod rig_modals;
+#[cfg(test)]
+mod screenshot;
 mod seat_modals;
 mod settings;
 mod sink;
@@ -180,10 +182,20 @@ const APP_ID: &str = "ainet-gui";
 const MIN_WINDOW_SIZE: Size<Pixels> = size(px(480.), px(320.));
 
 fn open_window(args: &Args, cx: &mut App) -> anyhow::Result<()> {
+    open_window_saved_in(args, persistence::state_file(), cx)?;
+    Ok(())
+}
+
+/// The window, restored from the workspaces saved in `file` and saving
+/// there (tests name a file of their own).
+fn open_window_saved_in(
+    args: &Args,
+    file: std::path::PathBuf,
+    cx: &mut App,
+) -> anyhow::Result<gpui::WindowHandle<Workspace>> {
     let fleet = fleet(args, cx);
     let view = args.view.clone();
     // The workspace this socket's window was left with, if any.
-    let file = persistence::state_file();
     let key = persistence::key(args.demo, &args.socket());
     let saved = persistence::load(&file, &key);
     let displays: Vec<_> = cx.displays().iter().map(|d| d.bounds()).collect();
@@ -210,8 +222,7 @@ fn open_window(args: &Args, cx: &mut App) -> anyhow::Result<()> {
             })
             .detach();
         workspace
-    })?;
-    Ok(())
+    })
 }
 
 fn window_options(bounds: WindowBounds, cx: &App) -> WindowOptions {
@@ -278,6 +289,82 @@ mod tests {
         cx: &mut gpui::VisualTestContext,
     ) -> Option<gpui::Entity<V>> {
         workspace.read_with(cx, |w, cx| w.modal_layer().read(cx).active_modal::<V>())
+    }
+
+    #[gpui::test]
+    async fn the_window_opens_as_it_was_left(cx: &mut TestAppContext) {
+        use persistence::{SavedItem, SavedMember, SavedWindow, SavedWorkspace, WindowState};
+        init_test(cx);
+        let dir = std::env::temp_dir().join(format!("ainet-gui-open-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let file = dir.join("gui.json");
+        // The demo's agents are the same every time.
+        let (agent, name) = cx.update(|cx| {
+            let fleet = cx.new(FleetModel::demo);
+            let f = fleet.read(cx);
+            let id = f.store.terminal_ids(None)[0].clone();
+            (id.clone(), f.store.agents[&id].name.clone())
+        });
+        let left = SavedWorkspace {
+            window: Some(SavedWindow {
+                x: 100.,
+                y: 50.,
+                width: 900.,
+                height: 600.,
+                state: WindowState::Windowed,
+            }),
+            center: Some(SavedMember::Pane {
+                items: vec![
+                    SavedItem::Terminal { agent },
+                    SavedItem::Map {
+                        zoom: 1.5,
+                        pan_x: 0.,
+                        pan_y: 0.,
+                    },
+                ],
+                active: 1,
+                active_pane: true,
+            }),
+            folded_rigs: vec!["infra".into()],
+            ..SavedWorkspace::default()
+        };
+        persistence::save(&file, "demo", &left).unwrap();
+        // Another daemon's workspace in the same file is not this one's.
+        persistence::save(&file, "/elsewhere.sock", &SavedWorkspace::default()).unwrap();
+
+        let open = |argv: &[&str], cx: &mut TestAppContext| {
+            let args = Args::parse_from(argv);
+            let window = cx
+                .update(|cx| open_window_saved_in(&args, file.clone(), cx))
+                .expect("a window");
+            cx.run_until_parked();
+            window
+                .update(cx, |w, window, cx| {
+                    let pane = w.active_pane().read(cx);
+                    let tabs: Vec<String> =
+                        pane.items().map(|i| i.tab_content_text(cx).to_string()).collect();
+                    let folded = w.fleet_panel().read(cx).folded_rigs();
+                    (window.window_bounds(), tabs, pane.active_index(), folded)
+                })
+                .unwrap()
+        };
+
+        let (bounds, tabs, active, folded) = open(&["ainet-gui", "--demo"], cx);
+        assert_eq!(
+            bounds,
+            WindowBounds::Windowed(Bounds::new(point(px(100.), px(50.)), size(px(900.), px(600.))))
+        );
+        assert_eq!(tabs, [name, "Map".to_string()]);
+        assert_eq!(active, 1);
+        assert_eq!(folded, ["infra"]);
+
+        // A view asked for on the command line wins over the saved panes;
+        // the rest still comes back.
+        let (bounds, tabs, _, folded) = open(&["ainet-gui", "--demo", "--view", "inbox"], cx);
+        assert_eq!(bounds.get_bounds().size, size(px(900.), px(600.)));
+        assert_eq!(tabs, ["Inbox"]);
+        assert_eq!(folded, ["infra"]);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

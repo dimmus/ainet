@@ -1,9 +1,20 @@
-# ainet-gui: building against Zed
+# ainet-gui: the desktop app
 
 `crates/gui` (`ainet-gui`) is built on GPUI and Zed's `ui` and `theme`
 crates, taken from Zed's git repository and pinned to one release. This
-note records the pin and how to move it. The plan and the reasons are in
-[GUI-PLAN.md](GUI-PLAN.md).
+guide covers how it is built against Zed (the pin, the workspace of its
+own, how to upgrade), what each part of the app does and which keys it
+has, how it is tested, and what is known to be missing. The plan it was
+built by, and the reasons behind it, are in [GUI-PLAN.md](GUI-PLAN.md).
+
+Contents: [the pin](#the-pin) · [a workspace of its own](#a-workspace-of-its-own) ·
+[the workspace pieces](#the-workspace-pieces) · [Fleet and Agent panels](#the-fleet-and-agent-panels) ·
+[terminals](#the-terminal) · [the Inbox](#the-inbox) · [Comms](#comms) ·
+[the bottom dock](#the-bottom-dock-and-reports) · [the Map](#the-map) ·
+[palette and modals](#the-command-palette-pickers-and-modals) ·
+[restore and packaging](#workspace-restore-packaging-and-macos) ·
+[settings and keys](#settings-themes-and-keys) · [tests and CI](#tests-and-ci) ·
+[known gaps](#known-gaps) · [upgrading Zed](#upgrading-zed)
 
 ## The pin
 
@@ -104,7 +115,7 @@ GPUI (the pane tree, divider dragging, the text buffer).
 
 | File | What | After Zed's |
 |---|---|---|
-| `item.rs` | `Item` (tab label, icon or critter slot, tooltip, `can_split`/`clone_on_split`, `activated`/`deactivated`/`on_removed`, `ItemEvent::CloseItem`/`UpdateTab`), `ItemHandle`, and `Placeholder`, the stand-in for phase 4's views | `workspace::item` |
+| `item.rs` | `Item` (tab label, icon or critter slot, tooltip, `can_split`/`clone_on_split`, `activated`/`deactivated`/`on_removed`, `ItemEvent::CloseItem`/`UpdateTab`), `ItemHandle`, and `Placeholder`, the stand-in tab ("Fleet") an empty workspace shows | `workspace::item` |
 | `pane.rs` | `Pane`: a `TabBar` of `Tab`s (click activates, middle click or the hover close button closes, right click for Close/Close Others/Close All/Split), a split menu and a zoom button; closing the active tab activates the one used before it; `PaneEvent`s for the workspace | `workspace::pane` |
 | `pane_group.rs` | `PaneGroup<P>`: the split tree (generic, so tested with numbers), neighbours by drawn position, and the axis element whose dividers drag (double click evens them) | `workspace::pane_group` |
 | `dock.rs` | `Dock` (left, right, bottom) holding one or more `Panel`s and showing one (`activate_panel`), opened and closed, resized by dragging its inner edge (double click: default size); a panel names its `toggle_action` and may put a count on its button (`icon_label`) | `workspace::dock` |
@@ -157,15 +168,16 @@ field (`TextInput` context) the usual editing keys apply (`ctrl-z`,
 also has `empty` in its context, for keys that do something else there.
 
 Testing: the pieces have headless tests (`#[gpui::test]` with
-`VisualTestContext`): tabs, splits and focus, zoom, dock resizing by a
-simulated drag, the switcher modal, toasts expiring on the test clock,
+`VisualTestContext`): tabs, their right-click menu, splits and focus,
+zoom, dock resizing by a simulated drag, the status bar's dock buttons,
+the switcher modal, toasts expiring on the test clock,
 text editing through the platform input handler, and the picker.
 `crate::tests::init_test` sets the app up as `main` does, without the
 user's config; `demo_workspace`, `sent` and `modal::<V>` there are the
 shared helpers for a window on the demo, the requests it sent, and the
 modal open.
 
-## The Fleet and Agent panels (phase 4, steps 1 and 2)
+## The Fleet and Agent panels
 
 The first views on top of the workspace pieces. They read the same
 `Store` as the TUI and send what the TUI sends, through `ainet-model`:
@@ -208,12 +220,12 @@ that draws critters keeps a `critter::Animation`, passes it to each
 `animation.take()` says one was painted since: critters in a closed dock,
 an inactive tab or rows scrolled away cost nothing.
 
-## The terminal (phase 4 step 3)
+## The terminal
 
 An agent's terminal is a tab, `TerminalItem`, showing the copy of its
 screen ainet keeps (a `vt100::Parser` per agent in the `Store`), streamed
 from ainetd (`Request::Attach`: the screen, then what the program
-prints, fed into the copy as it comes; phase 6) or, from a daemon that
+prints, fed into the copy as it comes) or, from a daemon that
 cannot stream and in the demo, filled by `Request::Screen { formatted:
 true }` as the TUI's. ainetd owns the PTYs, so there is no alacritty and
 no local process: the GUI paints the screen, sends keys as `Input` and
@@ -338,10 +350,11 @@ focus sending `Interact` on and off (and nothing between two views of one
 agent), keys reaching the agent past the workspace's bindings, one
 `Resize` after the window is dragged through several sizes, the wheel
 asking for scrollback and typing coming back, selection and copy,
-bracketed paste, `SendCtrlC`, and Tile all. In tests the window must be
+bracketed paste, `SendCtrlC`, the right-click menu driven by its keys
+(which reach the menu, not the agent), and Tile all. In tests the window must be
 activated (`window.activate_window()`) for focus events to fire.
 
-## Performance and live terminals (phase 6)
+## Keeping terminals cheap: measurements and streaming
 
 Measured first, without a display, then changed where the numbers said.
 Two measurements, both `#[ignore]`d tests run by hand:
@@ -451,7 +464,7 @@ until detached, an old daemon's refusal and the fallback to fetching, a
 stream that ends; `Store` feeding bytes and keeping styled history), and
 the GUI tests listed under the terminal.
 
-## The Inbox (phase 4 step 4)
+## The Inbox
 
 `InboxItem` (`inbox.rs`) is the TUI's Inbox as a tab, opened by
 `workspace::OpenInbox` (`ctrl-shift-i`), `--view inbox`, the waiting
@@ -507,14 +520,15 @@ tab shows a bell and the waiting count.
 Tests: pure ones for the order, the detail styles, picking and the glow;
 headless ones for the keys opening the Inbox first and then answering
 through the demo link (the card resolves on `InboxResolved` and the
-selection moves on), cards answered by selection and click, questions
+selection moves on), cards answered by selection and click, the Allow,
+Always and Deny buttons answering their own card, questions
 (digits, several or one, your words over picks, escape, deny, the
 keyboard back on the cards after an answer by text), a click giving the
 Inbox the keys, `ctrl-shift-y`, the history folding, `--view inbox`, and
 the alert's toast and glow count.
 `FleetModel::receive` (tests only) applies link messages directly.
 
-## Comms (phase 4 step 5)
+## Comms
 
 `CommsItem` (`comms.rs`) is the TUI's Comms stream as a tab, opened by
 `workspace::OpenComms` (`ctrl-shift-c`, which gives its compose box the
@@ -591,7 +605,7 @@ under its message and closing onto the reply's own row, and a click
 selecting a row and giving the stream the keys.
 `ainet-model` gained `Store::replies` and `command::comms`, with tests.
 
-## The bottom dock and reports (phase 4 steps 6 and 8)
+## The bottom dock and reports
 
 The bottom dock holds three panels, switched by the tabs in their title
 strip or their buttons in the status bar (`Workspace::toggle_panel_focus`):
@@ -654,7 +668,7 @@ chip colours), the `journal` module, and the demo answers transcripts,
 specs, exports and the queue requests (the app's `Demo::full` only; the
 console's demo is unchanged); all with tests.
 
-## The Map (phase 4 step 7)
+## The Map
 
 `MapItem` (`map.rs`) is the TUI's Map (`draw_map`) as a tab, opened by
 `workspace::OpenMap` (`ctrl-t`, the TUI's key), `--view map` or `/view
@@ -726,9 +740,9 @@ double click, dragging to pan, a message sent through the fleet flying
 and landing on the test clock, a late snapshot's history staying put,
 and the empty fleet.
 
-## The command palette, pickers and modals (phase 5)
+## The command palette, pickers and modals
 
-All in the modal layer, on the picker and the text field of phase 3:
+All in the modal layer, on the picker and the text field above:
 
 | File | What | After Zed's |
 |---|---|---|
@@ -795,11 +809,13 @@ restore (rig, snapshot by keys, a fresh seat), down (escape, snapshot
 on, off, the rig picker with nobody selected), spawn by `s`, grow (the
 missing pod said, then the seat), the theme selector (preview, escape
 and a click outside restoring, the pick saved into the file's text) and
-the tab switcher (by recency, `ctrl` held and let go, typing). In
+the tab switcher (by recency, `ctrl` held and let go, typing); also the
+selector's edge cases (no match, a theme per appearance, a broken
+settings.json). In
 `ainet-model`: the forms' commands are the typed ones, listings by token,
 the demo's plan.
 
-## Workspace restore, packaging and macOS (phase 7)
+## Workspace restore, packaging and macOS
 
 **Workspace restore** (`persistence.rs`, the format and file;
 `workspace/persist.rs`, reading the workspace into it and building it
@@ -861,8 +877,10 @@ shares, window bounds (too small, on a display gone, not a number) and
 the debounce; headless ones for a workspace coming back as it was left
 (splits, tabs, the active one, docks, sizes, folds, the Map's view, the
 palette), agents gone dropped without a toast, a change written once it
-settles, closing and quitting writing first, and saved panes kept while
-no snapshot came.
+settles, closing and quitting writing first, saved panes kept while
+no snapshot came, and `main`'s `open_window` restoring the window's
+bounds, panes and folds from a state file (with `--view` keeping the
+panes it asked for).
 
 **Settings schema.** `crates/gui/assets/settings-schema.json` is
 generated from the settings' types (`schemars`, already in the tree
@@ -906,46 +924,11 @@ there. `ainet-model` and `ainet-core` are plain Rust. Expect work on
 `AINET_WINDOW_DECORATIONS`, the app menu and signing before anyone ships
 it.
 
-## Upgrading Zed
-
-1. Pick the release: the newest `vX.Y.Z` tag (not `-pre`) on
-   <https://github.com/zed-industries/zed/releases>.
-2. Change the `tag` on every Zed dependency in `crates/gui/Cargo.toml`.
-3. Fetch Zed's root manifest at the new tag:
-   `curl -fsSL https://raw.githubusercontent.com/zed-industries/zed/<tag>/Cargo.toml`.
-   Compare its `[patch.crates-io]` with ours; update the revisions of the
-   three we copy and add any new entry whose crate appears in
-   `cargo tree --manifest-path crates/gui/Cargo.toml`.
-4. Check Zed's `rust-toolchain.toml` at the tag and raise `rust-version` in
-   `crates/gui/Cargo.toml` if it moved.
-5. `cargo update --manifest-path crates/gui/Cargo.toml -p gpui` (refreshes
-   the git checkout in `crates/gui/Cargo.lock`), then
-   `cargo build --manifest-path crates/gui/Cargo.toml`. The new source is under
-   `~/.cargo/git/checkouts/zed-*/<short-rev>/`; read it for API changes, in
-   particular `crates/theme/src/theme_settings_provider.rs`,
-   `crates/workspace/src/workspace.rs` (`client_side_decorations`),
-   `crates/platform_title_bar` and `crates/ui/src/components`.
-6. Re-copy Zed's assets: `assets/icons/*.svg` and `LICENSES`,
-   `assets/themes` (with `LICENSES`) and `assets/fonts` into
-   `crates/gui/assets` (the `serves_every_icon_ui_can_name` test fails if
-   `ui::IconName` gained an icon). Diff Zed's
-   `crates/theme_settings/src/{schema.rs,theme_settings.rs}` between the
-   two tags and carry the changes into `crates/gui/src/zed_theme.rs`. Check
-   `script/linux` for new system packages (README, "Desktop app").
-7. Run the GUI gate (`just check-gui`):
-   `cargo fmt --manifest-path crates/gui/Cargo.toml --check`,
-   `cargo clippy --manifest-path crates/gui/Cargo.toml --all-targets -- -D warnings`,
-   `cargo test --manifest-path crates/gui/Cargo.toml`; and the console gate
-   (`just check`), which must not change: `cargo fmt --all --check`,
-   `cargo clippy --workspace --all-targets -- -D warnings`,
-   `cargo test --workspace`.
-8. Update the table at the top of this file and commit the bump on its own.
-
 ## Settings, themes and keys
 
 `~/.config/ainet/settings.json` (`$XDG_CONFIG_HOME` respected) is JSON with
 comments and trailing commas, every field optional, with a JSON schema
-for editors (`"$schema"`, see phase 7); saved changes apply at
+for editors (`"$schema"`, see "Workspace restore, packaging and macOS"); saved changes apply at
 once (the file is checked every 750 ms: its time, size and a hash of its
 contents, so a quick re-save of the same size is seen too). If it does not parse, the last good
 settings stay and the status bar says what is wrong. `ctrl-,` opens it
@@ -992,6 +975,175 @@ to the agent, so the workspace's ctrl keys (`ctrl-b`, `ctrl-j`, `ctrl-q`, …)
 do nothing there; a test keeps it so. The actions are in
 `crates/gui/src/actions.rs`; `ui::KeyBinding::for_action` shows any of
 them as a hint.
+
+## Tests and CI
+
+Run them with `just check-gui` (the GUI) and `just check` (the console
+crates, which the GUI shares through `ainet-model`), or both with
+`just check-all`. GUI tests are of two kinds:
+
+- **Unit tests** (`#[test]`) for the pure parts: the pane tree, the text
+  buffer, terminal layout and key encoding, the saved-workspace format,
+  settings and keymap parsing, JSON editing, map flights and camera.
+- **Headless tests** (`#[gpui::test]`) on GPUI's test platform: a real
+  `Workspace` on the demo fleet (or an offline one) in a window with no
+  display, driven by simulated keys, clicks, drags, wheel events and the
+  test clock, and checked by what the fleet sent (`FleetModel::sent`),
+  what the views hold and where elements were drawn
+  (`debug_selector`/`debug_bounds`). Helpers live in `main.rs`'s tests:
+  `init_test` (the app as `main` sets it up, without the user's config),
+  `demo_workspace`, `sent` and `modal::<V>`. Windows must be activated
+  for focus events to fire. GPUI never delivers frame callbacks in tests,
+  so anything that waits for the next frame (Zed's `right_click_menu`
+  focusing its menu, say) is driven by clicks instead.
+
+Buttons cannot be named for tests themselves; where a test clicks one
+(the Inbox's Allow, Always and Deny, the status bar's dock buttons), a
+`div` around it carries the selector. Zed's own context menus name their
+entries `MENU_ITEM-<label>`.
+
+What each module is tested by (u: unit tests, h: headless tests in the
+module; modules without tests of their own are covered where named):
+
+| Module | u | h | Covered |
+|---|---|---|---|
+| `main.rs` | 1 | 7 | the display check, the demo's numbers, selection, bundled themes, settings reload, `confirm_quit`, default keys, the window opening as it was left through `open_window` (bounds, panes, folds; `--view` winning over saved panes) |
+| `actions.rs`, `keymap.rs` | 1 | 3 | Zed's keymap format, every default binding naming a real action, a focused terminal getting every ctrl letter and the list keys, user overrides and errors |
+| `args.rs` | 5 | | flags and view names |
+| `assets.rs` | 2 | | every `ui::IconName` served, themes, fonts and keymaps bundled |
+| `settings.rs`, `json_edit.rs`, `watch.rs` | 16 | 1 | defaults, the template and schema, lenient JSON, clamping, a theme per appearance, saving into the text as written, never losing the file, file watching |
+| `themes.rs`, `zed_theme.rs` | 2 | 3 | Deepharness by default, One Dark bundled, user themes loaded, reported and reloaded, palettes as themes |
+| `theme_selector.rs` | | 2 | preview, escape and a click outside restoring, the pick saved; a query matching nothing, a theme per appearance changing only that one, a broken settings.json left alone with a toast |
+| `workspace.rs`, `pane.rs`, `pane_group.rs`, `dock.rs`, `item.rs`, `panels.rs` | 3 | 9 | tabs opening, cycling and closing (click, middle click), the tab's right-click menu (Close, Close Others, Close All, Split Right and Down from a tab that is not active), splits and focus by direction, zoom, dock resizing by dragging, the status bar's dock buttons, the bottom dock's panels and focus actions, toasts |
+| `workspace/persist.rs`, `persistence.rs` | 9 | 6 | the file's format and versions, folding gone tabs, bounds, the debounce; a workspace coming back as left, gone agents dropped quietly, saving once settled, on close and on quit, saved panes kept while ainetd is silent |
+| `modal_layer.rs`, `picker.rs`, `switcher.rs`, `tab_switcher.rs` | | 4 | filtering, keys, escape; the agent switcher (in `workspace.rs`); `ctrl-tab` |
+| `text_input/` | 8 | 5 | the buffer's edits, moves, undo and IME offsets; typing, clipboard, several lines, read-only; Zed's `InputField` on it |
+| `fleet.rs` | | 8 | notices, quiet requests, reconnects, the fetch pump, streamed terminals, changed screens announced, failed and incompatible daemons |
+| `fleet_panel.rs`, `message.rs`, `critter.rs` | 6 | 7 | the TUI's order, keys and folds, clicks, the agent menu's requests, `m` and the message modal, critters drawn and animated only while drawn |
+| `agent_panel.rs` | 2 | 1 | the selected agent, the gauge, the sparkline |
+| `terminal_item.rs`, `terminal_element.rs`, `terminal_layout.rs`, `terminal_input.rs` | 16 | 13 | layout, colours, selections, row cache and keys; key encoding; the screen drawn, focus and `Interact`, keys past the workspace, one `Resize`, scrollback, copy and paste, the right-click menu by its keys (Paste, Send Ctrl-C, Copy, Clear Selection, Message…, Zoom; escape types nothing), Tile all, redrawing only what changed |
+| `inbox.rs` | 4 | 8 | order, detail styles, picks, the glow; the answer keys, cards by selection and click, the Allow, Always and Deny buttons answering their own card, questions, `ctrl-shift-y`, history, alerts |
+| `comms.rs`, `commands.rs` | 6 | 6 | rows, splices, sticking to the end, mentions, code; lines sent as the TUI's, completion, keys, threads, clicks |
+| `queue_panel.rs`, `queue_form.rs`, `chatroom.rs`, `events_panel.rs`, `report.rs` | 1 | 9 | the queue's order and chips, every menu entry and form, right click; chat rooms and the cap; the events log; reports |
+| `map.rs` | 4 | 6 | flights, the camera; drawing, hover, clicks, panning, messages flying, the empty fleet |
+| `command_palette.rs`, `up_modal.rs`, `rig_modals.rs`, `seat_modals.rs`, `form.rs` | 3 | 11 | actions with keys, commands and their errors, `/answer`, `/view`; Up, Restore, Down, the rig switcher, Spawn, Grow |
+| `toast_layer.rs`, `problems.rs`, `status_bar.rs`, `title_bar.rs` | 3 | 3 | toast lifetimes, problems kept until cleared, the counts in the TUI's words (the title bar's rig switcher in `rig_modals.rs`) |
+| `decorations.rs`, `quit.rs`, `sink.rs`, `packaging.rs` | 6 | | resize edges, the channel sink, the icon and desktop entry (quitting in `main.rs`) |
+
+Not tested headless: the window controls and client-side decorations
+(the test platform has no window manager), drag and drop of files, the
+system's folder picker (Browse… is checked to ask for it), IME
+composition in a real input method, and anything only a real text
+system shows (shaping, fonts).
+
+**Screenshots.** `src/screenshot.rs` is an ignored test that draws the
+demo workspace offscreen with GPUI's own renderer
+(`gpui::HeadlessAppContext`, `gpui_platform::current_headless_renderer`,
+which is wgpu without a surface, and the Linux app's cosmic-text text
+system) and writes `workspace.png`, `terminal.png`, `inbox.png` and
+`map.png` into `target/screenshots/`:
+
+```sh
+just screenshot-gui   # cargo test --manifest-path crates/gui/Cargo.toml screenshot -- --ignored --nocapture
+```
+
+It needs a GPU wgpu can draw on without a window (a Vulkan driver, or
+lavapipe in software), which is why it is ignored and CI does not run
+it. Nothing is compared against saved pictures: rendering differs
+between drivers and fonts, so the pictures are for a person to look at.
+
+**CI.** `.github/workflows/ci.yml` has two jobs on `ubuntu-latest`:
+`console` runs `cargo fmt --all --check`, clippy with `-D warnings` and
+`cargo test` for the root workspace, then fails if Zed's repository was
+fetched; `gui` installs the system packages the GUI's tree links (Zed's
+`script/linux` at the tag, less what only Zed's other crates need:
+fontconfig, freetype, Wayland, X11, xcb, xkbcommon, Vulkan, zstd),
+installs the toolchain named by `crates/gui`'s `rust-version`, and runs
+the same three with `--manifest-path crates/gui/Cargo.toml`. Each job
+caches cargo's registry and `target/`, keyed by its own `Cargo.lock`.
+The workflow has been checked as YAML but has not run on GitHub yet.
+cargo-deny is not configured: the two workspaces need different licence
+allow-lists (MIT for the console, GPL-3.0-or-later with Zed's licences
+for the GUI), and a config that has never been run would only look
+right.
+
+## Known gaps
+
+Collected from the plan's phase notes; none of these is started.
+
+- **Panes:** dragging tabs between panes, pinned and preview tabs, a
+  component preview window. `--view terminals` and `--view rig:NAME` at
+  start show a stand-in tab; tiling them takes `ctrl-g` or `/view
+  rig:NAME`.
+- **Fleet and Agent panels:** cost per agent (ainetd does not report it);
+  the TUI's spinner and pulsing glyph (a state dot instead).
+- **Terminals:** URL hover, IME composition (keys come from key-down
+  events), forwarding the mouse to programs that ask for it. The TUI
+  still fetches whole screens rather than streaming. Laying out a whole
+  screen still goes cell by cell (only the first frame and new rows pay
+  it), and shaping has not been measured on a real display. A detached
+  stream's thread can pass on one message in the instant before it sees
+  the detach; the next whole screen (at most 5 s later) mends it.
+  Cached panes and panels rely on every view that reads the fleet
+  observing it, which all do today.
+- **Inbox:** the agent's role on the card, Markdown beyond headings,
+  lists and fenced code, keyboard focus on single buttons.
+- **Comms:** a right-click menu on messages, a completion list while
+  typing `@`, Markdown beyond fenced code, history older than the Store
+  keeps.
+- **Bottom dock and reports:** creating a queue item from the panel
+  (`/queue` in Comms does), editing priority and tags, a reason when
+  unclaiming, `@` completion in the handoff form; searching a report,
+  YAML highlighting, transcript filters.
+- **Map:** empty and stopped seats, edge kinds other than who directs
+  whom, a menu on nodes.
+- **Palette and modals:** pickers for `/adopt` and `/discover`, editing a
+  rig's edges when growing, a rig's own menu in the Fleet.
+- **Restore:** the zoomed pane, selections in Comms and the Inbox, scroll
+  positions and several windows are not saved (reports deliberately
+  not); a dock size saved in a larger window is not capped until
+  dragged.
+- **Packaging and platforms:** the Arch `PKGBUILD` has not been built
+  (only `makepkg --printsrcinfo`); `just install-gui` was run by hand, not
+  through `just`; macOS has not been built or run. The settings
+  template's `"$schema"` URL resolves once this branch is on `main`.
+- **Tests and CI:** the workflow has not run on GitHub; screenshots are
+  not compared; no cargo-deny.
+
+## Upgrading Zed
+
+1. Pick the release: the newest `vX.Y.Z` tag (not `-pre`) on
+   <https://github.com/zed-industries/zed/releases>.
+2. Change the `tag` on every Zed dependency in `crates/gui/Cargo.toml`.
+3. Fetch Zed's root manifest at the new tag:
+   `curl -fsSL https://raw.githubusercontent.com/zed-industries/zed/<tag>/Cargo.toml`.
+   Compare its `[patch.crates-io]` with ours; update the revisions of the
+   three we copy and add any new entry whose crate appears in
+   `cargo tree --manifest-path crates/gui/Cargo.toml`.
+4. Check Zed's `rust-toolchain.toml` at the tag and raise `rust-version` in
+   `crates/gui/Cargo.toml` if it moved.
+5. `cargo update --manifest-path crates/gui/Cargo.toml -p gpui` (refreshes
+   the git checkout in `crates/gui/Cargo.lock`), then
+   `cargo build --manifest-path crates/gui/Cargo.toml`. The new source is under
+   `~/.cargo/git/checkouts/zed-*/<short-rev>/`; read it for API changes, in
+   particular `crates/theme/src/theme_settings_provider.rs`,
+   `crates/workspace/src/workspace.rs` (`client_side_decorations`),
+   `crates/platform_title_bar` and `crates/ui/src/components`.
+6. Re-copy Zed's assets: `assets/icons/*.svg` and `LICENSES`,
+   `assets/themes` (with `LICENSES`) and `assets/fonts` into
+   `crates/gui/assets` (the `serves_every_icon_ui_can_name` test fails if
+   `ui::IconName` gained an icon). Diff Zed's
+   `crates/theme_settings/src/{schema.rs,theme_settings.rs}` between the
+   two tags and carry the changes into `crates/gui/src/zed_theme.rs`. Check
+   `script/linux` for new system packages (README, "Desktop app").
+7. Run the GUI gate (`just check-gui`):
+   `cargo fmt --manifest-path crates/gui/Cargo.toml --check`,
+   `cargo clippy --manifest-path crates/gui/Cargo.toml --all-targets -- -D warnings`,
+   `cargo test --manifest-path crates/gui/Cargo.toml`; and the console gate
+   (`just check`), which must not change: `cargo fmt --all --check`,
+   `cargo clippy --workspace --all-targets -- -D warnings`,
+   `cargo test --workspace`.
+8. Update the table at the top of this file and commit the bump on its own.
 
 ## Build notes
 

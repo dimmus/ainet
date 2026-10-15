@@ -4,33 +4,23 @@ Plan for adding a native GUI to ainet, built on Zed's UI stack (GPUI and
 Zed's component library) and following Zed's look and interaction model,
 while the console version (CLI + TUI) stays exactly as it is.
 
-Status: **phase 7 done** (the workspace restored per daemon socket from
-`$XDG_STATE_HOME/ainet/gui.json`: window, docks, panel sizes, splits and
-tabs, folded rigs, the Map's view, the palette's recent actions; saved
-once changes settle and before closing or quitting; a settings JSON
-schema; a desktop entry, a critter icon, `just install-gui` and an
-untested Arch `PKGBUILD`; macOS checked to be plausible, not supported;
-see [GUI.md](GUI.md)), phase 8 next; phase 6 done (measured first: refetching whole screens was
-the cost, so terminals on show are now streamed from ainetd with the new
-`Request::Attach`, falling back to fetching with older daemons; only the
-terminals whose screen changed redraw, panes and panels are cached
-views, rows are shaped once while they show the same; scrollback comes
-with its colours; numbers and details in [GUI.md](GUI.md)); phase 5 done (the command palette over every action with
-its keys and the console's command language, the agent switcher opening
-terminals, the spec picker and Up form with its plan, restore, down,
-spawn and grow forms, the theme selector saving into settings.json, user
-themes reloading on change, the title bar's rig switcher, and the tab
-switcher; review fixes applied; see [GUI.md](GUI.md)); phase 4 done (the Fleet panel with
-critters and the agent menu, the Agent panel, the live terminal with
-Tile all, the Inbox with approval cards, questions and the glowing
-waiting badge, Comms with threads and a compose box, the bottom dock's
-Queue, Chatroom and Events panels, the Map with rig clusters and
-messages in flight, transcripts, specs and queue items as
-report tabs; review fixes applied, with `ctrl-o`, `ctrl-shift-y` and the
-Release and Remove seat entries); phase 3 done (option A: panes, splits, docks,
-modals, toasts, the text input and the picker); phase 2 done (themes,
-fonts, settings and keymaps); phase 1 done (`crates/gui`: the GPUI
-skeleton on Zed v1.24.2); phase 0 done (`crates/model`). Written 2026-10-15 against commit `c0dbb5a`.
+Status: **phases 0–8 done** (2026-10-16). `ainet-model` is shared by
+both front ends (0); `crates/gui` runs on Zed v1.24.2 (1) with Zed's
+themes, fonts, settings and keymaps (2), panes, docks, modals, toasts, a
+text field and a picker (3), every TUI view: the Fleet and Agent panels,
+live terminals, the Inbox, Comms, Queue, Chatroom, Events, the Map and
+reports (4), the command palette, pickers and forms (5), terminals
+streamed from ainetd and drawn only where they changed (6), the
+workspace restored per daemon socket, a settings schema and packaging
+(7), and a coverage review of every module with the missing headless
+tests added, a two-job CI and offscreen screenshots (8). What is still
+missing is listed in one place, under "Known gaps" in [GUI.md](GUI.md#known-gaps); in short:
+dragging tabs between panes, URL hover, IME and mouse forwarding in
+terminals, cost per agent, a few menus and pickers (`/adopt`,
+`/discover`, messages, map nodes, rigs), the TUI on the stream, several
+windows, an Arch package and a macOS build that were never built, and a
+CI workflow that has not yet run on GitHub. The phase notes below say
+what each phase did. Written 2026-10-15 against commit `c0dbb5a`.
 
 **Decided (2026-10-15): option A.** The GUI uses Zed's real `ui` and `theme`
 crates from a pinned Zed git revision, and the `ainet-gui` crate and binary
@@ -572,6 +562,25 @@ Inbox selection across sessions, several windows.
   Wayland/X display.
 - CI keeps `just check` for the console crates; a separate `just check-gui`
   job (clippy `-D warnings`, tests) that installs GPUI's system packages.
+
+Done. Coverage reviewed module by module (the table under "Tests and CI"
+in GUI.md); headless tests added where earlier phases left paths
+untested: the tab's right-click menu, the status bar's dock buttons, the
+Inbox's Allow/Always/Deny buttons, the terminal's right-click menu
+(which found and fixed a bug: the item's own focus-on-click took the
+keyboard back from the menu, so its arrow keys and enter went to the
+agent), the theme selector's edge cases, and the restore through
+`main`'s `open_window` with a state file. Screenshots: GPUI v1.24.2 has
+a headless renderer (`gpui_platform::current_headless_renderer`, wgpu
+without a surface) and `gpui::HeadlessAppContext`, so an ignored test
+draws the demo workspace into `target/screenshots/` (`just
+screenshot-gui`; it needs a GPU or a software Vulkan driver, so CI does
+not run it). CI: `.github/workflows/ci.yml`, a `console` job (fmt,
+clippy, test; fails if Zed was fetched) and a `gui` job (Zed's system
+packages that the GUI's tree links, the toolchain named by
+`rust-version`, cargo and `target/` cached by `crates/gui/Cargo.lock`).
+`just check-all` runs both gates. cargo-deny was left out: no config for
+the two licences could be checked here.
 
 ## 6. Risks
 

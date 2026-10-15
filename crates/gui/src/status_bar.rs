@@ -111,6 +111,7 @@ impl StatusBar {
                     .on_click(move |_, window, cx| window.dispatch_action(action.boxed_clone(), cx));
                 div()
                     .relative()
+                    .debug_selector(move || format!("DOCK-BUTTON-{name}"))
                     .child(button)
                     .when_some(label, |el, count| el.child(CountBadge::new(count)))
                     .into_any_element()

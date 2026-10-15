@@ -1,0 +1,131 @@
+# Two jobs, one per Cargo workspace (see docs/GUI.md, "A workspace of its
+# own"): the MIT console crates, which never fetch Zed, and the desktop app
+# in crates/gui, built against Zed's GPUI pinned to one release. They are
+# `just check` and `just check-gui`.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # CI builds once; incremental state and full debug info only fill the
+  # disk and the cache.
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  console:
+    name: console
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml asks for stable with clippy and rustfmt; rustup
+      # installs it on first use.
+      - name: Rust toolchain
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustc --version
+          cargo --version
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: console-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: console-${{ runner.os }}-
+
+      - name: cargo fmt
+        run: cargo fmt --all --check
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: cargo test
+        run: cargo test --workspace --locked
+
+      # The console's build must never need Zed: crates/gui is a workspace
+      # of its own, excluded from this one.
+      - name: Zed was not fetched
+        run: |
+          if ls ~/.cargo/git/checkouts 2>/dev/null | grep -q '^zed-'; then
+            echo "the console build fetched Zed's repository" >&2
+            exit 1
+          fi
+
+  gui:
+    name: gui
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      # GPUI and its dependencies take more room than the runner leaves.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      # The native libraries ainet-gui's tree links, from Zed's
+      # script/linux at v1.24.2, less what Zed's other crates need
+      # (libasound2-dev, libgit2-dev, libssl-dev, libva-dev, libsqlite3-dev,
+      # ...): checked against crates/gui/Cargo.lock's -sys crates
+      # (xcb, xkbcommon, x11, wayland-sys, yeslogic-fontconfig-sys,
+      # freetype-sys, zstd-sys). Vulkan is loaded at run time only.
+      - name: System packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc g++ cmake pkg-config \
+            libfontconfig-dev libfreetype-dev \
+            libwayland-dev \
+            libx11-dev libx11-xcb-dev libxcb1-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev \
+            libvulkan-dev libzstd-dev
+
+      # The toolchain crates/gui declares (Zed's at the pin), which also
+      # checks that its rust-version is honest. RUSTUP_TOOLCHAIN overrides
+      # the root rust-toolchain.toml.
+      - name: Rust toolchain
+        run: |
+          version=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' crates/gui/Cargo.toml)
+          test -n "$version"
+          rustup toolchain install "$version" --profile minimal --component clippy,rustfmt
+          echo "RUSTUP_TOOLCHAIN=$version" >> "$GITHUB_ENV"
+          echo "GUI_RUST=$version" >> "$GITHUB_ENV"
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: gui-${{ runner.os }}-${{ env.GUI_RUST }}-${{ hashFiles('crates/gui/Cargo.lock') }}
+          restore-keys: gui-${{ runner.os }}-${{ env.GUI_RUST }}-
+
+      - name: cargo fmt
+        run: cargo fmt --manifest-path crates/gui/Cargo.toml --check
+      - name: cargo clippy
+        run: cargo clippy --manifest-path crates/gui/Cargo.toml --all-targets --locked -- -D warnings
+      # Headless: GPUI's test platform needs no display or GPU. The
+      # screenshot test is ignored (it needs a GPU) and does not run.
+      - name: cargo test
+        run: cargo test --manifest-path crates/gui/Cargo.toml --locked

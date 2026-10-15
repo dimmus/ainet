@@ -15,7 +15,7 @@ run:
 daemon:
     AINET_LOG=debug cargo run -- daemon
 
-# Format, lint, test the console crates: what CI should run. The GUI is a
+# Format, lint, test the console crates (CI's "console" job). The GUI is a
 # workspace of its own, so this never compiles or fetches GPUI (see
 # check-gui).
 check:
@@ -38,6 +38,14 @@ check-gui:
     cargo fmt --manifest-path crates/gui/Cargo.toml --check
     cargo clippy --manifest-path crates/gui/Cargo.toml --all-targets -- -D warnings
     cargo test --manifest-path crates/gui/Cargo.toml
+
+# Both gates, one after the other: what CI runs as its two jobs.
+check-all: check check-gui
+
+# Pictures of the demo workspace in target/screenshots/, drawn offscreen
+# by GPUI's own renderer (needs a GPU or a software Vulkan driver).
+screenshot-gui:
+    cargo test --manifest-path crates/gui/Cargo.toml screenshot -- --ignored --nocapture
 
 test:
     cargo nextest run --workspace || cargo test --workspace

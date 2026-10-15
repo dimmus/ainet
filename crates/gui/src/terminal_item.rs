@@ -722,6 +722,10 @@ impl Render for TerminalItem {
                         cx.listener(|this, event: &MouseDownEvent, window, cx| {
                             window.focus(&this.focus_handle, cx);
                             this.deploy_context_menu(event.position, window, cx);
+                            // Else the item's own focus-on-click takes the
+                            // keyboard back from the menu, and its keys go
+                            // to the agent.
+                            cx.stop_propagation();
                         }),
                     )
                     .on_scroll_wheel(cx.listener(Self::scroll_wheel))
@@ -1148,6 +1152,73 @@ mod tests {
             inputs(&take_sent(&fleet, cx)),
             ["one\rtwo", "\x1b[200~one\ntwo\x1b[201~", "\x03"]
         );
+    }
+
+    #[gpui::test]
+    async fn the_right_click_menu_acts_on_the_terminal(cx: &mut TestAppContext) {
+        let (w, item, cx) = terminal(cx);
+        let fleet = fleet(&w, cx);
+        let screen = cx.debug_bounds("TERMINAL-SCREEN").expect("the screen is drawn");
+        // Opens the menu and picks its `entry`th entry that can be picked,
+        // by the keys: the menu has the keyboard, not the agent.
+        let pick = |entry: usize, cx: &mut VisualTestContext| {
+            cx.simulate_mouse_down(screen.center(), MouseButton::Right, Modifiers::none());
+            cx.simulate_mouse_up(screen.center(), MouseButton::Right, Modifiers::none());
+            cx.run_until_parked();
+            assert!(
+                item.read_with(cx, |t, _| t.context_menu.is_some()),
+                "the menu is open"
+            );
+            // `home` first: the menu may open with its first entry chosen.
+            let mut keys = vec!["home"];
+            keys.extend(vec!["down"; entry]);
+            keys.push("enter");
+            cx.simulate_keystrokes(&keys.join(" "));
+            cx.run_until_parked();
+            assert!(item.read_with(cx, |t, _| t.context_menu.is_none()), "and closed");
+        };
+        settle(cx);
+        take_sent(&fleet, cx);
+
+        // With nothing selected, Copy and Clear Selection cannot be picked:
+        // Paste is the first, Send Ctrl-C the second.
+        pick(1, cx);
+        assert_eq!(inputs(&take_sent(&fleet, cx)), ["\x03"]);
+        let focus = item.read_with(cx, |t, _| t.focus_handle.clone());
+        assert!(
+            cx.update(|window, _| focus.is_focused(window)),
+            "the keyboard is back"
+        );
+        cx.write_to_clipboard(ClipboardItem::new_string("ls".into()));
+        pick(0, cx);
+        assert_eq!(inputs(&take_sent(&fleet, cx)), ["ls"]);
+        // Escape closes it without a word to the agent.
+        cx.simulate_mouse_down(screen.center(), MouseButton::Right, Modifiers::none());
+        cx.simulate_keystrokes("escape");
+        assert!(item.read_with(cx, |t, _| t.context_menu.is_none()));
+        assert!(inputs(&take_sent(&fleet, cx)).is_empty());
+        assert!(cx.update(|window, _| focus.is_focused(window)));
+
+        // With a selection, Copy is first.
+        let selection = Selection {
+            anchor: (0, 0),
+            head: (0, 3),
+        };
+        item.update(cx, |t, _| t.selection = Some(selection));
+        let expected = item.read_with(cx, |t, cx| selection.text(t.screen(cx).unwrap()));
+        pick(0, cx);
+        assert_eq!(cx.read_from_clipboard().and_then(|c| c.text()), Some(expected));
+        // Clear Selection, after Copy and Paste.
+        pick(2, cx);
+        assert_eq!(item.read_with(cx, |t, _| t.selection().copied()), None);
+
+        // Zoom, the last: Paste, Send Ctrl-C, Message…, Zoom.
+        pick(3, cx);
+        assert!(w.read_with(cx, |w, _| w.zoomed_pane().is_some()));
+        // Message… opens the message modal for this agent.
+        pick(2, cx);
+        let modal = crate::tests::modal::<crate::message::MessageModal>(&w, cx);
+        assert!(modal.is_some(), "the message modal is open");
     }
 
     #[gpui::test]

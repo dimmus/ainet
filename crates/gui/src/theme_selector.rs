@@ -186,6 +186,8 @@ impl PickerDelegate for ThemeSelector {
 mod tests {
     use gpui::{Modifiers, TestAppContext, point, px};
 
+    use theme::SystemAppearance;
+
     use super::*;
     use crate::actions::theme_selector::Toggle;
     use crate::tests::{demo_workspace, modal};
@@ -241,6 +243,70 @@ mod tests {
             );
             assert_eq!(settings::get(cx).ui_font_size, 15.);
         });
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[gpui::test]
+    async fn edge_cases_leave_the_file_alone_or_change_one_value(cx: &mut TestAppContext) {
+        let (w, cx) = demo_workspace(cx);
+        let dir = std::env::temp_dir().join(format!("ainet-gui-theme-edges-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("settings.json");
+        let text =
+            "{ \"theme\": { \"mode\": \"system\", \"light\": \"One Light\", \"dark\": \"One Dark\" } }\n";
+        std::fs::write(&file, text).unwrap();
+        cx.update(|_, cx| {
+            *SystemAppearance::global_mut(cx) = SystemAppearance(theme::Appearance::Dark);
+            settings::save_to(file.clone(), cx);
+            settings::reload(text, cx);
+        });
+        let theme = |cx: &mut gpui::VisualTestContext| cx.update(|_, cx| cx.theme().name.to_string());
+        let open = |cx: &mut gpui::VisualTestContext| modal::<Picker<ThemeSelector>>(&w, cx).is_some();
+        assert_eq!(theme(cx), "One Dark", "the system is dark");
+
+        // Nothing matches: enter does nothing and keeps the selector open,
+        // the theme in use stays; escape leaves.
+        cx.dispatch_action(Toggle);
+        cx.simulate_input("no such theme at all");
+        cx.simulate_keystrokes("enter");
+        assert!(open(cx));
+        assert_eq!(theme(cx), "One Dark");
+        cx.simulate_keystrokes("escape");
+        assert!(!open(cx));
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), text);
+
+        // A theme per appearance: the pick replaces the one for the
+        // system's appearance now, and only it.
+        cx.dispatch_action(Toggle);
+        cx.simulate_input("ayu dark");
+        cx.simulate_keystrokes("enter");
+        assert_eq!(theme(cx), "Ayu Dark");
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            text.replace("\"One Dark\"", "\"Ayu Dark\"")
+        );
+
+        // settings.json broken by hand meanwhile: it is left as it is and
+        // a toast says why.
+        let broken = "{ \"theme\": ";
+        std::fs::write(&file, broken).unwrap();
+        cx.dispatch_action(Toggle);
+        cx.simulate_input("gruvbox dark hard");
+        cx.simulate_keystrokes("enter");
+        assert!(!open(cx));
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), broken);
+        let toasts = w.read_with(cx, |w, cx| {
+            w.toast_layer()
+                .read(cx)
+                .texts()
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>()
+        });
+        assert!(
+            toasts.iter().any(|t| t.contains("settings.json does not parse")),
+            "{toasts:?}"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

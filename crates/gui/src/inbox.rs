@@ -687,7 +687,7 @@ impl InboxItem {
                       decision: Decision,
                       action: &dyn Action,
                       cx: &mut Context<Self>| {
-            Button::new(SharedString::from(format!("inbox-{label}-{id}")), label)
+            let button = Button::new(SharedString::from(format!("inbox-{label}-{id}")), label)
                 .start_icon(Icon::new(icon).size(IconSize::XSmall).color(color))
                 .label_size(LabelSize::Small)
                 .when(selected, |el| {
@@ -696,7 +696,11 @@ impl InboxItem {
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.select(id, cx);
                     this.answer(id, decision, cx);
-                }))
+                }));
+            // A button cannot be named for tests itself; its box can.
+            div()
+                .debug_selector(move || format!("INBOX-{}-{id}", label.to_uppercase()))
+                .child(button)
         };
         let agent = item.agent.clone();
         h_flex()
@@ -1439,6 +1443,46 @@ mod tests {
         assert_eq!(inbox.read_with(cx, |i, _| i.selected()), Some(902));
         cx.simulate_keystrokes("ctrl-y");
         assert_eq!(answers(&take_sent(&fleet, cx)), [(902, Decision::Allow)]);
+    }
+
+    #[gpui::test]
+    async fn the_buttons_answer_their_own_card(cx: &mut TestAppContext) {
+        let (w, cx) = demo(cx);
+        let fleet = fleet(&w, cx);
+        let first = fleet.read_with(cx, |f, _| f.store.inbox[f.store.next_waiting().unwrap()].id);
+        let lead = seat(&fleet, "orch-lead@docs", cx);
+        arrives(&fleet, asking(901, &lead, InboxKind::Permission, &[], false), cx);
+        arrives(&fleet, asking(902, &lead, InboxKind::Plan, &[], false), cx);
+        cx.dispatch_action(crate::actions::OpenInbox);
+        cx.run_until_parked();
+        let inbox = inbox(&w, cx).unwrap();
+        assert_eq!(inbox.read_with(cx, |i, _| i.selected()), Some(first));
+        take_sent(&fleet, cx);
+        let click = |button: String, cx: &mut VisualTestContext| {
+            let bounds = cx
+                .debug_bounds(button.clone().leak())
+                .unwrap_or_else(|| panic!("{button} is drawn"));
+            cx.simulate_click(bounds.center(), Modifiers::none());
+        };
+
+        // A button on a card that is not selected answers that card, not
+        // the selected one, and selects it.
+        click("INBOX-DENY-902".into(), cx);
+        assert_eq!(answers(&take_sent(&fleet, cx)), [(902, Decision::Deny)]);
+        assert_eq!(inbox.read_with(cx, |i, _| i.selected()), Some(902));
+        click("INBOX-ALWAYS-901".into(), cx);
+        assert_eq!(answers(&take_sent(&fleet, cx)), [(901, Decision::Always)]);
+        assert_eq!(inbox.read_with(cx, |i, _| i.selected()), Some(901));
+
+        // Allow on the demo's own request: the demo resolves it, and its
+        // buttons go with the wait.
+        click(format!("INBOX-ALLOW-{first}"), cx);
+        assert_eq!(answers(&take_sent(&fleet, cx)), [(first, Decision::Allow)]);
+        cx.run_until_parked();
+        assert!(cx.debug_bounds(format!("INBOX-ALLOW-{first}").leak()).is_none());
+        // A click gives the Inbox the keys, as a click on the card does.
+        let focus = inbox.read_with(cx, |i, cx| i.focus_handle(cx));
+        assert!(cx.update(|window, cx| focus.contains_focused(window, cx)));
     }
 
     #[gpui::test]

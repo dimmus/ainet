@@ -63,8 +63,9 @@ Deepharness and Omarchy, Zed's fonts, and Zed-style settings
 left it: the window, docks, splits and tabs (an agent's terminal while
 the agent lives), per daemon socket, from
 `~/.local/state/ainet/gui.json`. The plan is
-[docs/GUI-PLAN.md](docs/GUI-PLAN.md); the Zed pin and how to upgrade it,
-[docs/GUI.md](docs/GUI.md).
+[docs/GUI-PLAN.md](docs/GUI-PLAN.md); the guide (the Zed pin and how to
+upgrade it, every part of the app and its keys, the tests, and the
+known gaps) is [docs/GUI.md](docs/GUI.md).
 
 ```bash
 just gui-demo                 # cargo run --manifest-path crates/gui/Cargo.toml -- --demo
@@ -206,10 +207,20 @@ check their queue.
 | cargo-deny | license and advisory checks | `cargo install cargo-deny --locked` |
 | sqlite3 | peek at the event log | already there |
 
+The repository holds two Cargo workspaces: the root one is the console
+(`ainet`, ainetd and their crates, MIT, Rust 1.88), and `crates/gui` is
+`ainet-gui` on its own (GPL-3.0-or-later because it links Zed's crates,
+Rust 1.98), so building or checking the console never fetches Zed. CI
+(`.github/workflows/ci.yml`) runs one job for each, the same commands as
+`just check` and `just check-gui`.
+
 Then:
 
 ```bash
-just check     # fmt, clippy -D warnings, tests
+just check          # the console: fmt, clippy -D warnings, tests
+just check-gui      # the desktop app: the same, with --manifest-path crates/gui/Cargo.toml
+just check-all      # both
+just screenshot-gui # pictures of the demo workspace in target/screenshots/ (needs a GPU)
 just demo
 ```
 
