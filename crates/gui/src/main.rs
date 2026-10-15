@@ -7,6 +7,7 @@ mod actions;
 mod agent_panel;
 mod args;
 mod assets;
+mod comms;
 mod critter;
 mod decorations;
 mod dock;

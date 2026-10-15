@@ -19,14 +19,15 @@ use ui::prelude::*;
 use crate::actions::{
     ActivateNextItem, ActivateNextPane, ActivatePaneDown, ActivatePaneLeft, ActivatePaneRight,
     ActivatePaneUp, ActivatePreviousItem, ActivatePreviousPane, Allow, Always, Capture, CloseActiveItem,
-    CloseAgent, CloseAllItems, CloseOtherItems, CloseWindow, Continue, Deny, MessageAgent, NextWaiting,
-    OpenComms, OpenInbox, OpenKeymap, OpenMap, OpenSettings, OpenTerminal, Operator, Relaunch, ReleaseSeat,
-    RemoveSeat, SelectNext, SelectPrev, ShowTranscript, SplitDown, SplitRight, TileAll, ToggleBottomDock,
-    ToggleCritterSize, ToggleLeftDock, ToggleRightDock, ToggleSwitcher, ToggleTypingGuard, ToggleZoom,
-    terminal as terminal_actions,
+    CloseAgent, CloseAllItems, CloseOtherItems, CloseWindow, Compose, Continue, Deny, MessageAgent,
+    NextWaiting, OpenComms, OpenInbox, OpenKeymap, OpenMap, OpenSettings, OpenTerminal, Operator, Relaunch,
+    ReleaseSeat, RemoveSeat, SelectNext, SelectPrev, ShowTranscript, SplitDown, SplitRight, TileAll,
+    ToggleBottomDock, ToggleCritterSize, ToggleLeftDock, ToggleRightDock, ToggleSwitcher, ToggleTypingGuard,
+    ToggleZoom, terminal as terminal_actions,
 };
 use crate::agent_panel::AgentPanel;
 use crate::args::View;
+use crate::comms::CommsItem;
 use crate::decorations::client_side_decorations;
 use crate::dock::{Dock, DockPosition, DraggedDock, Panel, RESIZE_HANDLE_SIZE};
 use crate::fleet::FleetModel;
@@ -139,6 +140,7 @@ impl Workspace {
         ];
         let first_item: Box<dyn ItemHandle> = match view.unwrap_or(View::Fleet) {
             View::Inbox => Box::new(cx.new(|cx| InboxItem::new(fleet.clone(), window, cx))),
+            View::Comms => Box::new(cx.new(|cx| CommsItem::new(fleet.clone(), window, cx))),
             view => Box::new(cx.new(|cx| Placeholder::new(view, cx))),
         };
         first.update(cx, |pane, cx| pane.add_item(first_item, true, false, window, cx));
@@ -511,6 +513,41 @@ impl Workspace {
         window.focus(&focus, cx);
         cx.notify();
         inbox
+    }
+
+    /// Opens Comms with its compose box at the keyboard: activates its
+    /// tab where one is open (in any pane), else adds one to the active
+    /// pane.
+    pub fn open_comms(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<CommsItem> {
+        let mut found = None;
+        for pane in self.panes() {
+            let at = pane
+                .read(cx)
+                .items()
+                .position(|i| i.to_any().downcast::<CommsItem>().is_ok());
+            if let Some(ix) = at {
+                pane.update(cx, |p, cx| p.activate_item(ix, false, window, cx));
+                found = pane
+                    .read(cx)
+                    .active_item()
+                    .and_then(|i| i.to_any().downcast::<CommsItem>().ok());
+                self.active_pane = pane.clone();
+                break;
+            }
+        }
+        let comms = match found {
+            Some(comms) => comms,
+            None => {
+                let comms = cx.new(|cx| CommsItem::new(self.fleet.clone(), window, cx));
+                self.active_pane.update(cx, |p, cx| {
+                    p.add_item(Box::new(comms.clone()), true, false, window, cx)
+                });
+                comms
+            }
+        };
+        comms.update(cx, |comms, cx| comms.focus_compose(window, cx));
+        cx.notify();
+        comms
     }
 
     /// `ctrl-y`, `ctrl-a` or `ctrl-n` outside the Inbox: as the TUI's, it
@@ -922,9 +959,14 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &RemoveSeat, window, cx| this.remove_seat(window, cx)))
             .on_action(cx.listener(|this, _: &Operator, window, cx| this.operator(window, cx)))
             .on_action(cx.listener(|this, _: &NextWaiting, _, cx| this.next_waiting(cx)))
-            .on_action(
-                cx.listener(|this, _: &OpenComms, window, cx| this.open_placeholder(View::Comms, window, cx)),
-            )
+            .on_action(cx.listener(|this, _: &OpenComms, window, cx| {
+                this.open_comms(window, cx);
+            }))
+            // Outside Comms, a new message opens it to write one.
+            .on_action(cx.listener(|this, _: &Compose, window, cx| {
+                let comms = this.open_comms(window, cx);
+                comms.update(cx, |comms, cx| comms.new_message(window, cx));
+            }))
             .on_action(cx.listener(|this, _: &OpenInbox, window, cx| {
                 this.open_inbox(None, window, cx);
             }))
@@ -1087,7 +1129,7 @@ mod tests {
         assert_eq!(tabs(&pane, cx).0.len(), 0);
         assert_eq!(w.read_with(cx, |w, _| w.panes().len()), 1);
         // An item can close itself.
-        cx.simulate_keystrokes("ctrl-shift-c");
+        cx.simulate_keystrokes("ctrl-t");
         let item = pane.read_with(cx, |p, _| p.active_item().unwrap().to_any());
         item.downcast::<Placeholder>().unwrap().update(cx, |_, cx| {
             cx.emit(crate::item::ItemEvent::UpdateTab);

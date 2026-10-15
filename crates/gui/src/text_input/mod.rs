@@ -6,7 +6,8 @@
 //! secrets, and `Submitted`/`Cancelled` events for forms. It also backs
 //! Zed's `ui_input::InputField` (see [`erased`]).
 //!
-//! Keys (`TextInput` context in the keymaps) go through the actions below.
+//! Keys (`TextInput` context in the keymaps, with `multiline` for several
+//! lines and `empty` while there is no text) go through the actions below.
 //! Enter and escape (`Confirm`, `Cancel`) are reported as events and then
 //! dispatched on as `menu::Confirm` and `menu::Cancel`, so a picker or
 //! modal around the input hears them too.
@@ -525,6 +526,11 @@ impl TextInput {
         context.add("TextInput");
         if self.buffer.multiline() {
             context.add("multiline");
+        }
+        // Keys can do something else in an empty field (the compose
+        // box's up and down select entries).
+        if self.buffer.is_empty() {
+            context.add("empty");
         }
         context
     }

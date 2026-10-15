@@ -274,6 +274,8 @@ mod tests {
                     "Picker",
                     "TextInput",
                     "TextInput && multiline",
+                    "CommsCompose > TextInput",
+                    "CommsCompose > TextInput && empty",
                 ];
                 for section in &sections {
                     assert!(

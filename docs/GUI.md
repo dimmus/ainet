@@ -135,7 +135,7 @@ Keys (Linux; macOS has the `cmd` equivalents), in the keymaps:
 | `ctrl-alt-left/right/up/down` | the pane in that direction (Zed's are `ctrl-k` chords, which a terminal needs) |
 | `shift-escape` | zoom the active pane, or put it back |
 | `ctrl-b`, `ctrl-alt-b`, `ctrl-j` | left, right, bottom dock |
-| `ctrl-shift-c`, `ctrl-shift-i`, `ctrl-t` | Comms, Inbox, Map tabs (Comms and Map are placeholders) |
+| `ctrl-shift-c`, `ctrl-shift-i`, `ctrl-t` | Comms, Inbox, Map tabs (Map is a placeholder) |
 | `ctrl-y`, `ctrl-a`, `ctrl-n` | allow, always allow, deny (outside the Inbox: open it on the oldest request) |
 | `ctrl-p` | the agent switcher |
 | `ctrl-o` | the operator's terminal, to type into; with no operator running, starts one (`command::operator_up`), as the TUI's |
@@ -147,7 +147,8 @@ Keys (Linux; macOS has the `cmd` equivalents), in the keymaps:
 field (`TextInput` context) the usual editing keys apply (`ctrl-z`,
 `ctrl-shift-z`, `ctrl-backspace`, `ctrl-left`, …); `enter` submits and
 `escape` cancels, and with several lines (`TextInput && multiline`)
-`shift-enter` starts a new line, as in Zed's agent panel.
+`shift-enter` starts a new line, as in Zed's agent panel. An empty field
+also has `empty` in its context, for keys that do something else there.
 
 Testing: the pieces have headless tests (`#[gpui::test]` with
 `VisualTestContext`): tabs, splits and focus, zoom, dock resizing by a
@@ -371,6 +372,81 @@ Inbox the keys, `ctrl-shift-y`, the history folding, `--view inbox`, and
 the alert's toast and glow count.
 `FleetModel::receive` (tests only) applies link messages directly.
 
+## Comms (phase 4 step 5)
+
+`CommsItem` (`comms.rs`) is the TUI's Comms stream as a tab, opened by
+`workspace::OpenComms` (`ctrl-shift-c`, which gives its compose box the
+keyboard) or `--view comms`. The queue the TUI shows beside it belongs
+to the bottom dock (step 6).
+
+- **The stream.** `Store::entries` in its order: messages and chat
+  posts interleaved, oldest first (`comms::rows` builds the same order
+  from ids without cloning, plus open threads). A `gpui::list`, since
+  rows differ in height: only rows on show are drawn, and when the
+  Store changes only the rows that changed are spliced in
+  (`comms::splice`), so the scroll position holds. A message shows its
+  sender's critter (or a person icon for you), `from → to` in the
+  agents' colours (the accent for you), `#id`, `↳ #id` for a reply, a
+  **held** chip (the typing guard holds it) or the TUI's unread dot (not
+  delivered, or not read; tooltip says which), how long ago, and the
+  whole body wrapped: fenced code in the buffer font, `@name`s in the
+  named agent's colour (`comms::mentions`, `comms::blocks`). A chat post
+  shows its poster, a `#topic rig` chip and the body. Nobody has said
+  anything yet: the TUI's words.
+- **Sticking to the end.** The list follows its end (`FollowMode::Tail`,
+  as Zed's agent panel): at the bottom, what arrives keeps it there;
+  scrolled up (the wheel), or with a row above the last selected, it
+  stays where you read; sending something, or selecting the last row,
+  brings it back down. `comms::sticks` is the decision, tested on its
+  own; gpui's list notices the wheel and scrolling back down.
+- **Threads.** A message with replies has a `Disclosure` with the count;
+  open (a click, or enter on it), its replies and theirs
+  (`Store::replies`, depth first) follow it, indented a level each with
+  indent guides. They come from the Store; no `Request::Thread` is
+  needed. A reply selected in a thread is answered as itself.
+- **Compose.** A multi-line `TextInput` at the bottom (enter sends,
+  `shift-enter` a new line, at most 6 lines before it scrolls), with what
+  a line will do above it and a send button. It is the TUI's input line
+  in Comms (`command::comms`, which the TUI now uses too): `@Name text`
+  messages that agent (`command::message`, delivered through the typing
+  guard); otherwise it answers the selected entry (`command::reply`: a
+  threaded reply to a message, a post in a chat's topic); with nothing
+  selected it says "select a message to answer, or start with @Name" and
+  keeps the words. `/commands` go through `command::parse` (`/chat`,
+  `/broadcast`, `/queue`, …); the console's own (`/view`, `/allow`,
+  `/quit`, …) become the app's actions. `tab` completes `@Mos` as the
+  TUI's (`command::complete`). As in the TUI, the newest entry is
+  selected when Comms opens, so a line answers it; the × by "Answering
+  #4 …" (or escape in the stream) makes it a new message instead.
+
+Keys (contexts `Comms`, the stream with the keyboard, and
+`CommsCompose`, around the compose box's field):
+
+| Keys | Where | Action |
+|---|---|---|
+| `up`, `down` | the stream, or the compose box while empty | select entries (`menu::*`) |
+| `home`, `end` | the stream | the first, the last entry |
+| `enter` | the stream | open or close the selected message's thread; with none, answer it |
+| `c` | the stream | `comms::Compose`: a new message (no selection, the box starts with `@`) |
+| `r` | the stream | `comms::Reply`: answer the selected entry (the newest if none) |
+| `escape` | the stream / the box | clear the selection / back to the stream |
+| `tab` | the box | `comms::Complete` |
+| `enter`, `shift-enter` | the box | send, new line |
+
+`comms::Compose` from anywhere else opens Comms to write one.
+
+Tests: pure ones for the rows (the Store's order with the demo,
+interleaved, threads under their message), splicing, the sticking
+decision, mentions and code blocks; headless ones for the stream as the
+Store's entries following a new post, lines sending exactly what the
+TUI's input line sends (reply, chat post with a second line, `@Name`,
+nothing selected, `/chat`), `tab` completion and the keys moving through
+the stream from the box and the stream, `c` and `r`, reading back
+holding the stream while posts arrive until you send, a thread opening
+under its message and closing onto the reply's own row, and a click
+selecting a row and giving the stream the keys.
+`ainet-model` gained `Store::replies` and `command::comms`, with tests.
+
 ## Upgrading Zed
 
 1. Pick the release: the newest `vX.Y.Z` tag (not `-pre`) on
@@ -443,7 +519,7 @@ not parse are listed in the status bar.
 
 Keys: `crates/gui/assets/keymaps/default-{linux,macos}.json`, in Zed's
 format, with the contexts `Workspace`, `FleetPanel`, `Terminal`, `Inbox`,
-`Comms`, `Picker` and `TextInput` (see "The workspace pieces" for the
+`Comms`, `CommsCompose`, `Picker` and `TextInput` (see "The workspace pieces" for the
 pane, dock and text keys). `~/.config/ainet/keymap.json` adds to them and
 overrides them (`null` unbinds), and reloads on save; bindings it cannot
 read are listed in the status bar and the rest apply. `ctrl-alt-,` opens

@@ -115,6 +115,9 @@
     }
   },
   {
+    // The stream, when it has the keyboard: the list keys select
+    // entries, enter opens a thread (or answers), c writes a new
+    // message, r answers the selected one.
     "context": "Comms",
     "bindings": {
       "down": "menu::SelectNext",
@@ -124,7 +127,7 @@
     }
   },
   {
-    // Text fields: forms, pickers and (later) the compose box.
+    // Text fields: forms, pickers and the compose box.
     "context": "TextInput",
     "bindings": {
       "backspace": "text_input::Backspace",
@@ -170,6 +173,21 @@
       "shift-up": "text_input::SelectUp",
       "shift-down": "text_input::SelectDown",
       "shift-enter": "text_input::Newline"
+    }
+  },
+  {
+    // The Comms compose box: tab completes an @name.
+    "context": "CommsCompose > TextInput",
+    "bindings": {
+      "tab": "comms::Complete"
+    }
+  },
+  {
+    // While it is empty, up and down select entries in the stream.
+    "context": "CommsCompose > TextInput && empty",
+    "bindings": {
+      "up": "menu::SelectPrevious",
+      "down": "menu::SelectNext"
     }
   },
   {

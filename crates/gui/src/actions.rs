@@ -151,6 +151,8 @@ actions!(
         Compose,
         /// Replies to the selected message.
         Reply,
+        /// Completes the `@name` in the compose box.
+        Complete,
     ]
 );
 
