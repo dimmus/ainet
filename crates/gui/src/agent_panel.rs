@@ -394,6 +394,10 @@ impl Panel for AgentPanel {
     fn icon_tooltip(&self) -> &'static str {
         "Agent Panel"
     }
+
+    fn toggle_action(&self) -> Box<dyn gpui::Action> {
+        Box::new(crate::actions::panel::agent_panel::ToggleFocus)
+    }
 }
 
 impl Render for AgentPanel {

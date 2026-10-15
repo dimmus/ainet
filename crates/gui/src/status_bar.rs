@@ -7,7 +7,7 @@
 use ainet_model::Tally;
 use gpui::{Decorations, Entity, WeakEntity};
 use theme::CLIENT_SIDE_DECORATION_ROUNDING;
-use ui::{Indicator, Tooltip, prelude::*};
+use ui::{CountBadge, Indicator, Tooltip, prelude::*};
 
 use crate::dock::Dock;
 use crate::fleet::{Connection, FleetModel};
@@ -84,24 +84,38 @@ impl StatusBar {
         }
     }
 
-    /// The button for a dock's panel, lit while the dock is open.
-    fn dock_button(&self, dock: &Entity<Dock>, cx: &App) -> Option<AnyElement> {
+    /// A button per panel of a dock, as Zed's: the one showing is lit,
+    /// and closes the dock; another shows its panel. A panel with a count
+    /// shows it while another one shows.
+    fn dock_buttons(&self, dock: &Entity<Dock>, cx: &App) -> Vec<AnyElement> {
         let dock = dock.read(cx);
-        let panel = dock.active_panel()?;
         let position = dock.position();
-        let action = dock.toggle_action();
-        let tooltip = panel.icon_tooltip(cx);
-        let workspace = self.workspace.clone();
-        Some(
-            IconButton::new(SharedString::from(format!("dock-{position:?}")), panel.icon(cx))
-                .icon_size(IconSize::Small)
-                .toggle_state(dock.is_open())
-                .tooltip(move |_, cx| Tooltip::for_action(tooltip, action.as_ref(), cx))
-                .on_click(move |_, window, cx| {
-                    let _ = workspace.update(cx, |w, cx| w.toggle_dock(position, window, cx));
-                })
-                .into_any_element(),
-        )
+        let open = dock.is_open();
+        let active = dock.active_index();
+        dock.panels()
+            .enumerate()
+            .map(|(ix, panel)| {
+                let lit = open && ix == active;
+                let name = panel.persistent_name();
+                let (action, tooltip): (Box<dyn gpui::Action>, SharedString) = if lit {
+                    (dock.toggle_action(), format!("Close {position:?} Dock").into())
+                } else {
+                    (panel.toggle_action(cx), panel.icon_tooltip(cx).into())
+                };
+                let label = panel.icon_label(cx).filter(|_| !lit);
+                let tooltip_action = action.boxed_clone();
+                let button = IconButton::new(SharedString::from(format!("dock-{name}")), panel.icon(cx))
+                    .icon_size(IconSize::Small)
+                    .toggle_state(lit)
+                    .tooltip(move |_, cx| Tooltip::for_action(tooltip.clone(), tooltip_action.as_ref(), cx))
+                    .on_click(move |_, window, cx| window.dispatch_action(action.boxed_clone(), cx));
+                div()
+                    .relative()
+                    .child(button)
+                    .when_some(label, |el, count| el.child(CountBadge::new(count)))
+                    .into_any_element()
+            })
+            .collect()
     }
 }
 
@@ -116,10 +130,10 @@ impl Render for StatusBar {
             _ => Color::Muted,
         };
         let [left_dock, bottom_dock, right_dock] = &self.docks;
-        let left = self.dock_button(left_dock, cx);
+        let left = self.dock_buttons(left_dock, cx);
         let right: Vec<AnyElement> = [bottom_dock, right_dock]
             .into_iter()
-            .filter_map(|d| self.dock_button(d, cx))
+            .flat_map(|d| self.dock_buttons(d, cx))
             .collect();
         let mut counts: Vec<AnyElement> = Vec::new();
         let all = status.counts();

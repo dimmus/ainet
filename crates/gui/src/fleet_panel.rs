@@ -575,6 +575,10 @@ impl Panel for FleetPanel {
     fn icon_tooltip(&self) -> &'static str {
         "Fleet Panel"
     }
+
+    fn toggle_action(&self) -> Box<dyn gpui::Action> {
+        Box::new(crate::actions::panel::fleet_panel::ToggleFocus)
+    }
 }
 
 impl Render for FleetPanel {
@@ -870,6 +874,9 @@ mod tests {
         assert!(matches!(last_sent(&fleet, cx).0, Request::SeatContinue { seat } if seat == "dev-ui@docs"));
         cx.dispatch_action(ShowTranscript);
         assert!(matches!(last_sent(&fleet, cx).0, Request::Transcript { agent, .. } if agent == ui));
+        // The transcript opened as a tab and took the keyboard: back to
+        // the Fleet for its keys.
+        cx.focus(&panel);
         cx.dispatch_action(Capture);
         assert!(
             matches!(last_sent(&fleet, cx).0, Request::Capture { targets, .. } if targets == [ui.clone()])

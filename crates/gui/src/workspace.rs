@@ -2,8 +2,9 @@
 //! left, right and bottom [`Dock`]s around the center's panes (tabs and
 //! splits), the status bar, and over them the modal and toast layers,
 //! inside client-side decorations. The Fleet panel docks left (or right,
-//! by setting) with the Agent panel opposite; the Activity panel docks at
-//! the bottom.
+//! by setting) with the Agent panel opposite; the Queue, Chatroom and
+//! Events panels share the bottom dock. Replies that are long text (a
+//! transcript, a spec) open as report tabs.
 //!
 //! It handles what spans panes and docks: toggling and resizing docks,
 //! splitting, moving between and zooming panes, opening tabs, modals, and
@@ -16,6 +17,7 @@ use gpui::{
 };
 use ui::prelude::*;
 
+use crate::actions::panel::{agent_panel, chatroom_panel, events_panel, fleet_panel, queue_panel};
 use crate::actions::{
     ActivateNextItem, ActivateNextPane, ActivatePaneDown, ActivatePaneLeft, ActivatePaneRight,
     ActivatePaneUp, ActivatePreviousItem, ActivatePreviousPane, Allow, Always, Capture, CloseActiveItem,
@@ -27,10 +29,12 @@ use crate::actions::{
 };
 use crate::agent_panel::AgentPanel;
 use crate::args::View;
+use crate::chatroom::ChatroomPanel;
 use crate::comms::CommsItem;
 use crate::decorations::client_side_decorations;
 use crate::dock::{Dock, DockPosition, DraggedDock, Panel, RESIZE_HANDLE_SIZE};
-use crate::fleet::FleetModel;
+use crate::events_panel::EventsPanel;
+use crate::fleet::{FleetModel, ReportWanted};
 use crate::fleet_panel::FleetPanel;
 use crate::inbox::InboxItem;
 use crate::item::{ItemHandle, Placeholder};
@@ -38,8 +42,9 @@ use crate::message::MessageModal;
 use crate::modal_layer::{ModalLayer, ModalView};
 use crate::pane::{Pane, PaneEvent};
 use crate::pane_group::{PaneGroup, SplitDirection};
-use crate::panels::ActivityPanel;
 use crate::picker::Picker;
+use crate::queue_panel::QueuePanel;
+use crate::report::ReportItem;
 use crate::settings::{self, DockSide};
 use crate::status_bar::StatusBar;
 use crate::switcher::AgentSwitcher;
@@ -110,7 +115,9 @@ impl Workspace {
 
         let fleet_panel = cx.new(|cx| FleetPanel::new(fleet.clone(), cx));
         let agent_panel = cx.new(|cx| AgentPanel::new(fleet.clone(), cx));
-        let activity_panel = cx.new(|cx| ActivityPanel::new(fleet.clone(), cx));
+        let queue_panel = cx.new(|cx| QueuePanel::new(fleet.clone(), this.clone(), cx));
+        let chatroom_panel = cx.new(|cx| ChatroomPanel::new(fleet.clone(), window, cx));
+        let events_panel = cx.new(|cx| EventsPanel::new(fleet.clone(), cx));
         let fleet_side = settings::get(cx).fleet_panel.dock;
         let dock = |position, cx: &mut Context<Self>| cx.new(|cx| Dock::new(position, cx));
         let (left_dock, right_dock, bottom_dock) = (
@@ -124,7 +131,11 @@ impl Workspace {
         };
         fleet_dock.update(cx, |d, cx| d.add_panel(fleet_panel.clone(), cx));
         agent_dock.update(cx, |d, cx| d.add_panel(agent_panel, cx));
-        bottom_dock.update(cx, |d, cx| d.add_panel(activity_panel, cx));
+        bottom_dock.update(cx, |d, cx| {
+            d.add_panel(queue_panel, cx);
+            d.add_panel(chatroom_panel, cx);
+            d.add_panel(events_panel, cx);
+        });
         for dock in [&left_dock, &right_dock, &bottom_dock] {
             dock.update(cx, |d, cx| d.set_open(true, window, cx));
         }
@@ -136,6 +147,10 @@ impl Workspace {
             cx.subscribe_in(&first, window, Self::handle_pane_event),
             cx.observe_global_in::<settings::AppSettings>(window, |this, window, cx| {
                 this.follow_settings(window, cx)
+            }),
+            // Long text to read opens as a tab.
+            cx.subscribe_in(&fleet, window, |this, _, wanted: &ReportWanted, window, cx| {
+                this.open_report(wanted.request.clone(), wanted.title.clone(), window, cx);
             }),
         ];
         let first_item: Box<dyn ItemHandle> = match view.unwrap_or(View::Fleet) {
@@ -231,8 +246,88 @@ impl Workspace {
         Docks {
             fleet: showing(FleetPanel::persistent_name()),
             agent: showing(AgentPanel::persistent_name()),
-            bottom: showing(ActivityPanel::persistent_name()),
+            bottom: self.bottom_dock.read(cx).is_open(),
         }
+    }
+
+    /// The bottom dock's panel of type `T`, if it has one.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn bottom_panel<T: Panel>(&self, cx: &App) -> Option<Entity<T>> {
+        self.bottom_dock
+            .read(cx)
+            .panels()
+            .find_map(|p| p.to_any().downcast::<T>().ok())
+    }
+
+    /// A panel's `ToggleFocus`, as Zed's: shows the panel named `name` (its
+    /// dock opens, it becomes the one showing) and gives it the keyboard;
+    /// if it has the keyboard already, gives it back to the center.
+    pub fn toggle_panel_focus(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let docks = [
+            self.left_dock.clone(),
+            self.right_dock.clone(),
+            self.bottom_dock.clone(),
+        ];
+        for dock in docks {
+            let Some(ix) = dock.read(cx).panel_index(name) else {
+                continue;
+            };
+            let showing = dock.read(cx).is_open() && dock.read(cx).active_index() == ix;
+            let focus = dock.read(cx).panels().nth(ix).map(|p| p.focus_handle(cx));
+            if showing && focus.as_ref().is_some_and(|f| f.contains_focused(window, cx)) {
+                let pane = self.active_pane.focus_handle(cx);
+                window.focus(&pane, cx);
+            } else {
+                self.zoom_out(cx);
+                dock.update(cx, |d, cx| {
+                    d.activate_panel(ix, window, cx);
+                    d.set_open(true, window, cx);
+                });
+                if let Some(focus) = focus {
+                    window.focus(&focus, cx);
+                }
+            }
+            cx.notify();
+            return;
+        }
+    }
+
+    /// Opens a report of `request`'s reply, titled `title`, as a tab of
+    /// the active pane, and asks for it; a report of the same title open
+    /// anywhere is asked again and activated instead.
+    pub fn open_report(
+        &mut self,
+        request: ainet_core::Request,
+        title: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<ReportItem> {
+        for pane in self.panes() {
+            let found = pane.read(cx).items().position(|item| {
+                item.to_any()
+                    .downcast::<ReportItem>()
+                    .is_ok_and(|r| r.read(cx).title().as_ref() == title)
+            });
+            if let Some(ix) = found {
+                self.active_pane = pane.clone();
+                pane.update(cx, |p, cx| p.activate_item(ix, true, window, cx));
+                let report = pane
+                    .read(cx)
+                    .active_item()
+                    .and_then(|i| i.to_any().downcast::<ReportItem>().ok())
+                    .expect("just activated");
+                report.update(cx, |r, cx| r.refresh(cx));
+                return report;
+            }
+        }
+        let fleet = self.fleet.clone();
+        let report = cx.new(|cx| ReportItem::new(fleet, request, title, window, cx));
+        self.active_pane.update(cx, |p, cx| {
+            p.add_item(Box::new(report.clone()), true, true, window, cx)
+        });
+        report.update(cx, |r, cx| r.refresh(cx));
+        cx.notify();
+        report
     }
 
     /// Moves the Fleet and Agent panels across when the setting changes
@@ -923,6 +1018,21 @@ impl Render for Workspace {
                 let file = keymap::user_file(cx).unwrap_or_else(keymap::keymap_file);
                 this.open_config(file, keymap::TEMPLATE, cx)
             }))
+            .on_action(cx.listener(|this, _: &fleet_panel::ToggleFocus, window, cx| {
+                this.toggle_panel_focus(FleetPanel::persistent_name(), window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &agent_panel::ToggleFocus, window, cx| {
+                this.toggle_panel_focus(AgentPanel::persistent_name(), window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &queue_panel::ToggleFocus, window, cx| {
+                this.toggle_panel_focus(QueuePanel::persistent_name(), window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &chatroom_panel::ToggleFocus, window, cx| {
+                this.toggle_panel_focus(ChatroomPanel::persistent_name(), window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &events_panel::ToggleFocus, window, cx| {
+                this.toggle_panel_focus(EventsPanel::persistent_name(), window, cx)
+            }))
             .on_action(cx.listener(|this, _: &SelectNext, _, cx| this.select(1, cx)))
             .on_action(cx.listener(|this, _: &SelectPrev, _, cx| this.select(-1, cx)))
             .on_action(|_: &ToggleCritterSize, _, cx| {
@@ -1307,6 +1417,52 @@ mod tests {
         cx.simulate_keystrokes("enter");
         assert!(!open(cx));
         fleet.read_with(cx, |f, _| assert_eq!(f.store.selected.as_ref(), Some(&target)));
+    }
+
+    #[gpui::test]
+    async fn the_bottom_dock_holds_three_panels_shown_by_their_actions(cx: &mut TestAppContext) {
+        let (w, cx) = workspace(cx);
+        let bottom = |cx: &mut VisualTestContext| {
+            w.read_with(cx, |w, cx| {
+                let dock = w.dock(DockPosition::Bottom).read(cx);
+                (dock.is_open(), dock.active_panel_name())
+            })
+        };
+        assert_eq!(bottom(cx), (true, Some("QueuePanel")));
+        let names: Vec<&str> = w.read_with(cx, |w, cx| {
+            w.dock(DockPosition::Bottom)
+                .read(cx)
+                .panels()
+                .map(|p| p.persistent_name())
+                .collect()
+        });
+        assert_eq!(names, ["QueuePanel", "ChatroomPanel", "EventsPanel"]);
+
+        // Its action shows a panel and gives it the keyboard; again, the
+        // keyboard goes back to the center and the panel stays.
+        let events = w.read_with(cx, |w, cx| w.bottom_panel::<EventsPanel>(cx).unwrap());
+        cx.dispatch_action(events_panel::ToggleFocus);
+        assert_eq!(bottom(cx), (true, Some("EventsPanel")));
+        assert!(cx.update(|window, cx| events.focus_handle(cx).contains_focused(window, cx)));
+        cx.dispatch_action(events_panel::ToggleFocus);
+        let pane = active_pane(&w, cx);
+        assert!(focused_in(&pane, cx));
+        assert_eq!(bottom(cx), (true, Some("EventsPanel")));
+
+        // A closed dock opens on the panel asked for.
+        cx.simulate_keystrokes("ctrl-j");
+        assert_eq!(bottom(cx), (false, Some("EventsPanel")));
+        assert!(!w.read_with(cx, |w, cx| w.docks(cx).bottom));
+        cx.dispatch_action(queue_panel::ToggleFocus);
+        assert_eq!(bottom(cx), (true, Some("QueuePanel")));
+
+        // The side panels have theirs too.
+        cx.simulate_keystrokes("ctrl-b");
+        assert!(!w.read_with(cx, |w, cx| w.docks(cx).fleet));
+        cx.dispatch_action(fleet_panel::ToggleFocus);
+        assert!(w.read_with(cx, |w, cx| w.docks(cx).fleet));
+        let fleet_focus = w.read_with(cx, |w, cx| w.fleet_panel().focus_handle(cx));
+        assert!(cx.update(|window, _| fleet_focus.is_focused(window)));
     }
 
     #[gpui::test]

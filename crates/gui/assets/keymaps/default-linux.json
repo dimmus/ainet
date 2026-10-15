@@ -127,6 +127,17 @@
     }
   },
   {
+    // The Queue panel (bottom dock): the list keys move through the
+    // items, enter shows one in full, shift-f10 opens its menu.
+    "context": "QueuePanel",
+    "bindings": {
+      "down": "menu::SelectNext",
+      "up": "menu::SelectPrevious",
+      "enter": "queue::Show",
+      "shift-f10": "queue::OpenContextMenu"
+    }
+  },
+  {
     // Text fields: forms, pickers and the compose box.
     "context": "TextInput",
     "bindings": {

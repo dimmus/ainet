@@ -156,6 +156,94 @@ actions!(
     ]
 );
 
+/// The Queue panel's actions, in a module of their own:
+/// `queue::OpenContextMenu` and `fleet::OpenContextMenu` would otherwise
+/// clash.
+pub mod queue {
+    use gpui::actions;
+
+    actions!(
+        queue,
+        [
+            /// Claims the selected queue item: you own it, in progress.
+            Claim,
+            /// Gives the selected queue item back.
+            Unclaim,
+            /// Moves the selected queue item back to pending.
+            MarkPending,
+            /// Marks the selected queue item in progress.
+            MarkInProgress,
+            /// Marks the selected queue item done.
+            MarkDone,
+            /// Cancels the selected queue item.
+            MarkCanceled,
+            /// Adds a note to the selected queue item.
+            AddNote,
+            /// Hands the selected queue item off to another seat.
+            Handoff,
+            /// Blocks the selected queue item on another item.
+            BlockOn,
+            /// Shows the selected queue item in full.
+            Show,
+            /// Shows only the open queue items, or all of them.
+            ToggleOpenOnly,
+            /// Opens the selected queue item's menu, as a right click does.
+            OpenContextMenu,
+        ]
+    );
+}
+
+/// The panels' `ToggleFocus` actions, a module each as in Zed
+/// (`project_panel::ToggleFocus`): show the panel and give it the
+/// keyboard, or give the keyboard back to the center if it has it.
+pub mod panel {
+    pub mod fleet_panel {
+        gpui::actions!(
+            fleet_panel,
+            [
+                /// Shows the Fleet panel and gives it the keyboard.
+                ToggleFocus
+            ]
+        );
+    }
+    pub mod agent_panel {
+        gpui::actions!(
+            agent_panel,
+            [
+                /// Shows the Agent panel and gives it the keyboard.
+                ToggleFocus
+            ]
+        );
+    }
+    pub mod queue_panel {
+        gpui::actions!(
+            queue_panel,
+            [
+                /// Shows the Queue panel and gives it the keyboard.
+                ToggleFocus
+            ]
+        );
+    }
+    pub mod chatroom_panel {
+        gpui::actions!(
+            chatroom_panel,
+            [
+                /// Shows the Chatroom panel and gives it the keyboard.
+                ToggleFocus
+            ]
+        );
+    }
+    pub mod events_panel {
+        gpui::actions!(
+            events_panel,
+            [
+                /// Shows the Events panel and gives it the keyboard.
+                ToggleFocus
+            ]
+        );
+    }
+}
+
 /// A terminal's actions, in a module of their own: `terminal::ToggleZoom`
 /// and `workspace::ToggleZoom` would otherwise clash.
 pub mod terminal {

@@ -4,12 +4,14 @@ Plan for adding a native GUI to ainet, built on Zed's UI stack (GPUI and
 Zed's component library) and following Zed's look and interaction model,
 while the console version (CLI + TUI) stays exactly as it is.
 
-Status: **phase 4 steps 1–5 done** (the Fleet panel with critters and
-the agent menu, the Agent panel, the live terminal with Tile all, the
-Inbox with approval cards, questions and the glowing waiting badge,
-Comms with threads and a compose box; review fixes applied, with
-`ctrl-o`, `ctrl-shift-y` and the Release and Remove seat entries; see
-[GUI.md](GUI.md)), step 6 (the bottom dock) next; phase 3 done (option A: panes, splits, docks,
+Status: **phase 4 steps 1–6 and 8 done** (the Fleet panel with
+critters and the agent menu, the Agent panel, the live terminal with
+Tile all, the Inbox with approval cards, questions and the glowing
+waiting badge, Comms with threads and a compose box, the bottom dock's
+Queue, Chatroom and Events panels, transcripts, specs and queue items as
+report tabs; review fixes applied, with `ctrl-o`, `ctrl-shift-y` and the
+Release and Remove seat entries; see [GUI.md](GUI.md)), step 7 (the Map)
+next; phase 3 done (option A: panes, splits, docks,
 modals, toasts, the text input and the picker); phase 2 done (themes,
 fonts, settings and keymaps); phase 1 done (`crates/gui`: the GPUI
 skeleton on Zed v1.24.2); phase 0 done (`crates/model`). Written 2026-10-15 against commit `c0dbb5a`.
@@ -410,6 +412,23 @@ box that sends what the TUI's input line sends in Comms (the new
 `command::comms`, shared with the TUI), `tab` completing `@names`. Not
 yet: a right-click menu on messages, an `@` completion list while
 typing, Markdown beyond fenced code, older history than the Store keeps.
+
+Step 6 done: the bottom dock holds three panels, switched by tabs in
+their strip or their status bar buttons (Zed's `ToggleFocus` per panel):
+the Queue as Zed's `Table` (the TUI's order and chip colours, open or
+all, a menu that claims, unclaims, moves the state, adds a note, hands
+off, blocks and shows, each the request `ainet queue` sends, through the
+new `command::queue`), a Chatroom per rig and topic with a box posting
+`ChatSend` (`command::chat`), and the Events log (the new
+`ainet_model::journal`, capped at 500, newest last). Not yet: creating a
+queue item from the panel (`/queue` in Comms does), editing priority and
+tags, a reason when unclaiming, `@` completion in the handoff form.
+
+Step 8 done: `ReportItem`, a read-only, selectable text tab in the buffer
+font for replies that are long text (transcripts, `/spec`, `/export`, a
+queue item), opened instead of a toast; the reply is routed to it by the
+new `Link::ask` (a token, `Msg::Reply`). Not yet: searching inside a
+report, YAML highlighting, transcript filters (`tail`, `grep`).
 
 ### Phase 5 — Command palette, pickers, modals · ~1 week
 

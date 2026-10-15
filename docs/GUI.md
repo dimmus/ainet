@@ -107,8 +107,8 @@ GPUI (the pane tree, divider dragging, the text buffer).
 | `item.rs` | `Item` (tab label, icon or critter slot, tooltip, `can_split`/`clone_on_split`, `activated`/`deactivated`/`on_removed`, `ItemEvent::CloseItem`/`UpdateTab`), `ItemHandle`, and `Placeholder`, the stand-in for phase 4's views | `workspace::item` |
 | `pane.rs` | `Pane`: a `TabBar` of `Tab`s (click activates, middle click or the hover close button closes, right click for Close/Close Others/Close All/Split), a split menu and a zoom button; closing the active tab activates the one used before it; `PaneEvent`s for the workspace | `workspace::pane` |
 | `pane_group.rs` | `PaneGroup<P>`: the split tree (generic, so tested with numbers), neighbours by drawn position, and the axis element whose dividers drag (double click evens them) | `workspace::pane_group` |
-| `dock.rs` | `Dock` (left, right, bottom) holding `Panel`s, opened and closed, resized by dragging its inner edge (double click: default size) | `workspace::dock` |
-| `panels.rs` | the panels' title strip and state colours, and the Activity panel (a placeholder until phase 4 step 6) | — |
+| `dock.rs` | `Dock` (left, right, bottom) holding one or more `Panel`s and showing one (`activate_panel`), opened and closed, resized by dragging its inner edge (double click: default size); a panel names its `toggle_action` and may put a count on its button (`icon_label`) | `workspace::dock` |
+| `panels.rs` | the panels' title strip and state colours, and the bottom panels' strip with a tab per panel (`bottom_header`) | — |
 | `modal_layer.rs` | one modal at a time; escape, a click outside or the modal's `DismissEvent` closes it and gives the keyboard back | `workspace::modal_layer` |
 | `toast_layer.rs` | the fleet's notices as toasts, bottom right: flashes for 5 s (the TUI's flash time), requests waiting on you for 10 s (with the agent's critter and a Review button), errors for 15 s, reports (titled) until dismissed, their text in the buffer font scrolling under a title row that keeps the close button; at most 3. The empty flash a quiet request (a key, a resize, `Interact`) gets back is dropped by `FleetModel`, which also re-renders only for batches that changed something (output alone does not) | status toasts, notifications |
 | `text_input/` | `TextInput`: one line or several (soft-wrapped, `max_lines`), IME, mouse and key selection, clipboard, word moves, undo/redo, placeholder, masking, read-only; `InputEvent::{Edited, Submitted, Cancelled, Blurred}`; `erased.rs` registers it as `ui_input`'s editor | GPUI's `examples/input.rs`, `ui_input::ErasedEditor` |
@@ -117,8 +117,13 @@ GPUI (the pane tree, divider dragging, the text buffer).
 
 The workspace (`workspace.rs`) ties them together: the Fleet panel docks
 left (or right, `fleet_panel.dock`) with the Agent panel opposite and the
-Activity panel at the bottom, all open at start; the status bar has a
-button per dock at its ends, as Zed's. Dock sizes are kept **in memory**
+Queue, Chatroom and Events panels at the bottom, all open at start; the
+status bar has a button per panel at its ends, as Zed's (the one showing
+is lit and closes its dock; another shows its panel). Each panel has a
+`ToggleFocus` action in a namespace of its own, as Zed's
+(`queue_panel::ToggleFocus`, …): it opens the dock on that panel and gives
+it the keyboard, or, if it has the keyboard already, gives it back to the
+center. Dock sizes are kept **in memory**
 for the session, per panel (the Fleet panel's starts from
 `fleet_panel.width` and follows that setting until dragged); saving them
 with the open tabs and splits is phase 7's workspace restore. Moving the
@@ -177,7 +182,7 @@ agent so the menu shows their bindings:
 |---|---|---|
 | Message… | `m` | `Message { to: [id], force: true }` (`@Name text`) |
 | Open Terminal | `enter`, double click | — (opens the tab) |
-| Show Transcript | | `Transcript { agent }`, shown as a report |
+| Show Transcript | | `Transcript { agent }`, shown as a report tab |
 | Capture Screen | | `Capture` (`/capture`) |
 | Relaunch | | `Launch { fresh: true }` (`/relaunch`) |
 | Continue | | `SeatContinue` (`/continue`) |
@@ -376,8 +381,8 @@ the alert's toast and glow count.
 
 `CommsItem` (`comms.rs`) is the TUI's Comms stream as a tab, opened by
 `workspace::OpenComms` (`ctrl-shift-c`, which gives its compose box the
-keyboard) or `--view comms`. The queue the TUI shows beside it belongs
-to the bottom dock (step 6).
+keyboard) or `--view comms`. The queue the TUI shows beside it is the
+bottom dock's Queue panel.
 
 - **The stream.** `Store::entries` in its order: messages and chat
   posts interleaved, oldest first (`comms::rows` builds the same order
@@ -446,6 +451,68 @@ holding the stream while posts arrive until you send, a thread opening
 under its message and closing onto the reply's own row, and a click
 selecting a row and giving the stream the keys.
 `ainet-model` gained `Store::replies` and `command::comms`, with tests.
+
+## The bottom dock and reports (phase 4 steps 6 and 8)
+
+The bottom dock holds three panels, switched by the tabs in their title
+strip or their buttons in the status bar (`Workspace::toggle_panel_focus`):
+
+| File | What |
+|---|---|
+| `queue_panel.rs` | `QueuePanel`: the queue as Zed's `ui::Table` (virtualised): id, a state chip, priority, `source → destination` in the agents' colours, summary, how long since it moved; the TUI's order (`Store::queue_items`: in progress, blocked, pending, done, canceled, latest first), open items only or all (`queue::ToggleOpenOnly`, the Open/All buttons). Chips in the TUI's colours (`Palette::qstate`, shared with the TUI) in ainet's own themes, else the theme's status colours (`queue_panel::state_colors`). The status bar button counts the open items |
+| `queue_form.rs` | `QueueFormModal`: the forms for a note, a handoff (to, body) and a block (on, then): enter goes to the next field, then sends; what is missing is said in the form, which stays open |
+| `chatroom.rs` | `ChatroomPanel`: one rig's chatroom on one topic (`Store::chat_rooms`: every rig's `general` plus every topic posted in; a dropdown picks one, else it follows the selected agent's rig), posts oldest first with the poster's critter, following the newest; a box (it takes the keyboard when the panel is shown) posts `ChatSend` there as you (`command::chat`) |
+| `events_panel.rs` | `EventsPanel`: what happened, one line each, newest last: agents joining, leaving and changing state, rigs, inbox items and answers, messages, chat, queue items, the connection. `FleetModel` logs a line (`ainet_model::journal::happened`, read off each message before the Store applies it, so a change says what it was before) and keeps the last `KEEP_EVENTS` (500); the list drops what the log drops (`events_panel::moved`) |
+| `report.rs` | `ReportItem`: a reply that is long text, as a tab: the buffer font in a read-only `TextInput` (select with the mouse or keys, `ctrl-a`, `ctrl-c`), scrolling, with a Copy All and an Ask Again button; "Loading…" until the reply, the daemon's error if it fails |
+
+The queue item's menu (right click, or `shift-f10` with the panel's
+keyboard) and the actions behind it, each sending what `ainet queue …`
+sends when you run it (`by` none), through `command::queue`:
+
+| Entry | Action | Sends |
+|---|---|---|
+| Show (`enter`, double click) | `queue::Show` | `QueueShow`, opened as a report |
+| Claim | `queue::Claim` | `QueueClaim` |
+| Unclaim | `queue::Unclaim` | `QueueUnclaim` |
+| Pending, In Progress, Done, Canceled | `queue::MarkPending`, … | `QueueUpdate { state }` |
+| Add Note… | `queue::AddNote` | `QueueUpdate { note }` |
+| Hand Off… | `queue::Handoff` | `QueueHandoff { to, body }` |
+| Block On… | `queue::BlockOn` | `QueueBlock { on, continuation }` |
+
+Reports instead of toasts: `FleetModel::run` hands a request whose reply
+is long text (`fleet::is_report`: `Transcript`, `SpecShow`, `Export`,
+`QueueShow`) to the workspace as `ReportWanted`, wherever it came from
+(the Fleet's Show Transcript, the Queue's Show, `/spec` or `/export` typed
+in Comms). The workspace opens a `ReportItem` in the active pane (or asks
+again in the one of the same title) and the item asks for its text with
+`FleetModel::ask(request, on_reply)`: a new `Link::ask(req, token)` in
+`ainet-model` sends it, and its reply comes back as `Msg::Reply { token,
+reply }` (`Change::Reply`), the text (`popup::reply`: reports rendered as
+the TUI's popups, a queue item as `ainet queue show` prints it) or the
+error, to that caller only, never as a flash or popup. The TUI never asks,
+so it is unchanged. Short results stay toasts.
+
+Keys: the `QueuePanel` context has `up`/`down` (select), `enter`
+(`queue::Show`) and `shift-f10` (the menu). The panels' `ToggleFocus`
+actions have no default keys (`ctrl-j` opens and closes the dock).
+
+Tests: pure ones for the queue's rows (the TUI's order, open or all) and
+the events list's splicing; headless ones for the chips in the TUI's
+colours, every menu entry and form sending what `ainet queue` sends (and
+the forms giving the keyboard back), the menu by right click and
+`shift-f10`, the filter, a post in another room going to its rig and
+topic, the log capped with the newest last (and the demo's chat post in
+it), the three panels and their focus actions, and reports: Show
+Transcript opening a tab with the demo's transcript (reused when asked
+again, its text copied with `ctrl-a ctrl-c`), `/spec docs` and the queue's
+Show opening theirs, `/export nope` showing the error, and no toasts.
+`ainet-model` gained `Link::ask`/`Msg::Reply`/`Change::Reply`,
+`popup::reply` and `popup::qitem_text` (moved from the console's output,
+which calls it), `command::queue`/`QueueCommand` and `command::chat`
+(which `/chat` now uses), `Store::queue_items` (the TUI's order, which the
+TUI now uses), `Store::chat_rooms`/`chat_in`, `Palette::qstate` (the TUI's
+chip colours), the `journal` module, and the demo answers transcripts,
+specs, exports and the queue requests; all with tests.
 
 ## Upgrading Zed
 
@@ -519,7 +586,7 @@ not parse are listed in the status bar.
 
 Keys: `crates/gui/assets/keymaps/default-{linux,macos}.json`, in Zed's
 format, with the contexts `Workspace`, `FleetPanel`, `Terminal`, `Inbox`,
-`Comms`, `CommsCompose`, `Picker` and `TextInput` (see "The workspace pieces" for the
+`Comms`, `CommsCompose`, `QueuePanel`, `Picker` and `TextInput` (see "The workspace pieces" for the
 pane, dock and text keys). `~/.config/ainet/keymap.json` adds to them and
 overrides them (`null` unbinds), and reloads on save; bindings it cannot
 read are listed in the status bar and the rest apply. `ctrl-alt-,` opens

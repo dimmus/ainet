@@ -271,6 +271,7 @@ mod tests {
                     "Terminal",
                     "Inbox",
                     "Comms",
+                    "QueuePanel",
                     "Picker",
                     "TextInput",
                     "TextInput && multiline",

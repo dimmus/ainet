@@ -220,6 +220,13 @@ impl TextInput {
         cx.notify();
     }
 
+    /// Puts the cursor at the start, with nothing selected.
+    pub fn move_to_beginning(&mut self, cx: &mut Context<Self>) {
+        self.buffer.move_to(0);
+        self.scroll = Point::default();
+        cx.notify();
+    }
+
     pub fn move_to_end(&mut self, cx: &mut Context<Self>) {
         self.buffer.move_to(self.buffer.text().len());
         cx.notify();

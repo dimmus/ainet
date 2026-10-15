@@ -8,17 +8,25 @@
 //! Terminals on show register here: their screens are fetched when their
 //! agent prints something, at most every `terminal::FETCH_EVERY` each (the
 //! TUI's pump), and ainetd is told when you are at one (`Interact`).
+//!
+//! It also keeps the events log (what happened, from `ainet_model::journal`)
+//! and routes the replies to requests a view asked for itself
+//! ([`FleetModel::ask`]); requests whose reply is long text to read (a
+//! transcript, a spec) are handed to the workspace as [`ReportWanted`], to
+//! open as a tab rather than a toast.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::time::Duration;
 
 use ainet_core::Request;
 use ainet_core::client::Client;
+use ainet_model::journal::{self, Happening};
 use ainet_model::{Backend, Change, Command, Link, Msg, Pump, Store, Tally, daemon};
 use futures::StreamExt;
 use futures::channel::mpsc::UnboundedReceiver;
-use gpui::{AppContext as _, AsyncApp, Context, EntityId, EventEmitter, Subscription, Task, WeakEntity};
+use gpui::{App, AppContext as _, AsyncApp, Context, EntityId, EventEmitter, Subscription, Task, WeakEntity};
 
 use crate::sink::{self, ChannelSink};
 
@@ -32,6 +40,37 @@ pub const INTERACT_SETTLE: Duration = Duration::from_millis(50);
 
 /// How many notices are kept for later toasts and a log.
 const KEEP_NOTICES: usize = 64;
+
+/// How many lines the events log keeps; older ones make way.
+pub const KEEP_EVENTS: usize = 500;
+
+/// What hears the reply to a request asked with [`FleetModel::ask`]: its
+/// text, or the error.
+pub type OnReply = Box<dyn FnOnce(Result<String, String>, &mut App)>;
+
+/// A request whose reply is long text to read whole (a transcript, a
+/// spec, a queue item): the workspace opens it as a report tab and asks
+/// for it there.
+#[derive(Clone, Debug)]
+pub struct ReportWanted {
+    pub request: Request,
+    /// The tab's title: what the command says once done.
+    pub title: String,
+}
+
+impl EventEmitter<ReportWanted> for FleetModel {}
+
+/// Whether `req`'s reply is long text, to read in a tab of its own rather
+/// than a toast.
+pub fn is_report(req: &Request) -> bool {
+    matches!(
+        req,
+        Request::Transcript { .. }
+            | Request::SpecShow { .. }
+            | Request::Export { .. }
+            | Request::QueueShow { .. }
+    )
+}
 
 /// Where the connection to the fleet stands.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -118,6 +157,14 @@ pub struct FleetModel {
     at: HashMap<String, HashSet<EntityId>>,
     told: HashSet<String>,
     telling: Option<Task<()>>,
+    /// Who hears the replies on their way, by token.
+    asked: HashMap<u64, OnReply>,
+    next_token: u64,
+    /// What happened, the latest last, at most [`KEEP_EVENTS`].
+    events: VecDeque<Rc<Happening>>,
+    /// How many events were ever logged, so a view can tell how many
+    /// made way.
+    events_logged: usize,
     /// Every request sent, quiet ones and screen fetches with scrollback
     /// included, for tests.
     #[cfg(test)]
@@ -195,6 +242,10 @@ impl FleetModel {
             at: HashMap::new(),
             told: HashSet::new(),
             telling: None,
+            asked: HashMap::new(),
+            next_token: 0,
+            events: VecDeque::new(),
+            events_logged: 0,
             #[cfg(test)]
             sent: Vec::new(),
             #[cfg(test)]
@@ -250,6 +301,32 @@ impl FleetModel {
         self.notices.iter()
     }
 
+    /// The events log, the latest last.
+    pub fn events(&self) -> &VecDeque<Rc<Happening>> {
+        &self.events
+    }
+
+    /// How many events were ever logged (the log keeps the last
+    /// [`KEEP_EVENTS`]).
+    pub fn events_logged(&self) -> usize {
+        self.events_logged
+    }
+
+    fn log(&mut self, happening: Happening) {
+        if self.events.len() == KEEP_EVENTS {
+            self.events.pop_front();
+        }
+        self.events.push_back(Rc::new(happening));
+        self.events_logged += 1;
+    }
+
+    /// Logs `happening` as if the fleet had said so, for tests.
+    #[cfg(test)]
+    pub fn log_for_test(&mut self, happening: Happening, cx: &mut Context<Self>) {
+        self.log(happening);
+        cx.notify();
+    }
+
     /// Selects an agent in the Fleet.
     pub fn select(&mut self, id: &str, cx: &mut Context<Self>) {
         if self.store.agents.contains_key(id) && self.store.selected.as_deref() != Some(id) {
@@ -287,10 +364,32 @@ impl FleetModel {
     /// the caller's.
     pub fn run(&mut self, command: Command, cx: &mut Context<Self>) {
         match command {
+            // Long text to read: the workspace opens a tab and asks there.
+            Command::Request(req, title) if is_report(&req) => cx.emit(ReportWanted { request: *req, title }),
             Command::Request(req, ok) => self.request(*req, ok, cx),
             Command::Error(why) => self.show(why, true, cx),
             _ => {}
         }
+    }
+
+    /// Sends a request whose reply `on_reply` hears, whole: the text of a
+    /// report, empty for a plain "done", or the error. Nothing else hears
+    /// it (no toast).
+    pub fn ask(
+        &mut self,
+        req: Request,
+        on_reply: impl FnOnce(Result<String, String>, &mut App) + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        #[cfg(test)]
+        self.sent.push((req.clone(), String::new()));
+        let Some(link) = &mut self.link else {
+            // Later, as a reply would come: the asker may be mid-update.
+            return cx.defer(move |cx| on_reply(Err("ainetd is not running yet".into()), cx));
+        };
+        self.next_token += 1;
+        self.asked.insert(self.next_token, Box::new(on_reply));
+        link.ask(req, self.next_token);
     }
 
     /// A request only ainetd acts on (keystrokes, resizes), sent quietly.
@@ -464,6 +563,11 @@ impl FleetModel {
     fn apply(&mut self, msgs: Vec<Msg>, cx: &mut Context<Self>) {
         let mut changed = false;
         for msg in msgs {
+            // Read before applying: a change says what it was before.
+            if let Some(happening) = journal::happened(&self.store, &msg) {
+                self.log(happening);
+                changed = true;
+            }
             let change = self.store.apply(msg);
             changed |= match &change {
                 Change::None | Change::Output(_) => false,
@@ -476,6 +580,11 @@ impl FleetModel {
                 Change::Flash(text, _) if text.is_empty() => {}
                 Change::Flash(text, error) => self.notice(None, text, error, cx),
                 Change::Popup(title, text) => self.notice(Some(title), text, false, cx),
+                Change::Reply { token, reply } => {
+                    if let Some(on_reply) = self.asked.remove(&token) {
+                        on_reply(reply, cx);
+                    }
+                }
                 Change::Connected(up) => {
                     match self.problem {
                         Some(StartProblem::NotStarted(_)) if up => self.problem = None,

@@ -1,7 +1,8 @@
 //! Docks and the panels in them, after Zed's `workspace::dock`: a dock on
-//! the left, right or bottom shows one of its [`Panel`]s, can be opened and
-//! closed, and is resized by dragging its inner edge (a double click puts
-//! the default size back). Sizes are kept in memory for the session, per
+//! the left, right or bottom holds one or more [`Panel`]s and shows one of
+//! them (each has its button in the status bar, as Zed's), can be opened
+//! and closed, and is resized by dragging its inner edge (a double click
+//! puts the default size back). Sizes are kept in memory for the session, per
 //! panel, and start from the panel's default (the Fleet panel's from
 //! `fleet_panel.width` in settings); phase 7 saves them with the rest of
 //! the workspace.
@@ -47,6 +48,15 @@ pub trait Panel: Focusable + Render + Sized {
     /// The button's tooltip.
     fn icon_tooltip(&self) -> &'static str;
 
+    /// What its button does when the panel is not the one showing: shows
+    /// it and gives it the keyboard (Zed's `ToggleFocus`).
+    fn toggle_action(&self) -> Box<dyn Action>;
+
+    /// A count on its button while another panel shows, as Zed's.
+    fn icon_label(&self, _: &App) -> Option<usize> {
+        None
+    }
+
     /// Told when its dock opens or closes with it showing.
     fn set_active(&mut self, _active: bool, _: &mut Window, _: &mut Context<Self>) {}
 }
@@ -57,6 +67,8 @@ pub trait PanelHandle: 'static {
     fn default_size(&self, cx: &App) -> Pixels;
     fn icon(&self, cx: &App) -> IconName;
     fn icon_tooltip(&self, cx: &App) -> &'static str;
+    fn toggle_action(&self, cx: &App) -> Box<dyn Action>;
+    fn icon_label(&self, cx: &App) -> Option<usize>;
     fn focus_handle(&self, cx: &App) -> FocusHandle;
     fn set_active(&self, active: bool, window: &mut Window, cx: &mut App);
     fn to_any(&self) -> AnyView;
@@ -77,6 +89,14 @@ impl<T: Panel> PanelHandle for Entity<T> {
 
     fn icon_tooltip(&self, cx: &App) -> &'static str {
         self.read(cx).icon_tooltip()
+    }
+
+    fn toggle_action(&self, cx: &App) -> Box<dyn Action> {
+        self.read(cx).toggle_action()
+    }
+
+    fn icon_label(&self, cx: &App) -> Option<usize> {
+        self.read(cx).icon_label(cx)
     }
 
     fn focus_handle(&self, cx: &App) -> FocusHandle {
@@ -158,6 +178,38 @@ impl Dock {
         self.contents.open = open;
         if let Some(entry) = self.contents.panels.get(self.contents.active) {
             entry.panel.set_active(open, window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Its panels, in order.
+    pub fn panels(&self) -> impl Iterator<Item = &dyn PanelHandle> {
+        self.contents.panels.iter().map(|e| e.panel.as_ref())
+    }
+
+    /// Where the panel named `name` is among its panels.
+    pub fn panel_index(&self, name: &str) -> Option<usize> {
+        self.panels().position(|p| p.persistent_name() == name)
+    }
+
+    pub fn active_index(&self) -> usize {
+        self.contents.active
+    }
+
+    /// Shows panel `ix` in place of the one showing, telling both while
+    /// the dock is open.
+    pub fn activate_panel(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if ix == self.contents.active || ix >= self.contents.panels.len() {
+            return;
+        }
+        if self.contents.open {
+            self.contents.panels[self.contents.active]
+                .panel
+                .set_active(false, window, cx);
+        }
+        self.contents.active = ix;
+        if self.contents.open {
+            self.contents.panels[ix].panel.set_active(true, window, cx);
         }
         cx.notify();
     }

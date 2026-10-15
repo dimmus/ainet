@@ -1,18 +1,18 @@
-//! What the docks' panels share (their title strip, state colours), and
-//! the bottom dock's Activity panel, which still counts the queue, chat and
-//! messages until phase 4 gives it its views. The Fleet and Agent panels
-//! have modules of their own.
+//! What the docks' panels share: their title strip, the agents' state
+//! colours, and the tabs that switch between the bottom dock's panels
+//! (Queue, Chatroom, Events). Each panel has a module of its own.
 
 use ainet_core::AgentState;
-use gpui::{Entity, FocusHandle, Focusable};
+use gpui::Action;
 use ui::prelude::*;
 
-use crate::dock::Panel;
-use crate::fleet::FleetModel;
+use crate::actions::panel::{chatroom_panel, events_panel, queue_panel};
 
 /// Default dock sizes, Zed's.
 pub const SIDE_DOCK_WIDTH: Pixels = px(260.);
-const BOTTOM_DOCK_HEIGHT: Pixels = px(160.);
+pub const BOTTOM_DOCK_HEIGHT: Pixels = px(160.);
+/// A panel's title strip, as tall as Zed's tab bars.
+pub const HEADER_HEIGHT: Pixels = px(32.);
 
 /// How an agent's state is coloured, like the TUI's state glyphs.
 pub fn state_color(state: AgentState) -> Color {
@@ -32,7 +32,7 @@ pub fn header(title: &'static str, icon: IconName, focused: bool, cx: &App) -> D
     let colors = cx.theme().colors();
     h_flex()
         .flex_none()
-        .h(px(32.))
+        .h(HEADER_HEIGHT)
         .px_2()
         .gap_2()
         .border_b_1()
@@ -45,87 +45,48 @@ pub fn header(title: &'static str, icon: IconName, focused: bool, cx: &App) -> D
         .child(Label::new(title).size(LabelSize::Small).color(Color::Muted))
 }
 
-/// The bottom dock: Queue, Chatroom and Events log, for now as counts.
-pub struct ActivityPanel {
-    fleet: Entity<FleetModel>,
-    focus_handle: FocusHandle,
-}
+/// The bottom dock's panels, in order: their names and their tabs' words.
+pub const BOTTOM_PANELS: [(&str, &str); 3] = [
+    ("QueuePanel", "Queue"),
+    ("ChatroomPanel", "Chatroom"),
+    ("EventsPanel", "Events"),
+];
 
-impl ActivityPanel {
-    pub fn new(fleet: Entity<FleetModel>, cx: &mut Context<Self>) -> Self {
-        cx.observe(&fleet, |_, _, cx| cx.notify()).detach();
-        ActivityPanel {
-            fleet,
-            focus_handle: cx.focus_handle(),
-        }
+/// What shows the bottom panel named `name` and gives it the keyboard.
+fn show_bottom_panel(name: &str) -> Box<dyn Action> {
+    match name {
+        "ChatroomPanel" => Box::new(chatroom_panel::ToggleFocus),
+        "EventsPanel" => Box::new(events_panel::ToggleFocus),
+        _ => Box::new(queue_panel::ToggleFocus),
     }
 }
 
-impl Focusable for ActivityPanel {
-    fn focus_handle(&self, _: &App) -> FocusHandle {
-        self.focus_handle.clone()
-    }
-}
-
-impl Panel for ActivityPanel {
-    fn persistent_name() -> &'static str {
-        "ActivityPanel"
-    }
-
-    fn default_size(&self, _: &App) -> Pixels {
-        BOTTOM_DOCK_HEIGHT
-    }
-
-    fn icon(&self) -> IconName {
-        IconName::ListTodo
-    }
-
-    fn icon_tooltip(&self) -> &'static str {
-        "Activity Panel"
-    }
-}
-
-impl Render for ActivityPanel {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let focused = self.focus_handle.contains_focused(window, cx);
-        let store = &self.fleet.read(cx).store;
-        let tab = |name: &'static str, active: bool| {
-            Label::new(name)
-                .size(LabelSize::Small)
-                .color(if active { Color::Default } else { Color::Muted })
-        };
-        let colors = cx.theme().colors();
-        v_flex()
-            .id("activity-panel")
-            .track_focus(&self.focus_handle)
-            .size_full()
-            .child(
-                h_flex()
-                    .flex_none()
-                    .h(px(32.))
-                    .px_2()
-                    .gap_3()
-                    .border_b_1()
-                    .border_color(if focused {
-                        colors.panel_focused_border
-                    } else {
-                        colors.border_variant
-                    })
-                    .child(tab("Queue", true))
-                    .child(tab("Chatroom", false))
-                    .child(tab("Events", false)),
-            )
-            .child(
-                div().p_3().child(
-                    Label::new(format!(
-                        "{} queue items · {} chat posts · {} messages",
-                        store.queue.len(),
-                        store.chat.len(),
-                        store.messages.len()
-                    ))
-                    .size(LabelSize::Small)
-                    .color(Color::Muted),
-                ),
-            )
-    }
+/// A bottom panel's title strip: a tab per panel of the dock, `active`
+/// lit (a click on another shows that one), then `end`, the panel's own
+/// controls. The border lights up while the panel has the keyboard.
+pub fn bottom_header(active: &str, focused: bool, end: impl IntoElement, cx: &App) -> Div {
+    let colors = cx.theme().colors();
+    h_flex()
+        .flex_none()
+        .h(HEADER_HEIGHT)
+        .px_1()
+        .gap_1()
+        .justify_between()
+        .border_b_1()
+        .border_color(if focused {
+            colors.panel_focused_border
+        } else {
+            colors.border_variant
+        })
+        .child(h_flex().gap_0p5().children(BOTTOM_PANELS.map(|(name, label)| {
+            let is_active = name == active;
+            Button::new(SharedString::from(format!("bottom-tab-{name}")), label)
+                .label_size(LabelSize::Small)
+                .toggle_state(is_active)
+                .color(if is_active { Color::Default } else { Color::Muted })
+                .when(!is_active, |button| {
+                    button.on_click(move |_, window, cx| window.dispatch_action(show_bottom_panel(name), cx))
+                })
+        })))
+        .child(h_flex().gap_1().pr_1().min_w_0().child(end))
 }

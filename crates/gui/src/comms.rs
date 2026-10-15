@@ -190,12 +190,12 @@ pub fn blocks(body: &str) -> Vec<Block> {
 }
 
 /// Whether `who` (an id or a label) is you.
-fn is_you(who: &str) -> bool {
+pub(crate) fn is_you(who: &str) -> bool {
     who == "operator" || who == "you (operator)"
 }
 
 /// The agent who posted as `sender` (a seat address or name), if known.
-fn poster<'a>(store: &'a Store, sender: &str) -> Option<&'a Agent> {
+pub(crate) fn poster<'a>(store: &'a Store, sender: &str) -> Option<&'a Agent> {
     store
         .agents
         .values()
@@ -204,7 +204,7 @@ fn poster<'a>(store: &'a Store, sender: &str) -> Option<&'a Agent> {
 }
 
 /// The colour of an agent's name: its own, or the accent for you.
-fn hue(id: &str, cx: &App) -> Hsla {
+pub(crate) fn hue(id: &str, cx: &App) -> Hsla {
     if is_you(id) {
         Color::Accent.color(cx)
     } else {
