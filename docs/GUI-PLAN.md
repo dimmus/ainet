@@ -4,13 +4,18 @@ Plan for adding a native GUI to ainet, built on Zed's UI stack (GPUI and
 Zed's component library) and following Zed's look and interaction model,
 while the console version (CLI + TUI) stays exactly as it is.
 
-Status: **phase 6 done** (measured first: refetching whole screens was
+Status: **phase 7 done** (the workspace restored per daemon socket from
+`$XDG_STATE_HOME/ainet/gui.json`: window, docks, panel sizes, splits and
+tabs, folded rigs, the Map's view, the palette's recent actions; saved
+once changes settle and before closing or quitting; a settings JSON
+schema; a desktop entry, a critter icon, `just install-gui` and an
+untested Arch `PKGBUILD`; macOS checked to be plausible, not supported;
+see [GUI.md](GUI.md)), phase 8 next; phase 6 done (measured first: refetching whole screens was
 the cost, so terminals on show are now streamed from ainetd with the new
 `Request::Attach`, falling back to fetching with older daemons; only the
 terminals whose screen changed redraw, panes and panels are cached
 views, rows are shaped once while they show the same; scrollback comes
-with its colours; numbers and details in [GUI.md](GUI.md)), phase 7
-next; phase 5 done (the command palette over every action with
+with its colours; numbers and details in [GUI.md](GUI.md)); phase 5 done (the command palette over every action with
 its keys and the console's command language, the agent switcher opening
 terminals, the spec picker and Up form with its plan, restore, down,
 spawn and grow forms, the theme selector saving into settings.json, user
@@ -323,9 +328,9 @@ untouched in behaviour.
 
 Done, with two items of §4 left for later: user themes
 (`~/.config/ainet/themes/*.json`) were read at start-up but not reloaded on
-change (done in phase 5, with the theme selector), and `settings.json` has no JSON
-schema yet (phase 7: without an editor in the app, a schema only helps in
-an external editor that is told about it).
+change (done in phase 5, with the theme selector), and `settings.json` had no JSON
+schema (done in phase 7: generated from the settings' types, named in the
+template's `"$schema"` for external editors).
 
 ### Phase 3 — Component library · ~1–2 weeks (B) / ~2 days (A)
 
@@ -354,7 +359,7 @@ libraries).
 Done under A: `Item`, `Pane` (Zed's `TabBar`/`Tab`, hover close, middle
 click, tab menu), `PaneGroup` (split right/down, draggable dividers, focus
 by order and direction, zoom on `shift-escape`), `Dock`/`Panel` (left,
-right, bottom; toggled, dragged; sizes in memory until phase 7), the
+right, bottom; toggled, dragged; sizes saved since phase 7), the
 modal layer, toasts from the fleet's notices, `TextInput` (also behind
 Zed's `ui_input::InputField`), and `Picker` on Zed's `fuzzy`, with the
 agent switcher (`ctrl-p`) as its first use. Left for later: dragging tabs
@@ -447,7 +452,8 @@ over a second, frame by frame while any is in the air; hover lights a
 node and its edges, a click selects, a double click opens the terminal,
 the wheel and dragging pan and `ctrl`-wheel zooms, fitted at first. Not
 yet: empty and stopped seats on the map, edge kinds other than who
-directs whom, a menu on nodes, keeping the view across sessions.
+directs whom, a menu on nodes. (The view is kept across sessions since
+phase 7.)
 
 Step 8 done: `ReportItem`, a read-only, selectable text tab in the buffer
 font for replies that are long text (transcripts, `/spec`, `/export`, a
@@ -481,9 +487,9 @@ rig switcher (`fleet::SwitchRig`) picks a rig and selects its first live
 agent. The demo's added answers (transcripts, specs, plans, listings,
 queue requests, chat topics) are the GUI's only (`Demo::full`): the
 console's `ainet --demo` answers as before. Not yet: a picker
-for `/adopt` or `/discover`, editing a rig's edges when growing, the
-palette's history kept across sessions (phase 7), and a rig's own menu
-in the Fleet with these entries.
+for `/adopt` or `/discover`, editing a rig's edges when growing, and a
+rig's own menu in the Fleet with these entries. (The palette's history is
+kept across sessions since phase 7.)
 
 ### Phase 6 — Performance and live terminals · ~1 week
 
@@ -531,6 +537,28 @@ Workspace restore (docks, tabs, splits, focused agent); window bounds;
 `confirm_quit`; desktop entry and icon (`ainet-gui.desktop`); `just
 install-gui`; optional AUR `PKGBUILD` split into `ainet` and `ainet-gui`;
 macOS build check (GPUI's Metal backend) without promising support yet.
+
+Done. Workspace restore as Zed's `workspace::persistence`, simplified to
+one versioned JSON file, `$XDG_STATE_HOME/ainet/gui.json`, with a
+workspace per daemon socket (and the demo's): the window's bounds and
+maximized or full-screen state, each dock's panel and whether it is
+open, panels dragged to a size, the pane tree with its splits, shares,
+tabs and active tab and pane, the Fleet's folded rigs, the Map's zoom and
+pan, and the palette's recent actions. Terminals are saved by agent id
+and come back after ainetd's first snapshot, without the agents gone
+(dropped quietly, their panes and splits folding away); reports are not
+restored. Saved once a change has held still for a second's check, and
+at once when the window closes or the app quits (`confirm_quit` asks
+after saving). A corrupt file or another version is ignored and written
+anew, a newer version's left alone. Polish: `settings-schema.json`
+generated with `schemars` (already in Zed's tree) and named in the
+settings template's `"$schema"`. Packaging: `ainet-gui.desktop`, an SVG
+icon of ainet's critter (written once, checked by a test), `just
+install-gui`, and `packaging/arch/PKGBUILD` (split packages; untested,
+only `makepkg --printsrcinfo` was run). macOS: plausible on reading
+(same `gpui_platform` features as Zed, Linux-only code behind `cfg`, the
+`cmd` keymap), not built. Not yet: the zoomed pane and the Comms or
+Inbox selection across sessions, several windows.
 
 ### Phase 8 — Tests and CI · continuous
 

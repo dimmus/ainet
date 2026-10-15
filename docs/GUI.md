@@ -123,10 +123,9 @@ is lit and closes its dock; another shows its panel). Each panel has a
 `ToggleFocus` action in a namespace of its own, as Zed's
 (`queue_panel::ToggleFocus`, …): it opens the dock on that panel and gives
 it the keyboard, or, if it has the keyboard already, gives it back to the
-center. Dock sizes are kept **in memory**
-for the session, per panel (the Fleet panel's starts from
-`fleet_panel.width` and follows that setting until dragged); saving them
-with the open tabs and splits is phase 7's workspace restore. Moving the
+center. Dock sizes are kept per panel (the Fleet panel's starts from
+`fleet_panel.width` and follows that setting until dragged) and saved
+with the open tabs and splits (see "Workspace restore"). Moving the
 Fleet panel to the other side moves both side panels with their sizes and
 open state.
 
@@ -733,7 +732,7 @@ All in the modal layer, on the picker and the text field of phase 3:
 
 | File | What | After Zed's |
 |---|---|---|
-| `command_palette.rs` | `CommandPalette` (`ctrl-shift-p`): every action available where the keyboard was (`Window::available_actions`; `menu::*` left out), named in words as Zed's (`humanize`: `workspace::ToggleLeftDock` is "workspace: toggle left dock"), with its key binding there (`ui::KeyBinding::for_action_in`), fuzzy filtered (`normalize` lets `workspace::toggle_left` find it too), the ones run from it lately first (kept for the session). Picking one goes back where the keyboard was and runs it there. A line starting with `/`, or one that matches no action, is a console command: `commands::parse` (`command::parse`, no rig in view, so the selected agent's rig) says in its row what it does (`launching docs`) or what is wrong (the usage, `no command /x`); enter runs it, or stays open while it is wrong | `command_palette` |
+| `command_palette.rs` | `CommandPalette` (`ctrl-shift-p`): every action available where the keyboard was (`Window::available_actions`; `menu::*` left out), named in words as Zed's (`humanize`: `workspace::ToggleLeftDock` is "workspace: toggle left dock"), with its key binding there (`ui::KeyBinding::for_action_in`), fuzzy filtered (`normalize` lets `workspace::toggle_left` find it too), the ones run from it lately first (kept with the workspace). Picking one goes back where the keyboard was and runs it there. A line starting with `/`, or one that matches no action, is a console command: `commands::parse` (`command::parse`, no rig in view, so the selected agent's rig) says in its row what it does (`launching docs`) or what is wrong (the usage, `no command /x`); enter runs it, or stays open while it is wrong | `command_palette` |
 | `commands.rs` | the console's command language for the app, shared with Comms: requests through the fleet, the console's own commands (`/view`, `/allow`, `/quit`, …) as the app's actions. `/answer <text>` answers the question waiting on you (`commands::question`: the selected agent's first, else the oldest), as the TUI's answers the one selected. `/view fleet` focuses the Fleet, `/view rig:<name>` and `/view <rig>` tile that rig's terminals (`Workspace::tile_rig`), whichever agent is selected; another name says there is no such view or rig | — |
 | `up_modal.rs` | `fleet::Up`: `SpecPicker` over the library (`Request::Specs`, through the new `FleetModel::list`), with what is typed offered as a source of its own (a spec file's path, or a name); then `UpModal`: working directory (Browse… asks the system for a folder, `cx.prompt_for_paths`), rig name, fresh seats (`dev.impl, dev.review`). **Plan** shows what would launch (`UpSpec { plan: true }`, `FleetModel::ask`) in the form; **Launch** (or enter in the last field) sends `Up`. Both are `command::up` | `file_finder`, `ui::Modal` |
 | `rig_modals.rs` | `fleet::SwitchRig` (the title bar's rig switcher, which names the selected agent's rig, `title_bar::rig_label`): a `RigPicker`; picking a rig selects its first live agent in the Fleet's order (`rig_modals::first_agent`), so the Fleet, Agent panel, Chatroom and the rig commands follow it. `fleet::Restore`: a `RigPicker`, then `RestoreModal`: the snapshots (`Request::SnapshotList`), the latest by default, picked by click or `up`/`down`; the rig's seats as checkboxes to start fresh; enter restores (`command::restore`). `fleet::Down`: `DownModal` asks about the selected agent's rig (or the only one; else a rig picker first), with **Take a snapshot first** checked; enter takes it down (`command::down`) | — |
@@ -800,6 +799,113 @@ the tab switcher (by recency, `ctrl` held and let go, typing). In
 `ainet-model`: the forms' commands are the typed ones, listings by token,
 the demo's plan.
 
+## Workspace restore, packaging and macOS (phase 7)
+
+**Workspace restore** (`persistence.rs`, the format and file;
+`workspace/persist.rs`, reading the workspace into it and building it
+back), after Zed's `workspace::persistence` but one JSON file instead of
+SQLite: `$XDG_STATE_HOME/ainet/gui.json` (`~/.local/state/ainet/gui.json`),
+one workspace per daemon socket and one for the demo:
+
+```json
+{ "version": 1, "workspaces": { "/run/user/1000/ainet.sock": {
+  "window": { "x": 0, "y": 0, "width": 1280, "height": 800, "state": "maximized" },
+  "docks": [ { "panel": "FleetPanel", "open": true }, … ],
+  "panel_sizes": { "FleetPanel": 312 },
+  "center": { "kind": "axis", "axis": "horizontal", "flexes": [1.2, 0.8], "members": [
+    { "kind": "pane", "items": [ { "kind": "terminal", "agent": "…" }, { "kind": "inbox" } ],
+      "active": 0, "active_pane": true },
+    { "kind": "pane", "items": [ { "kind": "map", "zoom": 1.5, "pan_x": 0, "pan_y": 0 } ] } ] },
+  "folded_rigs": [ "infra" ],
+  "recent_actions": [ "workspace: toggle left dock" ] } } }
+```
+
+- **What.** The window's bounds and whether it was maximized or full
+  screen; each dock's panel showing and whether it is open (by panel, so
+  a Fleet moved to the other side keeps its state) and the panels
+  dragged to a size; the pane tree with its splits, shares, tabs, each
+  pane's active tab and the active pane; the Fleet's folded rigs; the
+  Map's zoom and pan (with its tab); the palette's recent actions (the
+  last 50). Terminals are saved by agent id, the Inbox, Comms and the Map
+  as themselves; reports and the stand-in tab are not saved.
+- **Restoring.** At start the window opens with the saved bounds (at
+  least its smallest size; one left on a display that is gone is centred
+  on the main display), then the docks, sizes, folds and recent actions
+  come back. The panes wait for ainetd's first snapshot (the demo has
+  one at once), since only then are the agents known: tabs of agents that
+  are gone (or no longer live) are dropped quietly, panes left empty go
+  and splits fold up (`SavedMember::retain`, with the active tab passed to
+  the one before it). Until then, and when ainetd never answers, the saved
+  panes are kept as saved. Tabs opened before the snapshot win over the
+  saved ones, as does a `--view` given on the command line.
+- **Saving.** The workspace is compared with what was written every second
+  (`persist::SAVE_CHECK`) and written once it changed and then held still
+  for a check (`persistence::Debounce`), so dragging a divider writes once;
+  its state lives in many cached views, and one comparison a second is
+  cheaper than hearing from each. Closing the window (the title bar's
+  button, `ctrl-shift-w`, the window manager) and quitting (`ctrl-q`, with
+  or without `confirm_quit`'s question) write at once first
+  (`Workspace::save_now`, from the close paths, GPUI's `on_app_quit` and
+  the workspace's release). A write goes to a file beside it, then is
+  renamed over it.
+- **Versions.** `persistence::VERSION` is 1. A file that does not parse or
+  has another version is ignored and written anew; one from a newer
+  version (a higher number) is neither read nor written over. A
+  workspace that does not parse costs only itself, and a tab of a kind
+  this version does not know is dropped (`SavedItem::Unknown`).
+
+Tests: pure ones for the file (round trip with two sockets side by side,
+corrupt, empty, older and newer files, a broken workspace beside a good
+one), dropping tabs and folding splits, the active tab passing on,
+shares, window bounds (too small, on a display gone, not a number) and
+the debounce; headless ones for a workspace coming back as it was left
+(splits, tabs, the active one, docks, sizes, folds, the Map's view, the
+palette), agents gone dropped without a toast, a change written once it
+settles, closing and quitting writing first, and saved panes kept while
+no snapshot came.
+
+**Settings schema.** `crates/gui/assets/settings-schema.json` is
+generated from the settings' types (`schemars`, already in the tree
+through Zed's crates; the field docs become its descriptions), and a test
+fails when it falls behind: regenerate with
+`AINET_WRITE_SCHEMA=1 cargo test --manifest-path crates/gui/Cargo.toml settings_types`.
+The settings template (`ctrl-,` on a new file) names it in `"$schema"` by
+its URL in the repository; `just install-gui` also puts a copy in
+`~/.local/share/ainet/settings-schema.json` for editors offline.
+
+**Packaging.** `crates/gui/assets/ainet-gui.desktop` (the window's app id
+and `StartupWMClass` are both `ainet-gui`, so the desktop matches the
+window to its entry) and `crates/gui/assets/ainet-gui.svg`, ainet's
+critter (`ainet_critter::pixels` for `hash("ainet")`) on a rounded square
+in Deepharness's colours, written once and kept in step by a test
+(`AINET_WRITE_ICON=1 cargo test --manifest-path crates/gui/Cargo.toml
+ainets_critter` draws it again; another checks that the entry's `Exec`,
+`Icon` and `StartupWMClass` match the binary, the icon and
+`main::APP_ID`; `src/packaging.rs`). `just install-gui` installs `ainet` and
+`ainet-gui` with `cargo install` (side by side in cargo's bin directory,
+where `ainet gui` looks), the entry (naming the binary by its full path,
+since a desktop session's `PATH` often lacks `~/.cargo/bin`), the icon and
+the schema under `$XDG_DATA_HOME` (`~/.local/share`).
+`packaging/arch/PKGBUILD` builds both binaries from git as split packages,
+`ainet` (MIT) and `ainet-gui` (GPL-3.0-or-later, with GPUI's runtime
+dependencies); it was written without running `makepkg` (only
+`makepkg --printsrcinfo`), so it is untested.
+
+**macOS: plausible, not supported.** Not built or run here (no Mac, and
+GPUI's Metal shaders need Xcode). What is in place: `gpui_platform` takes
+the same features as Zed's own build on every platform (`wayland`/`x11`
+only reach `gpui_linux`, which macOS does not build, `font-kit` reaches
+`gpui_macos`), and `crates/gui/Cargo.lock` holds the macOS crates too;
+the display check, the GNOME button layout and the Linux window controls
+are behind `cfg(target_os = "linux"/"freebsd")`; client-side decorations
+fall back to the native title bar with its traffic lights at (9, 9), as
+Zed's; `assets/keymaps/default-macos.json` has the `cmd` equivalents and is
+picked by `cfg!(target_os = "macos")` (both keymaps are parsed in tests on
+Linux); the workspace and key tests that spell out Linux keys are skipped
+there. `ainet-model` and `ainet-core` are plain Rust. Expect work on
+`AINET_WINDOW_DECORATIONS`, the app menu and signing before anyone ships
+it.
+
 ## Upgrading Zed
 
 1. Pick the release: the newest `vX.Y.Z` tag (not `-pre`) on
@@ -838,7 +944,8 @@ the demo's plan.
 ## Settings, themes and keys
 
 `~/.config/ainet/settings.json` (`$XDG_CONFIG_HOME` respected) is JSON with
-comments and trailing commas, every field optional; saved changes apply at
+comments and trailing commas, every field optional, with a JSON schema
+for editors (`"$schema"`, see phase 7); saved changes apply at
 once (the file is checked every 750 ms: its time, size and a hash of its
 contents, so a quick re-save of the same size is seen too). If it does not parse, the last good
 settings stay and the status bar says what is wrong. `ctrl-,` opens it

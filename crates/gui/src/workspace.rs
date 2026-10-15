@@ -8,7 +8,10 @@
 //!
 //! It handles what spans panes and docks: toggling and resizing docks,
 //! splitting, moving between and zooming panes, opening tabs, modals, and
-//! the pane actions when the keyboard is outside the panes.
+//! the pane actions when the keyboard is outside the panes. It is saved
+//! as it is and restored at the next start (`persist`).
+
+mod persist;
 
 use ainet_model::{AgentCommand, command, terminal};
 use gpui::{
@@ -107,6 +110,8 @@ pub struct Workspace {
     /// Where the docks and center were last drawn, for resizing docks.
     bounds: Bounds<Pixels>,
     focus: FocusHandle,
+    /// Where it is saved, once `persist` is called.
+    persist: Option<persist::Persist>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -175,7 +180,9 @@ impl Workspace {
         // The Fleet has the keyboard until a terminal or tab takes it.
         window.focus(&fleet_panel.focus_handle(cx), cx);
         // The window manager's close goes the way of `CloseWindow`.
-        window.on_window_should_close(cx, |window, cx| {
+        let this = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |window, cx| {
+            let _ = this.update(cx, |this, cx| this.save_now(cx));
             if quit::must_ask_on_close(cx) {
                 quit::ask(window, cx);
                 false
@@ -199,6 +206,7 @@ impl Workspace {
             toast_layer,
             bounds: Bounds::default(),
             focus: cx.focus_handle(),
+            persist: None,
             _subscriptions: subscriptions,
         }
     }
@@ -1096,7 +1104,10 @@ impl Render for Workspace {
             .key_context("Workspace")
             .track_focus(&self.focus)
             .relative()
-            .on_action(|_: &CloseWindow, window, cx| quit::close_window(window, cx))
+            .on_action(cx.listener(|this, _: &CloseWindow, window, cx| {
+                this.save_now(cx);
+                quit::close_window(window, cx)
+            }))
             .on_action(cx.listener(|this, _: &ToggleLeftDock, window, cx| this.toggle_side(true, window, cx)))
             .on_action(
                 cx.listener(|this, _: &ToggleRightDock, window, cx| this.toggle_side(false, window, cx)),

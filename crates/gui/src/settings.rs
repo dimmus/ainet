@@ -10,7 +10,8 @@
 use std::path::{Path, PathBuf};
 
 use gpui::{App, Font, Global, Pixels, SharedString, Task, font, px};
-use serde::Deserialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use theme::{Appearance, SystemAppearance, ThemeSettingsProvider, UiDensity};
 
 use crate::{json_edit, problems, themes, watch};
@@ -24,6 +25,9 @@ pub fn settings_file() -> PathBuf {
 pub const TEMPLATE: &str = r#"// ainet desktop settings. Every field is optional, and changes apply as
 // soon as you save. Comments and trailing commas are fine.
 {
+  // For editors that complete and check JSON (`just install-gui` also puts
+  // a copy in ~/.local/share/ainet/settings-schema.json).
+  "$schema": "https://raw.githubusercontent.com/dimmus/ainet/main/crates/gui/assets/settings-schema.json",
   // A theme name ("Deepharness", "Omarchy", "One Dark", "Ayu Light", …),
   // or one per system appearance:
   // "theme": { "mode": "system", "light": "One Light", "dark": "Deepharness" },
@@ -43,16 +47,25 @@ const MIN_FONT_SIZE: f32 = 6.;
 const MAX_FONT_SIZE: f32 = 100.;
 
 /// Everything `settings.json` can say.
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct Settings {
-    /// The theme; unset means Omarchy when installed, else Deepharness.
+    /// The theme: a name ("Deepharness", "Omarchy", "One Dark", …), or one
+    /// per system appearance. Unset means Omarchy when installed, else
+    /// Deepharness.
     pub theme: Option<ThemeSelection>,
+    /// The font of everything but terminals and code (".ZedSans" is IBM
+    /// Plex Sans, bundled).
     pub ui_font_family: SharedString,
+    /// In pixels, 6 to 100.
     pub ui_font_size: f32,
+    /// How tightly the UI is spaced.
     pub ui_density: UiDensity,
+    /// Agents' terminals.
     pub terminal: TerminalSettings,
+    /// The Fleet panel.
     pub fleet_panel: FleetPanelSettings,
+    /// The agents' pixel critters.
     pub critters: CritterSettings,
     /// Ask before quitting.
     pub confirm_quit: bool,
@@ -75,7 +88,7 @@ impl Default for Settings {
 }
 
 /// A theme by name, or one for light and one for dark, as in Zed.
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
 pub enum ThemeSelection {
     Static(String),
@@ -87,7 +100,7 @@ pub enum ThemeSelection {
     },
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ThemeMode {
     Light,
@@ -110,13 +123,18 @@ impl ThemeSelection {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct TerminalSettings {
+    /// ".ZedMono" is Lilex, bundled.
     pub font_family: SharedString,
+    /// In pixels, 6 to 100.
     pub font_size: f32,
+    /// The height of a line, as a ratio to the font size.
     pub line_height: LineHeight,
+    /// The cursor of a focused terminal.
     pub cursor_shape: CursorShape,
+    /// Whether that cursor blinks.
     pub blinking: Blinking,
 }
 
@@ -133,7 +151,7 @@ impl Default for TerminalSettings {
 }
 
 /// The cursor of a focused terminal, with Zed's names.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CursorShape {
     #[default]
@@ -146,7 +164,7 @@ pub enum CursorShape {
 /// Whether a focused terminal's cursor blinks, with Zed's names. ainetd
 /// does not pass on a program's own blink request, so
 /// `terminal_controlled` keeps the cursor still.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Blinking {
     Off,
@@ -156,7 +174,7 @@ pub enum Blinking {
 }
 
 /// A terminal's line height, written as in Zed's settings.
-#[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum LineHeight {
     /// 1.618: easy reading.
@@ -179,9 +197,10 @@ impl LineHeight {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct FleetPanelSettings {
+    /// Its side of the window; the Agent panel takes the other.
     pub dock: DockSide,
     /// In pixels; Zed's default side-dock width.
     pub width: f32,
@@ -196,7 +215,7 @@ impl Default for FleetPanelSettings {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum DockSide {
     #[default]
@@ -204,13 +223,14 @@ pub enum DockSide {
     Right,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct CritterSettings {
+    /// Their size in the Fleet (`ctrl-e` toggles it).
     pub size: CritterSize,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CritterSize {
     Small,
@@ -341,7 +361,7 @@ pub fn save_theme(name: &str, cx: &mut App) -> Result<(), String> {
     };
     let text = with_theme(&text, name, SystemAppearance::global(cx).0)?;
     if let Some(file) = &file {
-        write_settings(file, &text).map_err(|e| format!("cannot save {}: {e}", file.display()))?;
+        write_whole(file, &text).map_err(|e| format!("cannot save {}: {e}", file.display()))?;
         reload(&text, cx);
     } else {
         let mut next = get(cx).clone();
@@ -361,9 +381,10 @@ fn read_settings(file: &Path) -> Result<String, String> {
     }
 }
 
-/// Writes settings.json whole or not at all: into a file beside it, then
-/// renamed over it, so a crash halfway never leaves it cut short.
-fn write_settings(file: &Path, text: &str) -> std::io::Result<()> {
+/// Writes a file (settings.json, the saved workspace) whole or not at
+/// all: into a file beside it, then renamed over it, so a crash halfway
+/// never leaves it cut short.
+pub fn write_whole(file: &Path, text: &str) -> std::io::Result<()> {
     // Through a symlink (settings kept with your dotfiles), the file it
     // points at, so the link stays.
     let file = &std::fs::canonicalize(file).unwrap_or_else(|_| file.to_path_buf());
@@ -495,6 +516,42 @@ mod tests {
     #[test]
     fn the_template_is_valid_and_says_nothing() {
         assert_eq!(parse(TEMPLATE).unwrap(), Settings::default());
+    }
+
+    /// The JSON schema for settings.json, as `assets/settings-schema.json`
+    /// holds it.
+    fn schema() -> String {
+        let schema = schemars::schema_for!(Settings);
+        serde_json::to_string_pretty(&schema).unwrap() + "\n"
+    }
+
+    #[test]
+    fn the_schema_file_is_the_settings_types() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/settings-schema.json");
+        // `AINET_WRITE_SCHEMA=1 cargo test --manifest-path crates/gui/Cargo.toml
+        // settings_types` rewrites it after a change to the settings.
+        if std::env::var_os("AINET_WRITE_SCHEMA").is_some() {
+            std::fs::write(path, schema()).unwrap();
+            return;
+        }
+        let file = std::fs::read_to_string(path).unwrap_or_default();
+        assert!(
+            file == schema(),
+            "run with AINET_WRITE_SCHEMA=1 to regenerate {path}"
+        );
+        let properties = serde_json::from_str::<serde_json::Value>(&file).unwrap()["properties"].clone();
+        for field in [
+            "theme",
+            "ui_font_size",
+            "terminal",
+            "fleet_panel",
+            "critters",
+            "confirm_quit",
+        ] {
+            assert!(properties.get(field).is_some(), "{field} in the schema");
+        }
+        // The template points editors at it, where the repository keeps it.
+        assert!(TEMPLATE.contains("/crates/gui/assets/settings-schema.json\","));
     }
 
     #[test]

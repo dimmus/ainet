@@ -59,7 +59,10 @@ terminals streamed from ainetd, the Inbox, Comms, the Queue, Chatroom
 and Events, the Map, the command palette), with Zed's themes plus
 Deepharness and Omarchy, Zed's fonts, and Zed-style settings
 (`~/.config/ainet/settings.json`) and keymaps
-(`~/.config/ainet/keymap.json`) that apply as you save. The plan is
+(`~/.config/ainet/keymap.json`) that apply as you save. It opens as you
+left it: the window, docks, splits and tabs (an agent's terminal while
+the agent lives), per daemon socket, from
+`~/.local/state/ainet/gui.json`. The plan is
 [docs/GUI-PLAN.md](docs/GUI-PLAN.md); the Zed pin and how to upgrade it,
 [docs/GUI.md](docs/GUI.md).
 
@@ -74,6 +77,20 @@ It is a separate binary and never built by plain `cargo build`; it starts
 ainetd with `ainet daemon` (next to it, on `PATH` or `$AINET_BIN`), so build
 or install `ainet` too. If that fails, the window still opens and says why
 in the status bar.
+
+To install it for your desktop:
+
+```bash
+just install-gui   # ainet and ainet-gui into ~/.cargo/bin, plus the desktop entry,
+                   # icon and settings schema under ~/.local/share
+```
+
+On Arch, [packaging/arch/PKGBUILD](packaging/arch/PKGBUILD) builds both
+binaries from git as split packages, `ainet` (MIT) and `ainet-gui`
+(GPL-3.0-or-later). It is **untested**: written without running a
+`makepkg` build. macOS may build (GPUI has a Metal backend, and the
+`cmd` keymap is there) but is neither tried nor supported; see
+[docs/GUI.md](docs/GUI.md).
 
 Arch Linux packages GPUI needs: the part of Zed's `script/linux` (at
 v1.24.2) that GPUI uses, plus a Vulkan driver, since GPUI renders with

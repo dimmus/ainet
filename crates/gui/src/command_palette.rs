@@ -24,7 +24,7 @@ use crate::picker::{Picker, PickerDelegate, match_strings_up_to};
 const HIDDEN: [&str; 1] = ["menu"];
 
 /// What was run from the palette, by name, and when (a counter): the
-/// latest first next time. Kept for the session.
+/// latest first next time. Kept with the workspace (`recent`).
 #[derive(Default)]
 struct History {
     next: u64,
@@ -32,6 +32,29 @@ struct History {
 }
 
 impl Global for History {}
+
+/// The actions run from the palette, the latest last, at most
+/// `persistence::RECENT_ACTIONS`: kept with the workspace.
+pub fn recent(cx: &App) -> Vec<String> {
+    let Some(history) = cx.try_global::<History>() else {
+        return Vec::new();
+    };
+    let mut used: Vec<(&SharedString, u64)> = history.used.iter().map(|(n, at)| (n, *at)).collect();
+    used.sort_by_key(|(_, at)| *at);
+    let skip = used.len().saturating_sub(crate::persistence::RECENT_ACTIONS);
+    used.into_iter().skip(skip).map(|(n, _)| n.to_string()).collect()
+}
+
+/// Remembers `names` (a saved workspace's) as run lately, the last the
+/// latest.
+pub fn set_recent(names: &[String], cx: &mut App) {
+    let mut history = History::default();
+    for name in names {
+        history.next += 1;
+        history.used.insert(name.clone().into(), history.next);
+    }
+    cx.set_global(history);
+}
 
 struct PaletteCommand {
     name: SharedString,

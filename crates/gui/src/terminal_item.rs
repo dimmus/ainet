@@ -29,6 +29,7 @@ use crate::critter::{Animation, Critter};
 use crate::fleet::{FleetModel, ScreenChanged, Tick};
 use crate::item::{Item, ItemEvent, TabContentParams};
 use crate::panels::state_color;
+use crate::persistence::SavedItem;
 use crate::settings::{self, Blinking};
 use crate::terminal_element::{Geometry, ShapedRow, TerminalElement};
 use crate::terminal_input::keystroke_bytes;
@@ -636,6 +637,12 @@ impl Item for TerminalItem {
     fn tab_tooltip_text(&self, cx: &App) -> Option<SharedString> {
         let agent = self.fleet.read(cx).store.agents.get(&self.agent)?;
         Some(format!("{} · {}", agent.label(), agent.state.label()).into())
+    }
+
+    fn saved(&self, _: &App) -> Option<SavedItem> {
+        Some(SavedItem::Terminal {
+            agent: self.agent.clone(),
+        })
     }
 
     fn can_split(&self) -> bool {

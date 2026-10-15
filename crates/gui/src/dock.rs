@@ -2,10 +2,10 @@
 //! the left, right or bottom holds one or more [`Panel`]s and shows one of
 //! them (each has its button in the status bar, as Zed's), can be opened
 //! and closed, and is resized by dragging its inner edge (a double click
-//! puts the default size back). Sizes are kept in memory for the session, per
-//! panel, and start from the panel's default (the Fleet panel's from
-//! `fleet_panel.width` in settings); phase 7 saves them with the rest of
-//! the workspace.
+//! puts the default size back). Sizes are kept per panel, start from the
+//! panel's default (the Fleet panel's from `fleet_panel.width` in
+//! settings), and are saved with the rest of the workspace
+//! (`persistence`).
 
 use gpui::{
     Action, AnyView, App, Context, Entity, FocusHandle, Focusable, MouseButton, MouseDownEvent, MouseUpEvent,
@@ -36,7 +36,7 @@ impl Render for DraggedDock {
 }
 
 pub trait Panel: Focusable + Render + Sized {
-    /// A stable name, for tests and (later) saved layouts.
+    /// A stable name, for tests and saved workspaces.
     fn persistent_name() -> &'static str;
 
     /// Its size along the dock's axis until resized.
@@ -236,6 +236,27 @@ impl Dock {
     pub fn resize_active(&mut self, size: Option<Pixels>, cx: &mut Context<Self>) {
         if let Some(entry) = self.contents.panels.get_mut(self.contents.active) {
             entry.size = size.map(|s| s.max(RESIZE_HANDLE_SIZE).round());
+            cx.notify();
+        }
+    }
+
+    /// Each panel's size if it was dragged to one, by name.
+    pub fn panel_sizes(&self) -> impl Iterator<Item = (&'static str, Option<Pixels>)> + '_ {
+        self.contents
+            .panels
+            .iter()
+            .map(|e| (e.panel.persistent_name(), e.size))
+    }
+
+    /// Sizes the panel named `name` (a saved size), if it is here.
+    pub fn set_panel_size(&mut self, name: &str, size: Pixels, cx: &mut Context<Self>) {
+        if let Some(entry) = self
+            .contents
+            .panels
+            .iter_mut()
+            .find(|e| e.panel.persistent_name() == name)
+        {
+            entry.size = Some(size.max(RESIZE_HANDLE_SIZE).round());
             cx.notify();
         }
     }

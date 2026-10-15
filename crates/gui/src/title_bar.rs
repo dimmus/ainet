@@ -79,7 +79,7 @@ impl Render for TitleBar {
         let layout = client_side.then(|| button_layout(cx)).flatten();
         let controls = |side: &[Option<WindowButton>]| {
             let buttons: Vec<WindowButton> = side.iter().flatten().copied().collect();
-            (!buttons.is_empty()).then(|| window_controls(buttons, window, cx))
+            (!buttons.is_empty()).then(|| window_controls(buttons, self.workspace.clone(), window, cx))
         };
         let left_controls = layout.and_then(|l| controls(&l.left));
         let right_controls = layout.and_then(|l| controls(&l.right));
@@ -218,7 +218,12 @@ fn button_layout(_cx: &App) -> Option<WindowButtonLayout> {
 }
 
 /// Minimize, maximize and close, drawn like Zed's Linux window controls.
-fn window_controls(buttons: Vec<WindowButton>, window: &Window, cx: &App) -> AnyElement {
+fn window_controls(
+    buttons: Vec<WindowButton>,
+    workspace: WeakEntity<Workspace>,
+    window: &Window,
+    cx: &App,
+) -> AnyElement {
     let supported = window.window_controls();
     let maximized = window.is_maximized();
     let colors = cx.theme().colors();
@@ -242,6 +247,7 @@ fn window_controls(buttons: Vec<WindowButton>, window: &Window, cx: &App) -> Any
                     WindowButton::Close => true,
                 })
                 .map(|button| {
+                    let workspace = workspace.clone();
                     let (glyph, enabled) = match button {
                         WindowButton::Minimize => (IconName::GenericMinimize, window.is_minimizable()),
                         WindowButton::Maximize if maximized => {
@@ -283,8 +289,11 @@ fn window_controls(buttons: Vec<WindowButton>, window: &Window, cx: &App) -> Any
                                 WindowButton::Minimize => window.minimize_window(),
                                 WindowButton::Maximize => window.zoom_window(),
                                 // Directly, not as an action: the action needs
-                                // the focus inside the workspace.
-                                WindowButton::Close => quit::close_window(window, cx),
+                                // the focus inside the workspace. Saved first.
+                                WindowButton::Close => {
+                                    let _ = workspace.update(cx, |w, cx| w.save_now(cx));
+                                    quit::close_window(window, cx)
+                                }
                             }
                         })
                 })

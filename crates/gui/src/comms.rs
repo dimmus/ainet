@@ -29,6 +29,7 @@ use crate::commands;
 use crate::critter::{self, Critter};
 use crate::fleet::{FleetModel, Tick};
 use crate::item::{Item, ItemEvent};
+use crate::persistence::SavedItem;
 use crate::text_input::{InputEvent, TextInput};
 use crate::themes;
 
@@ -920,6 +921,10 @@ impl Item for CommsItem {
 
     fn tab_tooltip_text(&self, _: &App) -> Option<SharedString> {
         Some("Messages and chat between agents, and with you".into())
+    }
+
+    fn saved(&self, _: &App) -> Option<SavedItem> {
+        Some(SavedItem::Comms)
     }
 }
 

@@ -60,3 +60,21 @@ release:
 
 install:
     cargo install --path crates/ainet --locked
+
+# The desktop app: ainet-gui next to ainet (cargo's bin directory, where
+# `ainet gui` looks), its desktop entry, icon and settings schema under
+# ~/.local/share. The entry names the binary by its full path, since a
+# desktop session's PATH often lacks ~/.cargo/bin.
+install-gui: install
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo install --path crates/gui --locked
+    bin="${CARGO_INSTALL_ROOT:-${CARGO_HOME:-$HOME/.cargo}}/bin/ainet-gui"
+    data="${XDG_DATA_HOME:-$HOME/.local/share}"
+    mkdir -p "$data/applications"
+    sed "s|^Exec=ainet-gui$|Exec=$bin|" crates/gui/assets/ainet-gui.desktop > "$data/applications/ainet-gui.desktop"
+    install -Dm644 crates/gui/assets/ainet-gui.svg "$data/icons/hicolor/scalable/apps/ainet-gui.svg"
+    install -Dm644 crates/gui/assets/settings-schema.json "$data/ainet/settings-schema.json"
+    if command -v update-desktop-database >/dev/null; then update-desktop-database -q "$data/applications" || true; fi
+    if command -v gtk-update-icon-cache >/dev/null; then gtk-update-icon-cache -qtf "$data/icons/hicolor" || true; fi
+    echo "installed $bin and its desktop entry in $data"

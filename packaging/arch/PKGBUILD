@@ -1,0 +1,85 @@
+# ainet and ainet-gui as split packages, built from the repository's
+# main branch: `ainet` (the console binary: daemon, CLI, TUI; MIT) and
+# `ainet-gui` (the desktop app; GPL-3.0-or-later, as it links Zed's GPL
+# crates).
+#
+# UNTESTED: written without running makepkg. Build it with
+#   makepkg -si
+# from this directory, and please report what fails.
+
+pkgbase=ainet
+pkgname=(ainet ainet-gui)
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='A control room for teams of coding agents'
+arch=('x86_64' 'aarch64')
+url='https://github.com/dimmus/ainet'
+license=('MIT' 'GPL-3.0-or-later')
+# The desktop app needs Rust 1.98 or newer (Zed's toolchain).
+makedepends=('cargo' 'git')
+# Cargo does its own (thin) LTO; makepkg's would also reach the bundled C
+# (SQLite) and mix linker plugins.
+options=('!lto')
+source=("$pkgbase::git+$url.git")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "$pkgbase"
+  local version
+  version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
+  printf '%s.r%s.g%s' "$version" "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
+}
+
+prepare() {
+  cd "$pkgbase"
+  export RUSTUP_TOOLCHAIN=stable
+  local target
+  target=$(rustc -vV | sed -n 's/^host: //p')
+  # Two Cargo workspaces: the console's, and the desktop app's own.
+  cargo fetch --locked --target "$target"
+  cargo fetch --locked --target "$target" --manifest-path crates/gui/Cargo.toml
+}
+
+build() {
+  cd "$pkgbase"
+  export RUSTUP_TOOLCHAIN=stable
+  # Both workspaces build into one target directory, as in development.
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release -p ainet
+  cargo build --frozen --release --manifest-path crates/gui/Cargo.toml
+}
+
+package_ainet() {
+  pkgdesc='A control room for teams of coding agents: the daemon, CLI and TUI'
+  license=('MIT')
+  depends=('gcc-libs' 'glibc')
+  optdepends=('tmux: adopt agents running in tmux'
+              'ainet-gui: the desktop app')
+
+  cd "$pkgbase"
+  install -Dm755 target/release/ainet "$pkgdir/usr/bin/ainet"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+}
+
+package_ainet-gui() {
+  pkgdesc='The ainet desktop app, in the style of Zed'
+  license=('GPL-3.0-or-later')
+  # It starts ainetd through `ainet`, which must sit next to it. The rest
+  # is what GPUI needs (Zed's script/linux): Vulkan, Wayland or X11, fonts.
+  depends=('ainet' 'fontconfig' 'freetype2' 'gcc-libs' 'glibc' 'libxcb'
+           'libxkbcommon-x11' 'vulkan-driver' 'vulkan-icd-loader' 'wayland'
+           'xdg-desktop-portal')
+
+  cd "$pkgbase"
+  install -Dm755 target/release/ainet-gui "$pkgdir/usr/bin/ainet-gui"
+  install -Dm644 crates/gui/assets/ainet-gui.desktop \
+    "$pkgdir/usr/share/applications/ainet-gui.desktop"
+  install -Dm644 crates/gui/assets/ainet-gui.svg \
+    "$pkgdir/usr/share/icons/hicolor/scalable/apps/ainet-gui.svg"
+  install -Dm644 crates/gui/assets/settings-schema.json \
+    "$pkgdir/usr/share/ainet/settings-schema.json"
+  install -Dm644 crates/gui/LICENSE-GPL "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 THIRD_PARTY_NOTICES.md \
+    "$pkgdir/usr/share/licenses/$pkgname/THIRD_PARTY_NOTICES.md"
+}

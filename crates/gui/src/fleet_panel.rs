@@ -159,6 +159,20 @@ impl FleetPanel {
         self.collapsed.contains(rig)
     }
 
+    /// The rigs folded away, sorted: kept with the workspace.
+    pub fn folded_rigs(&self) -> Vec<String> {
+        let mut rigs: Vec<String> = self.collapsed.iter().cloned().collect();
+        rigs.sort();
+        rigs
+    }
+
+    /// Folds away `rigs` (a saved workspace's) and unfolds the rest. Rigs
+    /// not running yet stay folded for when they come.
+    pub fn set_folded_rigs(&mut self, rigs: impl IntoIterator<Item = String>, cx: &mut Context<Self>) {
+        self.collapsed = rigs.into_iter().collect();
+        cx.notify();
+    }
+
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn context_menu(&self) -> Option<&Entity<ContextMenu>> {
         self.context_menu.as_ref().map(|m| &m.menu)

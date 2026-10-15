@@ -12,6 +12,7 @@ use gpui::{
 use ui::prelude::*;
 
 use crate::args::View;
+use crate::persistence::SavedItem;
 
 /// How a tab is drawn: whether it is the pane's active tab, and whether its
 /// pane has the keyboard (Zed draws the others' labels muted).
@@ -87,6 +88,11 @@ pub trait Item: Focusable + Render + EventEmitter<ItemEvent> + Sized {
 
     /// Its tab was closed.
     fn on_removed(&mut self, _: &mut Window, _: &mut Context<Self>) {}
+
+    /// What reopens it at the next start, if it is worth reopening.
+    fn saved(&self, _: &App) -> Option<SavedItem> {
+        None
+    }
 }
 
 /// What hears an item's events: its id and the event.
@@ -105,6 +111,7 @@ pub trait ItemHandle: 'static {
     fn focus_handle(&self, cx: &App) -> FocusHandle;
     fn set_active(&self, active: bool, window: &mut Window, cx: &mut App);
     fn on_removed(&self, window: &mut Window, cx: &mut App);
+    fn saved(&self, cx: &App) -> Option<SavedItem>;
     fn to_any(&self) -> AnyView;
     fn boxed_clone(&self) -> Box<dyn ItemHandle>;
     /// Calls `f` with every event the item emits.
@@ -157,6 +164,10 @@ impl<T: Item> ItemHandle for Entity<T> {
 
     fn on_removed(&self, window: &mut Window, cx: &mut App) {
         self.update(cx, |item, cx| item.on_removed(window, cx))
+    }
+
+    fn saved(&self, cx: &App) -> Option<SavedItem> {
+        self.read(cx).saved(cx)
     }
 
     fn to_any(&self) -> AnyView {

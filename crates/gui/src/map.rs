@@ -35,6 +35,7 @@ use crate::critter::{self, Critter};
 use crate::fleet::{FleetModel, Tick};
 use crate::item::{Item, ItemEvent};
 use crate::panels::state_color;
+use crate::persistence::SavedItem;
 
 /// How long a message takes to fly from sender to recipient.
 pub const FLIGHT: Duration = Duration::from_millis(1000);
@@ -259,6 +260,21 @@ impl MapItem {
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn camera(&self) -> Camera {
         self.camera
+    }
+
+    /// Looks at the map as `camera` does (a saved view), within the zoom's
+    /// limits.
+    pub fn set_camera(&mut self, camera: Camera, cx: &mut Context<Self>) {
+        let finite = [camera.zoom, camera.pan.x.as_f32(), camera.pan.y.as_f32()]
+            .iter()
+            .all(|v| v.is_finite());
+        if finite {
+            self.camera = Camera {
+                zoom: camera.zoom.clamp(MIN_ZOOM, MAX_ZOOM),
+                pan: camera.pan,
+            };
+            cx.notify();
+        }
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -840,6 +856,14 @@ impl Item for MapItem {
 
     fn tab_tooltip_text(&self, _: &App) -> Option<SharedString> {
         Some("Who directs whom, and messages in flight".into())
+    }
+
+    fn saved(&self, _: &App) -> Option<SavedItem> {
+        Some(SavedItem::Map {
+            zoom: self.camera.zoom,
+            pan_x: self.camera.pan.x.as_f32(),
+            pan_y: self.camera.pan.y.as_f32(),
+        })
     }
 
     fn can_split(&self) -> bool {

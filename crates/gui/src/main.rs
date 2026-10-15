@@ -25,9 +25,12 @@ mod keymap;
 mod map;
 mod message;
 mod modal_layer;
+#[cfg(test)]
+mod packaging;
 mod pane;
 mod pane_group;
 mod panels;
+mod persistence;
 mod picker;
 mod problems;
 mod queue_form;
@@ -60,7 +63,8 @@ use std::rc::Rc;
 
 use clap::Parser;
 use gpui::{
-    App, AppContext, Bounds, TitlebarOptions, WindowBounds, WindowDecorations, WindowOptions, point, px, size,
+    App, AppContext, Bounds, Pixels, Size, TitlebarOptions, WindowBounds, WindowDecorations, WindowOptions,
+    point, px, size,
 };
 use theme::{ActiveTheme, SystemAppearance};
 
@@ -168,13 +172,36 @@ fn fleet(args: &Args, cx: &mut App) -> gpui::Entity<FleetModel> {
     }
 }
 
+/// The window's id on Wayland and class on X11: the desktop entry's name
+/// (`assets/ainet-gui.desktop`, `StartupWMClass`).
+const APP_ID: &str = "ainet-gui";
+
+/// The smallest the window gets.
+const MIN_WINDOW_SIZE: Size<Pixels> = size(px(480.), px(320.));
+
 fn open_window(args: &Args, cx: &mut App) -> anyhow::Result<()> {
     let fleet = fleet(args, cx);
     let view = args.view.clone();
-    let bounds = Bounds::centered(None, size(px(1280.), px(800.)), cx);
+    // The workspace this socket's window was left with, if any.
+    let file = persistence::state_file();
+    let key = persistence::key(args.demo, &args.socket());
+    let saved = persistence::load(&file, &key);
+    let displays: Vec<_> = cx.displays().iter().map(|d| d.bounds()).collect();
+    let main_display = cx.primary_display().map(|d| d.bounds());
+    let bounds = saved
+        .as_ref()
+        .and_then(|s| s.window)
+        .and_then(|w| w.to_bounds(MIN_WINDOW_SIZE, &displays, main_display))
+        .unwrap_or_else(|| WindowBounds::Windowed(Bounds::centered(None, size(px(1280.), px(800.)), cx)));
     cx.open_window(window_options(bounds, cx), |window, cx| {
         window.activate_window();
-        let workspace = cx.new(|cx| Workspace::new(fleet, view, window, cx));
+        // A view asked for on the command line wins over the saved panes.
+        let restore_center = view.is_none();
+        let workspace = cx.new(|cx| {
+            let mut workspace = Workspace::new(fleet, view, window, cx);
+            workspace.persist(file, key, saved, restore_center, window, cx);
+            workspace
+        });
         // As Zed: follow the system's light or dark appearance.
         window
             .observe_window_appearance(|window, cx| {
@@ -187,7 +214,7 @@ fn open_window(args: &Args, cx: &mut App) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn window_options(bounds: Bounds<gpui::Pixels>, cx: &App) -> WindowOptions {
+fn window_options(bounds: WindowBounds, cx: &App) -> WindowOptions {
     // As Zed: client-side decorations unless asked for the server's
     // (`AINET_WINDOW_DECORATIONS=server`, Zed's `ZED_WINDOW_DECORATIONS`).
     let decorations = match std::env::var("AINET_WINDOW_DECORATIONS").as_deref() {
@@ -195,7 +222,7 @@ fn window_options(bounds: Bounds<gpui::Pixels>, cx: &App) -> WindowOptions {
         _ => WindowDecorations::Client,
     };
     WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        window_bounds: Some(bounds),
         titlebar: Some(TitlebarOptions {
             title: Some("ainet".into()),
             appears_transparent: true,
@@ -203,9 +230,9 @@ fn window_options(bounds: Bounds<gpui::Pixels>, cx: &App) -> WindowOptions {
         }),
         app_owns_titlebar_drag: true,
         window_background: cx.theme().window_background_appearance(),
-        app_id: Some("ainet-gui".into()),
+        app_id: Some(APP_ID.into()),
         window_decorations: Some(decorations),
-        window_min_size: Some(size(px(480.), px(320.))),
+        window_min_size: Some(MIN_WINDOW_SIZE),
         ..Default::default()
     }
 }

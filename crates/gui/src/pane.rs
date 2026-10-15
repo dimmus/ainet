@@ -100,7 +100,6 @@ impl Pane {
             .collect()
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn active_index(&self) -> usize {
         self.active
     }
@@ -147,18 +146,7 @@ impl Pane {
             }
             return;
         }
-        let pane = cx.entity().downgrade();
-        let subscription = item.subscribe(
-            window,
-            cx,
-            Box::new(move |id, event, window, cx| {
-                let _ = pane.update(cx, |pane, cx| match event {
-                    ItemEvent::CloseItem => pane.close_item_by_id(id, window, cx),
-                    ItemEvent::UpdateTab => cx.notify(),
-                });
-            }),
-        );
-        self.item_subscriptions.push((id, subscription));
+        self.subscribe_item(item.as_ref(), window, cx);
         let ix = if self.items.is_empty() { 0 } else { self.active + 1 };
         self.items.insert(ix, item);
         if self.items.len() == 1 {
@@ -171,6 +159,44 @@ impl Pane {
             self.activate_item(ix, focus, window, cx);
         }
         cx.notify();
+    }
+
+    /// Fills an empty pane with `items` in their order (a saved
+    /// workspace's), `active` the active one: only that one is told it is
+    /// shown, so a terminal behind it is never streamed for a moment.
+    pub fn restore_items(
+        &mut self,
+        items: Vec<Box<dyn ItemHandle>>,
+        active: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.items.is_empty() || items.is_empty() {
+            return;
+        }
+        for item in &items {
+            self.subscribe_item(item.as_ref(), window, cx);
+        }
+        self.active = active.min(items.len() - 1);
+        self.items = items;
+        self.activated(window, cx);
+        cx.notify();
+    }
+
+    /// Hears `item`'s events.
+    fn subscribe_item(&mut self, item: &dyn ItemHandle, window: &mut Window, cx: &mut Context<Self>) {
+        let pane = cx.entity().downgrade();
+        let subscription = item.subscribe(
+            window,
+            cx,
+            Box::new(move |id, event, window, cx| {
+                let _ = pane.update(cx, |pane, cx| match event {
+                    ItemEvent::CloseItem => pane.close_item_by_id(id, window, cx),
+                    ItemEvent::UpdateTab => cx.notify(),
+                });
+            }),
+        );
+        self.item_subscriptions.push((item.item_id(), subscription));
     }
 
     /// Records the active item as the latest and tells it so.

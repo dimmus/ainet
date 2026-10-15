@@ -29,6 +29,9 @@ futures = "0.3"
 # Bundled themes, icons, fonts and keymaps, embedded in debug builds too so
 # the binary is always self-contained.
 rust-embed = { version = "8.11", features = ["debug-embed", "include-exclude"] }
+# assets/settings-schema.json from the settings' types (the version Zed's
+# crates already build).
+schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Zed's lenient JSON: comments and trailing commas in settings and keymaps.

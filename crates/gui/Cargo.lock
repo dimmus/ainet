@@ -164,6 +164,7 @@ dependencies = [
  "gpui_platform",
  "menu",
  "rust-embed",
+ "schemars",
  "serde",
  "serde_json",
  "serde_json_lenient",

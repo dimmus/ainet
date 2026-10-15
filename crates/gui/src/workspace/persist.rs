@@ -1,0 +1,626 @@
+//! The workspace saved as it is and restored at the next start, as Zed's
+//! `workspace::persistence` does it: the file and its format are
+//! `crate::persistence`; this is what the workspace reads into it and
+//! builds back from it.
+//!
+//! Saving: the workspace is compared with what was written every
+//! [`SAVE_CHECK`] and written once it has changed and then held still for
+//! a check (the state lives in many cached views, so one comparison a
+//! second is cheaper than hearing from all of them), and at once when the
+//! window closes or the app quits.
+
+use std::path::PathBuf;
+use std::time::Duration;
+
+use gpui::{Axis, Entity, Subscription, Task, point};
+use ui::prelude::*;
+
+use super::Workspace;
+use crate::command_palette;
+use crate::comms::CommsItem;
+use crate::inbox::InboxItem;
+use crate::item::{ItemHandle, Placeholder};
+use crate::map::{Camera, MapItem};
+use crate::pane::Pane;
+use crate::pane_group::{Member, PaneAxis, PaneGroup};
+use crate::persistence::{
+    self, Debounce, SavedAxis, SavedDock, SavedItem, SavedMember, SavedWindow, SavedWorkspace,
+};
+use crate::terminal_item::TerminalItem;
+
+/// How often the workspace is compared with what was saved.
+pub const SAVE_CHECK: Duration = Duration::from_millis(1000);
+
+pub struct Persist {
+    file: PathBuf,
+    key: String,
+    debounce: Debounce,
+    /// The panes saved, until ainetd's first snapshot says which agents
+    /// are there to reopen terminals for; saved as they were meanwhile.
+    pending_center: Option<SavedMember>,
+    /// The window's bounds, as last seen.
+    window: Option<SavedWindow>,
+    _subscriptions: Vec<Subscription>,
+    _check: Task<()>,
+}
+
+impl Workspace {
+    /// Restores `saved` (what `file` holds under `key`) and saves this
+    /// workspace there from now on. With `restore_center` false (a view
+    /// was asked for on the command line) the panes are left as they are.
+    pub fn persist(
+        &mut self,
+        file: PathBuf,
+        key: String,
+        saved: Option<SavedWorkspace>,
+        restore_center: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(saved) = &saved {
+            self.restore_layout(saved, window, cx);
+        }
+        let pending_center = saved
+            .as_ref()
+            .and_then(|s| s.center.clone())
+            .filter(|_| restore_center);
+        let subscriptions = vec![
+            cx.observe_window_bounds(window, |this, window, _| {
+                if let Some(persist) = &mut this.persist {
+                    persist.window = Some(SavedWindow::from_bounds(window.window_bounds()));
+                }
+            }),
+            cx.observe_in(&self.fleet, window, |this, _, window, cx| {
+                this.restore_center_when_ready(window, cx)
+            }),
+        ];
+        // Quitting, and the window going (however it goes), save first.
+        cx.on_app_quit(|this, cx| {
+            this.save_now(cx);
+            async {}
+        })
+        .detach();
+        cx.on_release(|this, cx| this.save_now(cx)).detach();
+        let check = cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor().timer(SAVE_CHECK).await;
+                let checked = this.update_in(cx, |this, window, cx| this.check_save(window, cx));
+                if checked.is_err() {
+                    break;
+                }
+            }
+        });
+        self.persist = Some(Persist {
+            file,
+            key,
+            debounce: Debounce::new(saved),
+            pending_center,
+            window: Some(SavedWindow::from_bounds(window.window_bounds())),
+            _subscriptions: subscriptions,
+            _check: check,
+        });
+        self.restore_center_when_ready(window, cx);
+    }
+
+    /// The workspace as it would be saved now.
+    pub fn to_saved(&self, cx: &App) -> Option<SavedWorkspace> {
+        let persist = self.persist.as_ref()?;
+        let docks = [&self.left_dock, &self.right_dock, &self.bottom_dock];
+        let center = match &persist.pending_center {
+            Some(center) => Some(center.clone()),
+            None => save_member(&self.center.root, &self.active_pane, cx)
+                .retain(&|item| *item != SavedItem::Unknown),
+        };
+        Some(SavedWorkspace {
+            window: persist.window,
+            docks: docks
+                .iter()
+                .filter_map(|dock| {
+                    let dock = dock.read(cx);
+                    Some(SavedDock {
+                        panel: dock.active_panel_name()?.to_string(),
+                        open: dock.is_open(),
+                    })
+                })
+                .collect(),
+            panel_sizes: docks
+                .iter()
+                .flat_map(|dock| dock.read(cx).panel_sizes())
+                .filter_map(|(name, size)| Some((name.to_string(), size?.as_f32())))
+                .collect(),
+            center,
+            folded_rigs: self.fleet_panel.read(cx).folded_rigs(),
+            recent_actions: command_palette::recent(cx),
+        })
+    }
+
+    /// Writes the workspace now, unless it is what was written last.
+    pub fn save_now(&mut self, cx: &App) {
+        let Some(now) = self.to_saved(cx) else { return };
+        if let Some(persist) = &mut self.persist
+            && !persist.debounce.is_written(&now)
+        {
+            persist.write(now);
+        }
+    }
+
+    /// Writes the workspace if it changed and has held still since the
+    /// last check.
+    fn check_save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(persist) = &mut self.persist {
+            persist.window = Some(SavedWindow::from_bounds(window.window_bounds()));
+        }
+        let Some(now) = self.to_saved(cx) else { return };
+        if let Some(persist) = &mut self.persist
+            && let Some(now) = persist.debounce.check(now)
+        {
+            persist.write(now);
+        }
+    }
+
+    /// The docks, their panels' sizes, the Fleet's folds and the
+    /// palette's recent actions, as saved.
+    fn restore_layout(&mut self, saved: &SavedWorkspace, window: &mut Window, cx: &mut Context<Self>) {
+        let docks = [
+            self.left_dock.clone(),
+            self.right_dock.clone(),
+            self.bottom_dock.clone(),
+        ];
+        for SavedDock { panel, open } in &saved.docks {
+            // By panel: the Fleet may have moved sides since.
+            if let Some((dock, ix)) = docks
+                .iter()
+                .find_map(|d| Some((d, d.read(cx).panel_index(panel)?)))
+            {
+                dock.update(cx, |dock, cx| {
+                    dock.activate_panel(ix, window, cx);
+                    dock.set_open(*open, window, cx);
+                });
+            }
+        }
+        for (name, size) in &saved.panel_sizes {
+            if size.is_finite() {
+                let size = px(*size).max(super::MIN_DOCK_SIZE);
+                for dock in &docks {
+                    dock.update(cx, |dock, cx| dock.set_panel_size(name, size, cx));
+                }
+            }
+        }
+        let folded = saved.folded_rigs.clone();
+        self.fleet_panel
+            .update(cx, |panel, cx| panel.set_folded_rigs(folded, cx));
+        command_palette::set_recent(&saved.recent_actions, cx);
+        self.release_hidden_focus(window, cx);
+        cx.notify();
+    }
+
+    /// Reopens the saved panes once the fleet knows its agents (ainetd's
+    /// first snapshot; the demo has its own at once), without the tabs of
+    /// agents that are gone. Tabs opened meanwhile win: then the saved
+    /// panes are dropped.
+    fn restore_center_when_ready(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let ready = self.fleet.read(cx).snapshots() > 0;
+        let Some(saved) = self
+            .persist
+            .as_mut()
+            .filter(|_| ready)
+            .and_then(|p| p.pending_center.take())
+        else {
+            return;
+        };
+        if !self.center_is_untouched(cx) {
+            return;
+        }
+        let saved = {
+            let store = &self.fleet.read(cx).store;
+            saved.retain(&|item| match item {
+                SavedItem::Terminal { agent } => store.agents.get(agent).is_some_and(|a| a.state.is_live()),
+                SavedItem::Unknown => false,
+                SavedItem::Inbox | SavedItem::Comms | SavedItem::Map { .. } => true,
+            })
+        };
+        let Some(saved) = saved else { return };
+        let mut active = None;
+        let root = self.build_member(saved, &mut active, window, cx);
+        let old = std::mem::replace(&mut self.center, PaneGroup { root });
+        self.active_pane = active.unwrap_or_else(|| self.center.panes()[0].clone());
+        for pane in old.panes() {
+            pane.update(cx, |pane, cx| pane.close_all_items(window, cx));
+        }
+        cx.notify();
+    }
+
+    /// Whether the center is as a new window has it: one pane, with at
+    /// most the stand-in tab.
+    fn center_is_untouched(&self, cx: &App) -> bool {
+        let panes = self.center.panes();
+        panes.len() == 1
+            && panes[0]
+                .read(cx)
+                .items()
+                .all(|item| item.to_any().downcast::<Placeholder>().is_ok())
+    }
+
+    fn build_member(
+        &mut self,
+        saved: SavedMember,
+        active: &mut Option<Entity<Pane>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Member<Entity<Pane>> {
+        match saved {
+            SavedMember::Pane {
+                items,
+                active: active_item,
+                active_pane,
+            } => {
+                let pane = self.add_pane(window, cx);
+                let items: Vec<Box<dyn ItemHandle>> = items
+                    .into_iter()
+                    .filter_map(|item| self.restore_item(item, window, cx))
+                    .collect();
+                pane.update(cx, |pane, cx| pane.restore_items(items, active_item, window, cx));
+                if active_pane {
+                    *active = Some(pane.clone());
+                }
+                Member::Pane(pane)
+            }
+            SavedMember::Axis {
+                axis,
+                members,
+                flexes,
+            } => {
+                let members: Vec<_> = members
+                    .into_iter()
+                    .map(|m| self.build_member(m, active, window, cx))
+                    .collect();
+                let axis = match axis {
+                    SavedAxis::Horizontal => Axis::Horizontal,
+                    SavedAxis::Vertical => Axis::Vertical,
+                };
+                let axis = PaneAxis::new(axis, members);
+                let n = axis.members.len();
+                *axis.flexes.borrow_mut() = persistence::flexes_for(&flexes, n);
+                Member::Axis(axis)
+            }
+        }
+    }
+
+    fn restore_item(
+        &self,
+        saved: SavedItem,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Box<dyn ItemHandle>> {
+        let fleet = self.fleet.clone();
+        Some(match saved {
+            SavedItem::Terminal { agent } => {
+                Box::new(cx.new(|cx| TerminalItem::new(fleet, agent, window, cx)))
+            }
+            SavedItem::Inbox => Box::new(cx.new(|cx| InboxItem::new(fleet, window, cx))),
+            SavedItem::Comms => Box::new(cx.new(|cx| CommsItem::new(fleet, window, cx))),
+            SavedItem::Map { zoom, pan_x, pan_y } => {
+                let map = cx.new(|cx| MapItem::new(fleet, cx));
+                let camera = Camera {
+                    zoom,
+                    pan: point(px(pan_x), px(pan_y)),
+                };
+                map.update(cx, |map, cx| map.set_camera(camera, cx));
+                Box::new(map)
+            }
+            SavedItem::Unknown => return None,
+        })
+    }
+}
+
+impl Persist {
+    fn write(&mut self, now: SavedWorkspace) {
+        if let Err(e) = persistence::save(&self.file, &self.key, &now) {
+            eprintln!(
+                "ainet-gui: cannot save the workspace to {}: {e}",
+                self.file.display()
+            );
+        }
+        // Not again until it changes, even if writing failed: once said.
+        self.debounce.written(now);
+    }
+}
+
+/// The pane tree as saved, every tab in place: those not worth reopening
+/// as `SavedItem::Unknown`, for `SavedMember::retain` to drop with the
+/// active tab passed on as when restoring.
+fn save_member(member: &Member<Entity<Pane>>, active: &Entity<Pane>, cx: &App) -> SavedMember {
+    match member {
+        Member::Pane(pane) => {
+            let p = pane.read(cx);
+            SavedMember::Pane {
+                items: p
+                    .items()
+                    .map(|item| item.saved(cx).unwrap_or(SavedItem::Unknown))
+                    .collect(),
+                active: p.active_index(),
+                active_pane: pane == active,
+            }
+        }
+        Member::Axis(axis) => SavedMember::Axis {
+            axis: match axis.axis {
+                Axis::Horizontal => SavedAxis::Horizontal,
+                Axis::Vertical => SavedAxis::Vertical,
+            },
+            members: axis.members.iter().map(|m| save_member(m, active, cx)).collect(),
+            flexes: axis.flexes.borrow().clone(),
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use gpui::{TestAppContext, VisualTestContext};
+
+    use super::*;
+    use crate::dock::DockPosition;
+    use crate::fleet::FleetModel;
+    use crate::pane_group::SplitDirection;
+    use crate::persistence::{SavedWorkspace, load, save};
+    use crate::tests::init_test;
+
+    fn temp_file(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("ainet-gui-restore-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir.join("gui.json")
+    }
+
+    /// A window on `fleet`, restored from `file` and saving there.
+    fn open<'a>(
+        cx: &'a mut TestAppContext,
+        file: &Path,
+        fleet: impl FnOnce(&mut App) -> Entity<FleetModel> + 'static,
+    ) -> (Entity<Workspace>, &'a mut VisualTestContext) {
+        let (file, saved) = (file.to_path_buf(), load(file, "demo"));
+        let (workspace, cx) = cx.add_window_view(move |window, cx| {
+            let fleet = fleet(cx);
+            let mut workspace = Workspace::new(fleet, None, window, cx);
+            workspace.persist(file, "demo".into(), saved, true, window, cx);
+            workspace
+        });
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        (workspace, cx)
+    }
+
+    fn demo(cx: &mut App) -> Entity<FleetModel> {
+        cx.new(FleetModel::demo)
+    }
+
+    fn saved(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> SavedWorkspace {
+        workspace.read_with(cx, |w, cx| w.to_saved(cx).expect("persisting"))
+    }
+
+    fn live_agents(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Vec<String> {
+        let fleet = workspace.read_with(cx, |w, _| w.fleet().clone());
+        fleet.read_with(cx, |f, _| f.store.terminal_ids(None))
+    }
+
+    /// Every pane's tabs, by title, in order.
+    fn tabs(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Vec<Vec<String>> {
+        workspace.read_with(cx, |w, cx| {
+            w.panes()
+                .iter()
+                .map(|p| {
+                    p.read(cx)
+                        .items()
+                        .map(|i| i.tab_content_text(cx).to_string())
+                        .collect()
+                })
+                .collect()
+        })
+    }
+
+    #[gpui::test]
+    async fn the_workspace_comes_back_as_it_was_left(cx: &mut TestAppContext) {
+        init_test(cx);
+        let file = temp_file("round-trip");
+        let left = {
+            let (workspace, cx) = open(cx, &file, demo);
+            let agents = live_agents(&workspace, cx);
+            cx.update(|window, cx| {
+                workspace.update(cx, |w, cx| {
+                    w.open_inbox(None, window, cx);
+                    let pane = w.active_pane().clone();
+                    w.split_pane(&pane, SplitDirection::Right, window, cx);
+                    w.open_terminal(&agents[0], window, cx);
+                    w.open_terminal(&agents[1], window, cx);
+                    let map = w.open_map(window, cx);
+                    let camera = Camera {
+                        zoom: 2.0,
+                        pan: point(px(30.), px(-12.)),
+                    };
+                    map.update(cx, |m, cx| m.set_camera(camera, cx));
+                    w.open_terminal(&agents[1], window, cx);
+                    w.toggle_dock(DockPosition::Bottom, window, cx);
+                    w.resize_dock(DockPosition::Left, px(333.), cx);
+                    w.fleet_panel()
+                        .update(cx, |p, cx| p.set_folded_rigs(["infra".to_string()], cx));
+                });
+                command_palette::set_recent(&["workspace: toggle left dock".into()], cx);
+            });
+            cx.run_until_parked();
+            let left = saved(&workspace, cx);
+            workspace.update(cx, |w, cx| w.save_now(cx));
+            assert_eq!(load(&file, "demo").as_ref(), Some(&left), "written as it is");
+            left
+        };
+        let center = left.center.clone().expect("panes saved");
+        let SavedMember::Axis { members, .. } = &center else {
+            panic!("split in two: {center:?}")
+        };
+        assert_eq!(members.len(), 2);
+        assert_eq!(left.folded_rigs, vec!["infra".to_string()]);
+        assert_eq!(left.panel_sizes.get("FleetPanel"), Some(&333.));
+        assert!(left.docks.iter().any(|d| !d.open), "{:?}", left.docks);
+
+        // A new window over the same file: the same workspace.
+        cx.update(|cx| command_palette::set_recent(&[], cx));
+        let (workspace, cx) = open(cx, &file, demo);
+        assert_eq!(saved(&workspace, cx), left);
+        let tabs = tabs(&workspace, cx);
+        assert_eq!(tabs.len(), 2, "{tabs:?}");
+        assert_eq!(
+            tabs[0],
+            vec!["Inbox".to_string()],
+            "the stand-in tab is not saved"
+        );
+        assert!(tabs[1].iter().any(|t| t == "Map"), "{tabs:?}");
+        let docks = workspace.read_with(cx, |w, cx| w.docks(cx));
+        assert!(docks.fleet && docks.agent && !docks.bottom, "{docks:?}");
+        let (map_zoom, active_is_terminal) = workspace.read_with(cx, |w, cx| {
+            let pane = w.active_pane().read(cx);
+            let map = w
+                .panes()
+                .iter()
+                .flat_map(|p| p.read(cx).items().map(|i| i.to_any()).collect::<Vec<_>>())
+                .find_map(|i| i.downcast::<MapItem>().ok())
+                .expect("the map");
+            let active = pane
+                .active_item()
+                .map(|i| i.to_any().downcast::<TerminalItem>().is_ok());
+            (map.read(cx).camera().zoom, active)
+        });
+        assert_eq!(map_zoom, 2.0);
+        assert_eq!(
+            active_is_terminal,
+            Some(true),
+            "the active tab of the active pane"
+        );
+        let recent = cx.update(|_, cx| command_palette::recent(cx));
+        assert_eq!(recent, vec!["workspace: toggle left dock".to_string()]);
+    }
+
+    #[gpui::test]
+    async fn tabs_of_agents_gone_are_dropped_quietly(cx: &mut TestAppContext) {
+        init_test(cx);
+        let file = temp_file("gone");
+        let live = {
+            let (workspace, cx) = open(cx, &file, demo);
+            live_agents(&workspace, cx)[0].clone()
+        };
+        let terminal = |agent: &str| SavedItem::Terminal { agent: agent.into() };
+        let left = SavedWorkspace {
+            center: Some(SavedMember::Axis {
+                axis: SavedAxis::Vertical,
+                members: vec![
+                    SavedMember::Pane {
+                        items: vec![terminal("long-gone")],
+                        active: 0,
+                        active_pane: true,
+                    },
+                    SavedMember::Pane {
+                        items: vec![terminal(&live), terminal("also-gone"), SavedItem::Comms],
+                        active: 2,
+                        active_pane: false,
+                    },
+                ],
+                flexes: vec![1., 1.],
+            }),
+            ..SavedWorkspace::default()
+        };
+        save(&file, "demo", &left).unwrap();
+
+        let (workspace, cx) = open(cx, &file, demo);
+        assert_eq!(tabs(&workspace, cx).len(), 1, "the gone agent's pane went");
+        let restored = saved(&workspace, cx).center;
+        assert_eq!(
+            restored,
+            Some(SavedMember::Pane {
+                items: vec![terminal(&live), SavedItem::Comms],
+                active: 1,
+                active_pane: true,
+            })
+        );
+        let toasts = workspace.read_with(cx, |w, cx| w.toast_layer().read(cx).texts().len());
+        assert_eq!(toasts, 0, "quietly");
+    }
+
+    #[gpui::test]
+    async fn changes_are_saved_once_they_settle(cx: &mut TestAppContext) {
+        init_test(cx);
+        let file = temp_file("settle");
+        let (workspace, cx) = open(cx, &file, demo);
+        let bottom_open = |file: &Path| load(file, "demo").map(|s| s.docks.iter().all(|d| d.open));
+        cx.executor().advance_clock(SAVE_CHECK * 2);
+        cx.run_until_parked();
+        assert_eq!(bottom_open(&file), Some(true), "a first save");
+
+        cx.update(|window, cx| workspace.update(cx, |w, cx| w.toggle_dock(DockPosition::Bottom, window, cx)));
+        cx.executor().advance_clock(SAVE_CHECK);
+        cx.run_until_parked();
+        assert_eq!(bottom_open(&file), Some(true), "not while it may still change");
+        cx.executor().advance_clock(SAVE_CHECK);
+        cx.run_until_parked();
+        assert_eq!(bottom_open(&file), Some(false), "held still: written");
+    }
+
+    #[gpui::test]
+    async fn closing_the_window_saves_first(cx: &mut TestAppContext) {
+        init_test(cx);
+        let file = temp_file("close");
+        {
+            let (workspace, cx) = open(cx, &file, demo);
+            workspace.update(cx, |w, cx| {
+                w.fleet_panel()
+                    .update(cx, |p, cx| p.set_folded_rigs(["docs".to_string()], cx))
+            });
+            assert!(cx.simulate_close(), "closes");
+        }
+        assert_eq!(load(&file, "demo").unwrap().folded_rigs, vec!["docs".to_string()]);
+
+        let (workspace, cx) = open(cx, &file, demo);
+        workspace.update(cx, |w, cx| {
+            w.fleet_panel()
+                .update(cx, |p, cx| p.set_folded_rigs(["infra".to_string()], cx))
+        });
+        cx.dispatch_action(crate::actions::CloseWindow);
+        cx.run_until_parked();
+        assert_eq!(
+            load(&file, "demo").unwrap().folded_rigs,
+            vec!["infra".to_string()]
+        );
+    }
+
+    #[gpui::test]
+    async fn quitting_saves_first(cx: &mut TestAppContext) {
+        init_test(cx);
+        let file = temp_file("quit");
+        let (workspace, cx) = open(cx, &file, demo);
+        workspace.update(cx, |w, cx| {
+            w.fleet_panel()
+                .update(cx, |p, cx| p.set_folded_rigs(["docs".to_string()], cx))
+        });
+        // What quitting runs: the quit hooks, then the windows go.
+        cx.cx.update(|cx| cx.shutdown());
+        assert_eq!(load(&file, "demo").unwrap().folded_rigs, vec!["docs".to_string()]);
+    }
+
+    #[gpui::test]
+    async fn saved_panes_wait_for_the_fleet_and_are_kept_meanwhile(cx: &mut TestAppContext) {
+        init_test(cx);
+        let file = temp_file("waiting");
+        let left = SavedWorkspace {
+            center: Some(SavedMember::Pane {
+                items: vec![SavedItem::Terminal { agent: "a".into() }],
+                active: 0,
+                active_pane: true,
+            }),
+            ..SavedWorkspace::default()
+        };
+        save(&file, "demo", &left).unwrap();
+        // No ainetd: no snapshot, so nothing to restore the terminal with.
+        let (workspace, cx) = open(cx, &file, |cx| cx.new(|_| FleetModel::offline()));
+        assert_eq!(tabs(&workspace, cx), vec![vec!["Fleet".to_string()]]);
+        assert_eq!(saved(&workspace, cx).center, left.center, "kept for next time");
+        workspace.update(cx, |w, cx| w.save_now(cx));
+        assert_eq!(load(&file, "demo").unwrap().center, left.center);
+    }
+}

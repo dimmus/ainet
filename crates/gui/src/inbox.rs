@@ -30,6 +30,7 @@ use crate::actions::{Allow, Always, Answer, Deny, OpenTerminal};
 use crate::critter::{self, Critter};
 use crate::fleet::{FleetModel, Tick};
 use crate::item::{Item, ItemEvent, TabContentParams};
+use crate::persistence::SavedItem;
 use crate::text_input::{InputEvent, TextInput};
 use crate::themes;
 
@@ -970,6 +971,10 @@ impl Focusable for InboxItem {
 impl Item for InboxItem {
     fn tab_content_text(&self, _: &App) -> SharedString {
         "Inbox".into()
+    }
+
+    fn saved(&self, _: &App) -> Option<SavedItem> {
+        Some(SavedItem::Inbox)
     }
 
     /// "Inbox", and how many wait on you.
