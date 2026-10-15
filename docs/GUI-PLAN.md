@@ -533,8 +533,9 @@ one versioned JSON file, `$XDG_STATE_HOME/ainet/gui.json`, with a
 workspace per daemon socket (and the demo's): the window's bounds and
 maximized or full-screen state, each dock's panel and whether it is
 open, panels dragged to a size, the pane tree with its splits, shares,
-tabs and active tab and pane, the Fleet's folded rigs, the Map's zoom and
-pan, and the palette's recent actions. Terminals are saved by agent id
+tabs and active tab and pane, the Fleet's folded rigs and selected agent
+(selected again if still live), the Map's zoom and pan, and the
+palette's recent actions. Terminals are saved by agent id
 and come back after ainetd's first snapshot, without the agents gone
 (dropped quietly, their panes and splits folding away); reports are not
 restored. Saved once a change has held still for a second's check, and

@@ -7,7 +7,9 @@
 //! The settings also back the [`ThemeSettingsProvider`] that Zed's `theme`
 //! and `ui` crates read fonts, sizes and density from.
 
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use gpui::{App, Font, Global, Pixels, SharedString, Task, font, px};
 use schemars::JsonSchema;
@@ -385,6 +387,10 @@ fn read_settings(file: &Path) -> Result<String, String> {
 /// all: into a file beside it, then renamed over it, so a crash halfway
 /// never leaves it cut short.
 pub fn write_whole(file: &Path, text: &str) -> std::io::Result<()> {
+    // Every write gets a file of its own: two windows (a demo one and a
+    // real one) save the same gui.json, and a shared one would let one
+    // rename the other's half-written text into place.
+    static WRITES: AtomicU64 = AtomicU64::new(0);
     // Through a symlink (settings kept with your dotfiles), the file it
     // points at, so the link stays.
     let file = &std::fs::canonicalize(file).unwrap_or_else(|_| file.to_path_buf());
@@ -392,9 +398,18 @@ pub fn write_whole(file: &Path, text: &str) -> std::io::Result<()> {
         std::fs::create_dir_all(dir)?;
     }
     let mut part = file.as_os_str().to_owned();
-    part.push(".saving");
+    let write = WRITES.fetch_add(1, Ordering::Relaxed);
+    part.push(format!(".{}.{write}.saving", std::process::id()));
     let part = PathBuf::from(part);
-    std::fs::write(&part, text)?;
+    let written = std::fs::File::create(&part).and_then(|mut out| {
+        out.write_all(text.as_bytes())?;
+        // On disk before the rename, so a crash cannot leave it empty.
+        out.sync_all()
+    });
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&part);
+        return Err(e);
+    }
     // Keep who may read it, as an edit in place would.
     if let Ok(meta) = std::fs::metadata(file) {
         let _ = std::fs::set_permissions(&part, meta.permissions());
@@ -492,6 +507,34 @@ impl ThemeSettingsProvider for Provider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn writers_at_once_never_mix_their_files() {
+        let dir = std::env::temp_dir().join(format!("ainet-gui-write-whole-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let file = dir.join("gui.json");
+        let texts: Vec<String> = (0..4u8)
+            .map(|i| char::from(b'a' + i).to_string().repeat(64 * 1024))
+            .collect();
+        std::thread::scope(|scope| {
+            for text in &texts {
+                let file = &file;
+                scope.spawn(move || {
+                    for _ in 0..50 {
+                        write_whole(file, text).unwrap();
+                    }
+                });
+            }
+        });
+        let left = std::fs::read_to_string(&file).unwrap();
+        assert!(texts.contains(&left), "a mix of writes was left");
+        let names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["gui.json"], "nothing left beside it");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn defaults_match_zed() {

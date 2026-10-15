@@ -63,6 +63,9 @@ pub enum Tap {
 struct Term {
     parser: vt100::Parser,
     taps: Vec<Listener>,
+    /// Set once the program's output has ended: nobody would ever tell a
+    /// listener added after that, so none is added.
+    done: bool,
 }
 
 struct Listener {
@@ -287,6 +290,7 @@ impl Pane {
         let screen = Arc::new(Mutex::new(Term {
             parser: vt100::Parser::new(launch.rows, launch.cols, SCROLLBACK),
             taps: Vec::new(),
+            done: false,
         }));
 
         let term = Arc::clone(&screen);
@@ -310,7 +314,10 @@ impl Pane {
                 }
             }
             // Attachments hear the end once they have heard the rest.
-            lock(&term).taps.clear();
+            let mut term = lock(&term);
+            term.taps.clear();
+            term.done = true;
+            drop(term);
             let _ = events.send(PaneEvent::Exited { pane: pane_id });
         })?;
 
@@ -393,15 +400,19 @@ impl Pane {
 
     /// Starts listening to the program's output: the screen as it is now,
     /// and an [`Attachment`] that hears everything printed after it (and
-    /// when the pane is resized), in order.
+    /// when the pane is resized), in order. Once the program has ended
+    /// the attachment hears only that.
     pub fn attach(&self) -> (Snapshot, Attachment) {
         let (tx, rx) = mpsc::channel(TAP_QUEUE);
         let lagged = Arc::new(AtomicBool::new(false));
         let mut term = lock(&self.screen);
-        term.taps.push(Listener {
-            tx,
-            lagged: Arc::clone(&lagged),
-        });
+        // Dropping the sender ends the attachment after the snapshot.
+        if !term.done {
+            term.taps.push(Listener {
+                tx,
+                lagged: Arc::clone(&lagged),
+            });
+        }
         let snapshot = Snapshot::of(&term.parser);
         drop(term);
         let attachment = Attachment {
@@ -484,6 +495,10 @@ impl Drop for Pane {
         if !self.has_exited() {
             let _ = self.child.kill();
         }
+        // Attachments outlive the pane only to hear that it ended.
+        let mut term = lock(&self.screen);
+        term.taps.clear();
+        term.done = true;
     }
 }
 
@@ -688,6 +703,34 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         assert_eq!(lock(&pane.screen).taps.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn attaching_after_the_end_hears_the_end() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let pane = shell("e", "printf bye", tx);
+        loop {
+            match tokio::time::timeout(Duration::from_secs(5), rx.recv()).await {
+                Ok(Some(PaneEvent::Exited { .. })) => break,
+                Ok(Some(_)) => {}
+                Ok(None) | Err(_) => panic!("the pane never ended"),
+            }
+        }
+        let (snapshot, mut attachment) = pane.attach();
+        assert_eq!(snapshot.rows.first().map(String::as_str), Some("bye"));
+        let heard = tokio::time::timeout(Duration::from_secs(5), attachment.recv()).await;
+        assert_eq!(heard.expect("the attachment never ended"), None);
+        assert_eq!(pane.attached(), 0);
+    }
+
+    #[tokio::test]
+    async fn dropping_the_pane_ends_its_attachments() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let pane = shell("p", "read x", tx);
+        let (_, mut attachment) = pane.attach();
+        drop(pane);
+        let heard = tokio::time::timeout(Duration::from_secs(5), attachment.recv()).await;
+        assert_eq!(heard.expect("the attachment never ended"), None);
     }
 
     #[test]

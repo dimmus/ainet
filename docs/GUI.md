@@ -423,7 +423,10 @@ new are shaped.
   connection (detached) or the program ends (ainetd closes it).
 - The pane (`ainet_pty::Pane::attach`) taps its reader under the same lock
   as the parser, so the screen handed over and the bytes after it never
-  overlap or leave a gap.
+  overlap or leave a gap. An attach after the program ended (before
+  ainetd has dropped the pane) gets the last screen and the end at once,
+  so the connection closes instead of waiting for output that never
+  comes; dropping the pane ends its attachments too.
 - An agent ainetd has no pane for (an adopted tmux pane) gets an error
   and the connection stays an ordinary one.
 - Old clients never send it. A new client and an old daemon: the daemon
@@ -453,7 +456,8 @@ tick. With cached views, the redraw a tick asks for repaints only that
 view.
 
 Tests: `ainet-pty` (an attachment keeps an exact copy of the screen,
-resizes and lag resync, dropping detaches, styled rows draw the same
+resizes and lag resync, dropping detaches, attaching after the end or
+dropping the pane ends the attachment, styled rows draw the same
 anywhere), `ainet-daemon` (`tests/attach.rs`, a real ainetd: screen then
 bytes, a screen once settled and after a resize, closing either end
 detaches, a refused attach leaves the connection usable, coloured
@@ -774,9 +778,11 @@ Saving the theme: only `"theme"` changes in settings.json's text (with a
 theme per appearance, `"light"` or `"dark"` for the system's appearance
 now, as Zed's selector); a file that does not parse, or cannot be read
 (only a missing one counts as empty), is left alone and the error shows
-as a toast. The new text goes to a file beside it, then is renamed over
-it (through a symlink, over the file it points at), so a crash never
-leaves it cut short. The settings then reload from the new text.
+as a toast. The new text goes to a file beside it, synced to disk, then
+is renamed over it (through a symlink, over the file it points at), so a
+crash never leaves it cut short or empty. Each write has a file of its
+own (named by process and write), so two windows saving gui.json at once
+never rename each other's half-written text into place. The settings then reload from the new text.
 
 Keys (Linux; `cmd` for `ctrl` on macOS where Zed has it):
 
@@ -833,6 +839,7 @@ one workspace per daemon socket and one for the demo:
       "active": 0, "active_pane": true },
     { "kind": "pane", "items": [ { "kind": "map", "zoom": 1.5, "pan_x": 0, "pan_y": 0 } ] } ] },
   "folded_rigs": [ "infra" ],
+  "selected": "…",
   "recent_actions": [ "workspace: toggle left dock" ] } } }
 ```
 
@@ -840,8 +847,8 @@ one workspace per daemon socket and one for the demo:
   screen; each dock's panel showing and whether it is open (by panel, so
   a Fleet moved to the other side keeps its state) and the panels
   dragged to a size; the pane tree with its splits, shares, tabs, each
-  pane's active tab and the active pane; the Fleet's folded rigs; the
-  Map's zoom and pan (with its tab); the palette's recent actions (the
+  pane's active tab and the active pane; the Fleet's folded rigs and
+  selected agent; the Map's zoom and pan (with its tab); the palette's recent actions (the
   last 50). Terminals are saved by agent id, the Inbox, Comms and the Map
   as themselves; reports and the stand-in tab are not saved.
 - **Restoring.** At start the window opens with the saved bounds (at
@@ -851,8 +858,11 @@ one workspace per daemon socket and one for the demo:
   one at once), since only then are the agents known: tabs of agents that
   are gone (or no longer live) are dropped quietly, panes left empty go
   and splits fold up (`SavedMember::retain`, with the active tab passed to
-  the one before it). Until then, and when ainetd never answers, the saved
-  panes are kept as saved. Tabs opened before the snapshot win over the
+  the one before it). The saved agent is selected in the Fleet again if
+  it is still live. The keyboard stays in the Fleet, where a new window
+  puts it (it goes to the restored active tab only if it was in the
+  center). Until then, and when ainetd never answers, the saved panes and
+  selection are kept as saved. Tabs opened before the snapshot win over the
   saved ones, as does a `--view` given on the command line.
 - **Saving.** The workspace is compared with what was written every second
   (`persist::SAVE_CHECK`) and written once it changed and then held still
@@ -862,8 +872,8 @@ one workspace per daemon socket and one for the demo:
   button, `ctrl-shift-w`, the window manager) and quitting (`ctrl-q`, with
   or without `confirm_quit`'s question) write at once first
   (`Workspace::save_now`, from the close paths, GPUI's `on_app_quit` and
-  the workspace's release). A write goes to a file beside it, then is
-  renamed over it.
+  the workspace's release). A write goes to a file of its own beside it,
+  then is renamed over it (as settings.json, above).
 - **Versions.** `persistence::VERSION` is 1. A file that does not parse or
   has another version is ignored and written anew; one from a newer
   version (a higher number) is neither read nor written over. A
@@ -1011,11 +1021,11 @@ module; modules without tests of their own are covered where named):
 | `actions.rs`, `keymap.rs` | 1 | 3 | Zed's keymap format, every default binding naming a real action, a focused terminal getting every ctrl letter and the list keys, user overrides and errors |
 | `args.rs` | 5 | | flags and view names |
 | `assets.rs` | 2 | | every `ui::IconName` served, themes, fonts and keymaps bundled |
-| `settings.rs`, `json_edit.rs`, `watch.rs` | 16 | 1 | defaults, the template and schema, lenient JSON, clamping, a theme per appearance, saving into the text as written, never losing the file, file watching |
+| `settings.rs`, `json_edit.rs`, `watch.rs` | 17 | 1 | defaults, the template and schema, lenient JSON, clamping, a theme per appearance, saving into the text as written, never losing the file, writers at once never mixing their files, file watching |
 | `themes.rs`, `zed_theme.rs` | 2 | 3 | Deepharness by default, One Dark bundled, user themes loaded, reported and reloaded, palettes as themes |
 | `theme_selector.rs` | | 2 | preview, escape and a click outside restoring, the pick saved; a query matching nothing, a theme per appearance changing only that one, a broken settings.json left alone with a toast |
 | `workspace.rs`, `pane.rs`, `pane_group.rs`, `dock.rs`, `item.rs`, `panels.rs` | 3 | 9 | tabs opening, cycling and closing (click, middle click), the tab's right-click menu (Close, Close Others, Close All, Split Right and Down from a tab that is not active), splits and focus by direction, zoom, dock resizing by dragging, the status bar's dock buttons, the bottom dock's panels and focus actions, toasts |
-| `workspace/persist.rs`, `persistence.rs` | 9 | 6 | the file's format and versions, folding gone tabs, bounds, the debounce; a workspace coming back as left, gone agents dropped quietly, saving once settled, on close and on quit, saved panes kept while ainetd is silent |
+| `workspace/persist.rs`, `persistence.rs` | 9 | 6 | the file's format and versions, folding gone tabs, bounds, the debounce; a workspace coming back as left (the Fleet's selection too), gone agents dropped quietly, saving once settled, on close and on quit, saved panes kept while ainetd is silent |
 | `modal_layer.rs`, `picker.rs`, `switcher.rs`, `tab_switcher.rs` | | 4 | filtering, keys, escape; the agent switcher (in `workspace.rs`); `ctrl-tab` |
 | `text_input/` | 8 | 5 | the buffer's edits, moves, undo and IME offsets; typing, clipboard, several lines, read-only; Zed's `InputField` on it |
 | `fleet.rs` | | 8 | notices, quiet requests, reconnects, the fetch pump, streamed terminals, changed screens announced, failed and incompatible daemons |

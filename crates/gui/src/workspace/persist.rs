@@ -12,7 +12,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use gpui::{Axis, Entity, Subscription, Task, point};
+use gpui::{Axis, Entity, Focusable, Subscription, Task, point};
 use ui::prelude::*;
 
 use super::Workspace;
@@ -35,9 +35,10 @@ pub struct Persist {
     file: PathBuf,
     key: String,
     debounce: Debounce,
-    /// The panes saved, until ainetd's first snapshot says which agents
-    /// are there to reopen terminals for; saved as they were meanwhile.
-    pending_center: Option<SavedMember>,
+    /// The panes and the Fleet's selection saved, until ainetd's first
+    /// snapshot says which agents are there to reopen terminals for and
+    /// select; saved as they were meanwhile.
+    pending: Option<Pending>,
     /// The window's bounds, as last seen.
     window: Option<SavedWindow>,
     _subscriptions: Vec<Subscription>,
@@ -60,10 +61,10 @@ impl Workspace {
         if let Some(saved) = &saved {
             self.restore_layout(saved, window, cx);
         }
-        let pending_center = saved
-            .as_ref()
-            .and_then(|s| s.center.clone())
-            .filter(|_| restore_center);
+        let pending = saved.as_ref().filter(|_| restore_center).map(|s| Pending {
+            center: s.center.clone(),
+            selected: s.selected.clone(),
+        });
         let subscriptions = vec![
             cx.observe_window_bounds(window, |this, window, _| {
                 if let Some(persist) = &mut this.persist {
@@ -94,7 +95,7 @@ impl Workspace {
             file,
             key,
             debounce: Debounce::new(saved),
-            pending_center,
+            pending,
             window: Some(SavedWindow::from_bounds(window.window_bounds())),
             _subscriptions: subscriptions,
             _check: check,
@@ -106,10 +107,15 @@ impl Workspace {
     pub fn to_saved(&self, cx: &App) -> Option<SavedWorkspace> {
         let persist = self.persist.as_ref()?;
         let docks = [&self.left_dock, &self.right_dock, &self.bottom_dock];
-        let center = match &persist.pending_center {
+        let pending = persist.pending.as_ref();
+        let center = match pending.and_then(|p| p.center.as_ref()) {
             Some(center) => Some(center.clone()),
             None => save_member(&self.center.root, &self.active_pane, cx)
                 .retain(&|item| *item != SavedItem::Unknown),
+        };
+        let selected = match pending {
+            Some(pending) => pending.selected.clone(),
+            None => self.fleet.read(cx).store.selected.clone(),
         };
         Some(SavedWorkspace {
             window: persist.window,
@@ -130,6 +136,7 @@ impl Workspace {
                 .collect(),
             center,
             folded_rigs: self.fleet_panel.read(cx).folded_rigs(),
+            selected,
             recent_actions: command_palette::recent(cx),
         })
     }
@@ -194,23 +201,39 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Reopens the saved panes once the fleet knows its agents (ainetd's
-    /// first snapshot; the demo has its own at once), without the tabs of
-    /// agents that are gone. Tabs opened meanwhile win: then the saved
-    /// panes are dropped.
+    /// Reopens the saved panes and selects the saved agent once the fleet
+    /// knows its agents (ainetd's first snapshot; the demo has its own at
+    /// once), without the tabs of agents that are gone. Tabs opened
+    /// meanwhile win: then the saved panes and selection are dropped.
     fn restore_center_when_ready(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let ready = self.fleet.read(cx).snapshots() > 0;
-        let Some(saved) = self
+        let Some(pending) = self
             .persist
             .as_mut()
             .filter(|_| ready)
-            .and_then(|p| p.pending_center.take())
+            .and_then(|p| p.pending.take())
         else {
             return;
         };
         if !self.center_is_untouched(cx) {
             return;
         }
+        if let Some(saved) = pending.center {
+            self.restore_center(saved, window, cx);
+        }
+        if let Some(id) = pending.selected {
+            self.fleet.update(cx, |fleet, cx| {
+                if fleet.store.agents.get(&id).is_some_and(|a| a.state.is_live()) {
+                    fleet.select(&id, cx);
+                }
+            });
+        }
+    }
+
+    /// Replaces the untouched center with the saved panes, less the tabs
+    /// of agents gone. The keyboard goes to the restored active tab if it
+    /// was in the center, as Zed does; at start it stays in the Fleet.
+    fn restore_center(&mut self, saved: SavedMember, window: &mut Window, cx: &mut Context<Self>) {
         let saved = {
             let store = &self.fleet.read(cx).store;
             saved.retain(&|item| match item {
@@ -220,12 +243,22 @@ impl Workspace {
             })
         };
         let Some(saved) = saved else { return };
+        let had_focus = window.focused(cx).is_none()
+            || self
+                .center
+                .panes()
+                .iter()
+                .any(|p| p.read(cx).has_focus(window, cx));
         let mut active = None;
         let root = self.build_member(saved, &mut active, window, cx);
         let old = std::mem::replace(&mut self.center, PaneGroup { root });
         self.active_pane = active.unwrap_or_else(|| self.center.panes()[0].clone());
         for pane in old.panes() {
             pane.update(cx, |pane, cx| pane.close_all_items(window, cx));
+        }
+        if had_focus {
+            // The pane hands the keyboard on to its active tab.
+            window.focus(&self.active_pane.focus_handle(cx), cx);
         }
         cx.notify();
     }
@@ -313,6 +346,12 @@ impl Workspace {
     }
 }
 
+/// What waits for ainetd's first snapshot.
+struct Pending {
+    center: Option<SavedMember>,
+    selected: Option<String>,
+}
+
 impl Persist {
     fn write(&mut self, now: SavedWorkspace) {
         if let Err(e) = persistence::save(&self.file, &self.key, &now) {
@@ -398,6 +437,11 @@ mod tests {
         workspace.read_with(cx, |w, cx| w.to_saved(cx).expect("persisting"))
     }
 
+    fn selected(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Option<String> {
+        let fleet = workspace.read_with(cx, |w, _| w.fleet().clone());
+        fleet.read_with(cx, |f, _| f.store.selected.clone())
+    }
+
     fn live_agents(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Vec<String> {
         let fleet = workspace.read_with(cx, |w, _| w.fleet().clone());
         fleet.read_with(cx, |f, _| f.store.terminal_ids(None))
@@ -447,7 +491,24 @@ mod tests {
                 command_palette::set_recent(&["workspace: toggle left dock".into()], cx);
             });
             cx.run_until_parked();
+            // Not the agent a new window selects first, nor one of the
+            // folded rig (selecting unfolds it).
+            let fleet = workspace.read_with(cx, |w, _| w.fleet().clone());
+            let first = selected(&workspace, cx);
+            let pick = fleet.read_with(cx, |f, _| {
+                agents
+                    .iter()
+                    .rev()
+                    .find(|id| {
+                        Some(*id) != first.as_ref() && f.store.agents[*id].rig.as_deref() != Some("infra")
+                    })
+                    .expect("an agent to pick")
+                    .clone()
+            });
+            fleet.update(cx, |f, cx| f.select(&pick, cx));
+            cx.run_until_parked();
             let left = saved(&workspace, cx);
+            assert_eq!(left.selected, Some(pick));
             workspace.update(cx, |w, cx| w.save_now(cx));
             assert_eq!(load(&file, "demo").as_ref(), Some(&left), "written as it is");
             left
@@ -496,6 +557,7 @@ mod tests {
         );
         let recent = cx.update(|_, cx| command_palette::recent(cx));
         assert_eq!(recent, vec!["workspace: toggle left dock".to_string()]);
+        assert_eq!(selected(&workspace, cx), left.selected, "the same agent selected");
     }
 
     #[gpui::test]
@@ -524,12 +586,14 @@ mod tests {
                 ],
                 flexes: vec![1., 1.],
             }),
+            selected: Some("long-gone".into()),
             ..SavedWorkspace::default()
         };
         save(&file, "demo", &left).unwrap();
 
         let (workspace, cx) = open(cx, &file, demo);
         assert_eq!(tabs(&workspace, cx).len(), 1, "the gone agent's pane went");
+        assert!(selected(&workspace, cx).is_some_and(|id| id != "long-gone"));
         let restored = saved(&workspace, cx).center;
         assert_eq!(
             restored,

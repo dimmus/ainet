@@ -2,8 +2,8 @@
 //! `workspace::persistence`, but one JSON file instead of SQLite, and only
 //! what ainet's window has. `$XDG_STATE_HOME/ainet/gui.json` keeps one
 //! workspace per daemon socket (and one for the demo): the window's bounds,
-//! the docks, the panes with their splits and tabs, the Fleet's folded rigs,
-//! the Map's view and the palette's recent actions.
+//! the docks, the panes with their splits and tabs, the Fleet's folded rigs
+//! and selected agent, the Map's view and the palette's recent actions.
 //!
 //! It is state, not configuration: a file that does not parse, or was
 //! written in another format version, is ignored and written anew; a file
@@ -53,6 +53,8 @@ pub struct SavedWorkspace {
     pub center: Option<SavedMember>,
     /// The Fleet's folded rigs, sorted.
     pub folded_rigs: Vec<String>,
+    /// The agent selected in the Fleet, by id.
+    pub selected: Option<String>,
     /// What was run from the palette, the latest last.
     pub recent_actions: Vec<String>,
 }
@@ -416,6 +418,7 @@ mod tests {
                 flexes: vec![1.2, 0.8],
             }),
             folded_rigs: vec!["infra".into()],
+            selected: Some("a".into()),
             recent_actions: vec!["workspace: toggle left dock".into()],
         }
     }
@@ -444,7 +447,11 @@ mod tests {
         assert_eq!(load(&file, "/tmp/other.sock"), Some(other));
         let text = std::fs::read_to_string(&file).unwrap();
         assert!(text.contains("\"version\": 1"), "{text}");
-        assert!(!file.with_extension("json.saving").exists());
+        let names: Vec<_> = std::fs::read_dir(file.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["gui.json"], "nothing left beside it");
     }
 
     #[test]
