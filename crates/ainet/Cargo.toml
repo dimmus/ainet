@@ -18,6 +18,7 @@ path = "src/main.rs"
 ainet-core.workspace = true
 ainet-critter.workspace = true
 ainet-daemon.workspace = true
+ainet-model.workspace = true
 ainet-tui.workspace = true
 anyhow.workspace = true
 clap.workspace = true

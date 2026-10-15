@@ -92,7 +92,7 @@ fn draw_popup(f: &mut Frame, pal: &Palette, area: Rect, popup: &crate::app::Popu
 /// A rig's header row: name, status, seats running, open work.
 fn rig_item(app: &App, name: &str, index: usize) -> ListItem<'static> {
     let pal = &app.pal;
-    let Some(rig) = app.rigs.get(name) else {
+    let Some(rig) = app.store.rigs.get(name) else {
         return ListItem::new("");
     };
     let running = rig
@@ -107,6 +107,7 @@ fn rig_item(app: &App, name: &str, index: usize) -> ListItem<'static> {
         ainet_core::RigStatus::Stopped => pal.muted,
     };
     let open = app
+        .store
         .queue
         .values()
         .filter(|q| q.rig.as_deref() == Some(name) && q.state.is_open())
@@ -226,8 +227,8 @@ pub(crate) fn meta(a: &Agent) -> String {
 
 fn draw_header(f: &mut Frame, app: &mut App, area: Rect, wide: bool) {
     let pal = &app.pal;
-    let count = |s: AgentState| app.agents.values().filter(|a| a.state == s).count();
-    let live = app.agents.values().filter(|a| a.state.is_live()).count();
+    let count = |s: AgentState| app.store.agents.values().filter(|a| a.state == s).count();
+    let live = app.store.agents.values().filter(|a| a.state.is_live()).count();
     let needs = count(AgentState::NeedsYou);
     let mut fleet = vec![Span::styled(format!("{live} agents"), pal.dim())];
     if needs > 0 {
@@ -243,13 +244,14 @@ fn draw_header(f: &mut Frame, app: &mut App, area: Rect, wide: bool) {
         pal.dim(),
     ));
 
-    let waiting = app.inbox.iter().filter(|i| i.waiting).count();
+    let waiting = app.store.inbox.iter().filter(|i| i.waiting).count();
     let mut links = vec![if waiting > 0 {
         Span::styled(format!("inbox {waiting} waiting"), pal.style(pal.attn))
     } else {
         Span::styled("inbox clear", pal.dim())
     }];
     let operator_up = app
+        .store
         .agents
         .values()
         .any(|a| a.rig.as_deref() == Some("operator") && a.state.is_live());
@@ -262,20 +264,21 @@ fn draw_header(f: &mut Frame, app: &mut App, area: Rect, wide: bool) {
         pal.dim(),
     ));
     let rigs_up = app
+        .store
         .rigs
         .values()
         .filter(|r| r.status != ainet_core::RigStatus::Stopped)
         .count();
-    if !app.rigs.is_empty() {
+    if !app.store.rigs.is_empty() {
         links.push(Span::styled(
-            format!(" · {rigs_up}/{} rigs up", app.rigs.len()),
+            format!(" · {rigs_up}/{} rigs up", app.store.rigs.len()),
             pal.dim(),
         ));
     }
 
     let system = if app.is_demo() {
         Span::styled("demo fleet · nothing here is real", pal.muted())
-    } else if app.connected {
+    } else if app.store.connected {
         Span::styled("ainetd connected", pal.muted())
     } else {
         Span::styled("ainetd offline · retrying", pal.style(pal.err))
@@ -342,7 +345,7 @@ fn draw_header(f: &mut Frame, app: &mut App, area: Rect, wide: bool) {
             let badge = if waiting > 0 {
                 Some(chip(&waiting.to_string(), pal.attn, pal.bg))
             } else {
-                let n = app.inbox.len();
+                let n = app.store.inbox.len();
                 (n > 0).then(|| Span::styled(format!(" {n}"), pal.muted()))
             };
             if let Some(b) = badge {
@@ -393,7 +396,7 @@ fn draw_fleet(f: &mut Frame, app: &mut App, area: Rect) {
     let pal = app.pal.clone();
 
     let mut items = Vec::new();
-    for (i, row) in app.rows.iter().enumerate() {
+    for (i, row) in app.store.rows.iter().enumerate() {
         match row {
             Row::Header(title) => {
                 let mut lines = Vec::new();
@@ -406,6 +409,7 @@ fn draw_fleet(f: &mut Frame, app: &mut App, area: Rect) {
             Row::Rig(name) => items.push(rig_item(app, name, i)),
             Row::Seat { rig, address, prefix } => {
                 let status = app
+                    .store
                     .rigs
                     .get(rig)
                     .and_then(|r| r.seat(address))
@@ -421,7 +425,7 @@ fn draw_fleet(f: &mut Frame, app: &mut App, area: Rect) {
                     Line::styled("    no agent in this seat · /launch to start it", pal.muted()),
                 ]));
             }
-            Row::Agent { id, prefix } => match app.agents.get(id) {
+            Row::Agent { id, prefix } => match app.store.agents.get(id) {
                 Some(a) => {
                     let mut item = agent_item(app, a, prefix);
                     if app.fleet_state.selected() == Some(i) {
@@ -471,13 +475,14 @@ fn agent_item(app: &App, a: &Agent, prefix: &str) -> ListItem<'static> {
     let gone = a.state == AgentState::Gone;
     let name_style = if gone {
         pal.muted()
-    } else if app.selected.as_deref() == Some(&a.id) {
+    } else if app.store.selected.as_deref() == Some(&a.id) {
         pal.bold()
     } else {
         pal.text()
     };
     let role = a.role.clone().unwrap_or_default();
     let kids = app
+        .store
         .agents
         .values()
         .filter(|k| k.parent.as_deref() == Some(a.id.as_str()) && k.state.is_live())
@@ -572,7 +577,7 @@ fn draw_details(f: &mut Frame, app: &App, area: Rect) {
     let mut chain = vec![Span::styled("you", pal.dim())];
     let mut cur = a.parent.clone();
     let mut up = Vec::new();
-    while let Some(p) = cur.and_then(|p| app.agents.get(&p)) {
+    while let Some(p) = cur.and_then(|p| app.store.agents.get(&p)) {
         up.push(p.name.clone());
         cur = p.parent.clone();
     }
@@ -724,7 +729,7 @@ fn draw_details(f: &mut Frame, app: &App, area: Rect) {
         .title(Span::styled(" terminal ", pal.dim()));
     let term_inner = term_block.inner(term);
     f.render_widget(term_block, term);
-    let rows = app.screens.get(&a.id).cloned().unwrap_or_default();
+    let rows = app.store.screens.get(&a.id).cloned().unwrap_or_default();
     let visible = rows.len().saturating_sub(term_inner.height as usize);
     let lines: Vec<Line> = rows[visible..]
         .iter()
@@ -767,11 +772,12 @@ fn draw_inbox(f: &mut Frame, app: &mut App, area: Rect) {
         Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)]).areas(area);
     let selected = app.inbox_state.selected();
     let items: Vec<ListItem> = app
+        .store
         .inbox
         .iter()
         .enumerate()
         .map(|(i, it)| {
-            let agent = app.agents.get(&it.agent);
+            let agent = app.store.agents.get(&it.agent);
             let name = agent
                 .map(|a| a.name.clone())
                 .unwrap_or_else(|| it.agent.chars().take(8).collect());
@@ -833,10 +839,10 @@ fn draw_inbox(f: &mut Frame, app: &mut App, area: Rect) {
     let block = panel(&pal, "Request", false);
     let inner = block.inner(detail_area);
     f.render_widget(block, detail_area);
-    let Some(it) = app.inbox_state.selected().and_then(|i| app.inbox.get(i)) else {
+    let Some(it) = app.inbox_state.selected().and_then(|i| app.store.inbox.get(i)) else {
         return;
     };
-    let agent = app.agents.get(&it.agent);
+    let agent = app.store.agents.get(&it.agent);
     let [who, body, actions] =
         Layout::vertical([Constraint::Length(5), Constraint::Min(3), Constraint::Length(3)]).areas(inner);
     let [face, text] = Layout::horizontal([Constraint::Length(10), Constraint::Min(10)]).areas(who);
@@ -933,7 +939,7 @@ fn draw_map(f: &mut Frame, app: &App, area: Rect) {
     let block = panel(pal, "Map · who directs whom", true);
     let inner = block.inner(area);
     f.render_widget(block, area);
-    let live: Vec<&Agent> = app.agents.values().filter(|a| a.state.is_live()).collect();
+    let live: Vec<&Agent> = app.store.agents.values().filter(|a| a.state.is_live()).collect();
     if live.is_empty() || inner.width < 20 || inner.height < 8 {
         return;
     }
@@ -941,7 +947,10 @@ fn draw_map(f: &mut Frame, app: &App, area: Rect) {
     let depth = |a: &Agent| {
         let mut d = 0;
         let mut cur = a.parent.clone();
-        while let Some(p) = cur.and_then(|p| app.agents.get(&p)).filter(|p| p.state.is_live()) {
+        while let Some(p) = cur
+            .and_then(|p| app.store.agents.get(&p))
+            .filter(|p| p.state.is_live())
+        {
             d += 1;
             cur = p.parent.clone();
         }
@@ -1062,7 +1071,7 @@ fn draw_map(f: &mut Frame, app: &App, area: Rect) {
             Span::raw(" "),
             Span::styled(
                 a.name.clone(),
-                if app.selected.as_deref() == Some(&a.id) {
+                if app.store.selected.as_deref() == Some(&a.id) {
                     pal.bold()
                 } else {
                     pal.text()
@@ -1122,7 +1131,7 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(block, area);
     // Who a plain line goes to depends on the view.
     let target = match app.tab {
-        Tab::Terminals => app.grid.focus.as_ref().and_then(|f| app.agents.get(f)),
+        Tab::Terminals => app.grid.focus.as_ref().and_then(|f| app.store.agents.get(f)),
         _ => app.selected_agent(),
     };
     let accent = target.map(|a| pal.hue(&a.id)).unwrap_or(pal.fg);
@@ -1145,7 +1154,7 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
                 if app
                     .inbox_state
                     .selected()
-                    .and_then(|i| app.inbox.get(i))
+                    .and_then(|i| app.store.inbox.get(i))
                     .is_some_and(|i| i.waiting && i.kind == InboxKind::Question) =>
             {
                 "Type an option's number (or your own answer) and Enter".into()

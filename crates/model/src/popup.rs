@@ -2,7 +2,7 @@
 
 use ainet_core::Response;
 
-pub(crate) fn render(resp: &Response) -> String {
+pub fn render(resp: &Response) -> String {
     let mut out = String::new();
     match resp {
         Response::Rigs { rigs } => {

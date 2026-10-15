@@ -106,7 +106,8 @@ check their queue.
 | `crates/spec` | OpenRig RigSpec/AgentSpec parsing, validation, launch order, the built-in library |
 | `crates/claude` | Claude Code integration ported from Den: sessions, inbox socket, hook answers, `/always`, questions, transcripts, cost, agent-badge, hook install |
 | `crates/pty` | panes: spawn, write, resize, screen and scrollback |
-| `crates/tui` | ratatui + tachyonfx + tui-term: Fleet, Terminals, Comms, Inbox, Map, the demo |
+| `crates/model` | what a front end knows: the fleet store fed by ainetd's snapshot and events, the Fleet tree, the `/command` language, the demo fleet |
+| `crates/tui` | ratatui + tachyonfx + tui-term: Fleet, Terminals, Comms, Inbox, Map |
 | `crates/core` | agents, rigs, messages, queue, the wire protocol, a blocking client |
 | `crates/critter` | the seeded 16×16 critters and names |
 

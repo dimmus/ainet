@@ -121,7 +121,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     }
 
     // The queue.
-    let mut items: Vec<&QItem> = app.queue.values().collect();
+    let mut items: Vec<&QItem> = app.store.queue.values().collect();
     let order = |s: QState| match s {
         QState::InProgress => 0,
         QState::Blocked => 1,
@@ -156,7 +156,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
             ])
         })
         .collect();
-    let open = app.queue.values().filter(|q| q.state.is_open()).count();
+    let open = app.store.queue.values().filter(|q| q.state.is_open()).count();
     let title = format!("Queue · {open} open");
     let queue = Paragraph::new(if lines.is_empty() {
         vec![Line::styled(
@@ -173,7 +173,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     let thread_lines: Vec<Line> = match app.selected_entry() {
         Some(Entry::Message(m)) => {
             let mut out = Vec::new();
-            for x in app.messages.iter().filter(|x| x.thread == m.thread) {
+            for x in app.store.messages.iter().filter(|x| x.thread == m.thread) {
                 out.push(Line::from(vec![
                     Span::styled(format!("#{} ", x.id), pal.muted()),
                     Span::styled(x.from_label.clone(), pal.style(hue_of(app, &x.from))),

@@ -56,7 +56,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
 
 fn tile(f: &mut Frame, app: &mut App, id: &str, rect: Rect) {
     let pal = app.pal.clone();
-    let Some(agent) = app.agents.get(id).cloned() else {
+    let Some(agent) = app.store.agents.get(id).cloned() else {
         return;
     };
     let focused = app.grid.focus.as_deref() == Some(id);
@@ -142,7 +142,7 @@ fn tile(f: &mut Frame, app: &mut App, id: &str, rect: Rect) {
     app.areas
         .tiles
         .push((rect, id.to_string(), (inner.height, inner.width)));
-    match app.terms.get(id) {
+    match app.store.terms.get(id) {
         Some(parser) => {
             let mut cursor = Cursor::default();
             if !typing {

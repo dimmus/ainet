@@ -1,23 +1,19 @@
-//! App state, the data source (daemon or demo) and input handling.
+//! The TUI's state on top of the shared fleet [`Store`]: tabs, list
+//! cursors, the input line, effects, and key and mouse handling.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use ainet_core::protocol::{QSpec, SeatSpec, SpawnSpec, UpSpec};
-use ainet_core::{
-    Agent, AgentState, ChatMessage, Decision, Event, InboxItem, InboxKind, Message, QItem, Request, Response,
-    Rig, Runtime,
-};
+use ainet_core::{Agent, Decision, InboxItem, InboxKind, Request};
+pub use ainet_model::{Backend, Entry, Msg, Row};
+use ainet_model::{Change, Command, Link, Store, command};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 use ratatui::widgets::ListState;
 use tachyonfx::fx::{self, RepeatMode};
 use tachyonfx::{EffectManager, Interpolation, Motion};
 
-use crate::backend;
-use crate::demo::Demo;
 use crate::sprite::Size;
 use crate::term;
 use crate::theme::{Palette, c};
@@ -57,60 +53,6 @@ impl Tab {
     }
 }
 
-/// What the background threads tell the UI.
-pub enum Msg {
-    Snapshot(Box<Response>),
-    Event(Box<Event>),
-    Term {
-        id: String,
-        ansi: String,
-        size: (u16, u16),
-        rows: Vec<String>,
-    },
-    Flash(String, bool),
-    Popup(String, String),
-    Connected(bool),
-}
-
-pub enum Backend {
-    Demo(Box<Demo>),
-    Daemon(PathBuf),
-}
-
-/// A row of the Fleet list.
-#[derive(Clone, Debug)]
-pub enum Row {
-    Header(String),
-    /// A rig: its name.
-    Rig(String),
-    Agent {
-        id: String,
-        prefix: String,
-    },
-    /// A seat with nobody in it (stopped or pending).
-    Seat {
-        rig: String,
-        address: String,
-        prefix: String,
-    },
-}
-
-/// One line of the Comms stream: a message or a chat post.
-#[derive(Clone, Debug)]
-pub enum Entry {
-    Message(Message),
-    Chat(ChatMessage),
-}
-
-impl Entry {
-    pub fn created(&self) -> i64 {
-        match self {
-            Entry::Message(m) => m.created,
-            Entry::Chat(c) => c.created,
-        }
-    }
-}
-
 pub struct Flash {
     pub text: String,
     pub err: bool,
@@ -141,14 +83,8 @@ pub struct App {
     pub pal: Palette,
     pub tick: u64,
     pub tab: Tab,
-    pub agents: BTreeMap<String, Agent>,
-    pub inbox: Vec<InboxItem>,
-    pub rigs: BTreeMap<String, Rig>,
-    pub messages: Vec<Message>,
-    pub chat: Vec<ChatMessage>,
-    pub queue: BTreeMap<String, QItem>,
-    pub rows: Vec<Row>,
-    pub selected: Option<String>,
+    /// The fleet: agents, inbox, rigs, comms, terminals, the Fleet tree.
+    pub store: Store,
     pub fleet_state: ListState,
     pub inbox_state: ListState,
     pub comms_state: ListState,
@@ -160,22 +96,15 @@ pub struct App {
     pub popup: Option<Popup>,
     /// Critters in the Fleet list, and at which size.
     pub critter_rows: Option<Size>,
-    /// Plain text screens, for the details pane.
-    pub screens: HashMap<String, Vec<String>>,
-    /// Live terminal state per agent, for the grid and the details pane.
-    pub terms: HashMap<String, vt100::Parser>,
     pub grid: Grid,
-    pub connected: bool,
     pub fx: EffectManager<&'static str>,
     pub quitting: Option<Instant>,
     /// Smoothed context gauge, so it glides instead of jumping.
     pub gauge: f64,
     /// Where things were drawn last frame, for effects and mouse hits.
     pub areas: Areas,
-    backend: Backend,
-    tx: mpsc::Sender<Msg>,
+    link: Link<mpsc::Sender<Msg>>,
     rx: mpsc::Receiver<Msg>,
-    fetch: Option<mpsc::Sender<String>>,
     dirty: HashSet<String>,
     last_fetch: HashMap<String, Instant>,
     /// Sizes we asked panes to take, so we ask once per change.
@@ -196,6 +125,7 @@ impl App {
     /// `view` picks the first view: `terminals`, `rig:<name>`, `comms`, …
     pub fn new(backend: Backend, view: Option<&str>) -> Self {
         let (tx, rx) = mpsc::channel();
+        let (link, snapshot) = Link::new(backend, tx);
         let pal = Palette::load();
         let mut fx = EffectManager::default();
         // Opening: the screen coalesces out of noise.
@@ -204,14 +134,7 @@ impl App {
             pal,
             tick: 0,
             tab: Tab::Fleet,
-            agents: BTreeMap::new(),
-            inbox: Vec::new(),
-            rigs: BTreeMap::new(),
-            messages: Vec::new(),
-            chat: Vec::new(),
-            queue: BTreeMap::new(),
-            rows: Vec::new(),
-            selected: None,
+            store: Store::new(),
             fleet_state: ListState::default(),
             inbox_state: ListState::default(),
             comms_state: ListState::default(),
@@ -221,32 +144,20 @@ impl App {
             help: false,
             popup: None,
             critter_rows: None,
-            screens: HashMap::new(),
-            terms: HashMap::new(),
             grid: Grid::default(),
-            connected: false,
             fx,
             quitting: None,
             gauge: 0.0,
             areas: Areas::default(),
-            backend,
-            tx,
+            link,
             rx,
-            fetch: None,
             dirty: HashSet::new(),
             last_fetch: HashMap::new(),
             sizes: HashMap::new(),
         };
-        match &app.backend {
-            Backend::Demo(demo) => {
-                let snap = demo.snapshot();
-                app.connected = true;
-                app.apply(Msg::Snapshot(Box::new(snap)));
-            }
-            Backend::Daemon(socket) => {
-                backend::listen(socket.clone(), app.tx.clone());
-                app.fetch = Some(backend::fetcher(socket.clone(), app.tx.clone()));
-            }
+        if let Some(snap) = snapshot {
+            app.store.connected = true;
+            app.apply(Msg::Snapshot(Box::new(snap)));
         }
         if let Some(v) = view {
             app.open_view(v);
@@ -270,7 +181,7 @@ impl App {
             "comms" | "chat" | "queue" => self.tab = Tab::Comms,
             "inbox" | "attention" | "feed" => self.tab = Tab::Inbox,
             "map" | "graph" => self.tab = Tab::Map,
-            _ if self.rigs.contains_key(view) => {
+            _ if self.store.rigs.contains_key(view) => {
                 self.tab = Tab::Terminals;
                 self.grid.rig = Some(view.to_string());
             }
@@ -280,7 +191,7 @@ impl App {
     }
 
     pub fn is_demo(&self) -> bool {
-        matches!(self.backend, Backend::Demo(_))
+        self.link.is_demo()
     }
 
     /// True once the closing effect has played.
@@ -302,11 +213,7 @@ impl App {
     /// Advances animations and the demo by one tick.
     pub fn on_tick(&mut self) {
         self.tick += 1;
-        if let Backend::Demo(demo) = &mut self.backend {
-            for ev in demo.step(self.tick) {
-                let _ = self.tx.send(Msg::Event(Box::new(ev)));
-            }
-        }
+        self.link.tick(self.tick);
         let target = self.selected_agent().and_then(|a| a.context).unwrap_or(0.0) as f64;
         self.gauge += (target - self.gauge) * 0.25;
         if self
@@ -329,72 +236,16 @@ impl App {
     }
 
     fn apply(&mut self, msg: Msg) {
-        match msg {
-            Msg::Snapshot(resp) => {
-                if let Response::Snapshot {
-                    agents,
-                    inbox,
-                    rigs,
-                    messages,
-                    chat,
-                    queue,
-                } = *resp
-                {
-                    self.agents = agents.into_iter().map(|a| (a.id.clone(), a)).collect();
-                    self.inbox = inbox;
-                    self.rigs = rigs.into_iter().map(|r| (r.name.clone(), r)).collect();
-                    self.messages = messages;
-                    self.chat = chat;
-                    self.queue = queue.into_iter().map(|q| (q.id.clone(), q)).collect();
-                    self.select_waiting();
-                    self.rebuild();
-                    self.dirty_visible();
-                }
+        match self.store.apply(msg) {
+            Change::None | Change::InboxResolved | Change::Comms | Change::Term(_) => {}
+            Change::Snapshot => {
+                self.select_waiting();
+                self.after_fleet();
+                self.dirty_visible();
             }
-            Msg::Event(ev) => self.apply_event(*ev),
-            Msg::Term { id, ansi, size, rows } => {
-                let (r, c) = (size.0.max(1), size.1.max(1));
-                let mut parser = vt100::Parser::new(r, c, 0);
-                parser.process(ansi.as_bytes());
-                self.terms.insert(id.clone(), parser);
-                self.screens.insert(id, rows);
-            }
-            Msg::Flash(text, err) => self.flash(text, err),
-            Msg::Popup(title, text) => {
-                self.popup = Some(Popup {
-                    title,
-                    text,
-                    scroll: 0,
-                })
-            }
-            Msg::Connected(up) => {
-                if up != self.connected {
-                    self.flash(
-                        if up {
-                            "connected to ainetd".into()
-                        } else {
-                            "ainetd is not answering".into()
-                        },
-                        !up,
-                    );
-                }
-                self.connected = up;
-            }
-        }
-    }
-
-    fn apply_event(&mut self, ev: Event) {
-        match ev {
-            Event::Agent { agent } => {
-                self.agents.insert(agent.id.clone(), agent);
-                self.rebuild();
-            }
-            Event::AgentRemoved { id } => {
-                self.agents.remove(&id);
-                self.rebuild();
-            }
-            Event::Inbox { item } => {
-                if item.waiting || item.kind == InboxKind::Question {
+            Change::Fleet => self.after_fleet(),
+            Change::InboxAdded { index, alert } => {
+                if alert {
                     // Make the Inbox tab glow a few times.
                     let glow = fx::repeat(
                         fx::ping_pong(fx::hsl_shift(
@@ -406,55 +257,55 @@ impl App {
                     );
                     self.fx
                         .add_unique_effect("inbox-tab", glow.with_area(self.areas.inbox_tab));
+                    let item = &self.store.inbox[index];
                     let name = self
+                        .store
                         .agents
                         .get(&item.agent)
                         .map(|a| a.name.clone())
                         .unwrap_or_default();
-                    self.flash(format!("{name}: {}", item.summary), false);
+                    let text = format!("{name}: {}", item.summary);
+                    self.flash(text, false);
                 }
-                self.inbox.push(item);
                 if self.inbox_state.selected().is_none() {
                     self.select_waiting();
                 }
             }
-            Event::InboxResolved { id } => {
-                if let Some(it) = self.inbox.iter_mut().find(|i| i.id == id) {
-                    it.waiting = false;
-                }
-            }
-            Event::Output { agent } => {
+            Change::Output(agent) => {
                 if self.shows_terminal(&agent) {
                     self.dirty.insert(agent);
                 }
             }
-            Event::Rig { rig } => {
-                self.rigs.insert(rig.name.clone(), rig);
-                self.rebuild();
+            Change::Flash(text, err) => self.flash(text, err),
+            Change::Popup(title, text) => {
+                self.popup = Some(Popup {
+                    title,
+                    text,
+                    scroll: 0,
+                })
             }
-            Event::RigRemoved { name } => {
-                self.rigs.remove(&name);
-                self.rebuild();
-            }
-            Event::Message { message } => match self.messages.iter_mut().find(|m| m.id == message.id) {
-                Some(m) => *m = message,
-                None => {
-                    self.messages.push(message);
-                    if self.messages.len() > 2000 {
-                        self.messages.remove(0);
-                    }
-                }
-            },
-            Event::Chat { message } => {
-                self.chat.push(message);
-                if self.chat.len() > 2000 {
-                    self.chat.remove(0);
-                }
-            }
-            Event::Queue { item } => {
-                self.queue.insert(item.id.clone(), item);
-            }
-            Event::Watchdog { .. } => {}
+            Change::Connected(up) => self.flash(
+                if up {
+                    "connected to ainetd".into()
+                } else {
+                    "ainetd is not answering".into()
+                },
+                !up,
+            ),
+        }
+    }
+
+    /// After the Fleet tree was rebuilt: the list cursor follows the
+    /// selected agent, and the grid keeps a focus that still exists.
+    fn after_fleet(&mut self) {
+        self.fleet_state.select(self.store.selected_row());
+        if self
+            .grid
+            .focus
+            .as_ref()
+            .is_none_or(|f| !self.store.agents.contains_key(f))
+        {
+            self.grid.focus = self.grid_ids().into_iter().next();
         }
     }
 
@@ -469,198 +320,20 @@ impl App {
     // ---- the Fleet list ------------------------------------------------
 
     pub fn selected_agent(&self) -> Option<&Agent> {
-        self.selected.as_ref().and_then(|id| self.agents.get(id))
-    }
-
-    /// Orders the Fleet: each rig with its seats as a tree of who directs
-    /// whom, then loose teams, then loose agents grouped by state.
-    fn rebuild(&mut self) {
-        let mut rows = Vec::new();
-        let mut placed: HashSet<String> = HashSet::new();
-        let children_of = |members: &[&Agent]| {
-            let ids: HashSet<&str> = members.iter().map(|a| a.id.as_str()).collect();
-            let mut map: BTreeMap<String, Vec<String>> = BTreeMap::new();
-            let mut sorted: Vec<&&Agent> = members.iter().collect();
-            sorted.sort_by_key(|a| (a.seat.clone(), a.started_at));
-            for a in sorted {
-                if let Some(p) = a.parent.as_ref().filter(|p| ids.contains(p.as_str())) {
-                    map.entry(p.clone()).or_default().push(a.id.clone());
-                }
-            }
-            map
-        };
-        fn walk(
-            id: &str,
-            prefix: String,
-            kids_prefix: String,
-            kids: &BTreeMap<String, Vec<String>>,
-            rows: &mut Vec<Row>,
-            placed: &mut HashSet<String>,
-        ) {
-            if !placed.insert(id.to_string()) {
-                return;
-            }
-            rows.push(Row::Agent {
-                id: id.to_string(),
-                prefix,
-            });
-            if let Some(list) = kids.get(id) {
-                for (i, k) in list.iter().enumerate() {
-                    let last = i + 1 == list.len();
-                    let branch = if last { "└─ " } else { "├─ " };
-                    let cont = if last { "   " } else { "│  " };
-                    walk(
-                        k,
-                        format!("{kids_prefix}{branch}"),
-                        format!("{kids_prefix}{cont}"),
-                        kids,
-                        rows,
-                        placed,
-                    );
-                }
-            }
-        }
-        for (name, rig) in &self.rigs {
-            rows.push(Row::Rig(name.clone()));
-            let members: Vec<&Agent> = self
-                .agents
-                .values()
-                .filter(|a| {
-                    a.rig.as_deref() == Some(name.as_str())
-                        && rig.seats.iter().any(|s| {
-                            s.agent.as_deref() == Some(&a.id) && a.seat.as_deref() == Some(&s.address)
-                        })
-                })
-                .filter(|a| a.state.is_live() || rig.seats.iter().any(|s| s.agent.as_deref() == Some(&a.id)))
-                .collect();
-            let kids = children_of(&members);
-            let ids: HashSet<&str> = members.iter().map(|a| a.id.as_str()).collect();
-            let mut roots: Vec<&&Agent> = members
-                .iter()
-                .filter(|a| a.parent.as_ref().is_none_or(|p| !ids.contains(p.as_str())))
-                .collect();
-            roots.sort_by_key(|a| a.seat.clone());
-            for r in roots {
-                walk(&r.id, String::new(), String::new(), &kids, &mut rows, &mut placed);
-            }
-            for s in &rig.seats {
-                let has = s.agent.as_ref().is_some_and(|a| placed.contains(a));
-                if !has {
-                    rows.push(Row::Seat {
-                        rig: name.clone(),
-                        address: s.address.clone(),
-                        prefix: String::new(),
-                    });
-                }
-            }
-        }
-        // Loose agents: a team tree first, then by state.
-        let loose: Vec<&Agent> = self
-            .agents
-            .values()
-            .filter(|a| a.rig.is_none() && !placed.contains(&a.id))
-            .collect();
-        let kids = children_of(&loose);
-        let ids: HashSet<&str> = loose.iter().map(|a| a.id.as_str()).collect();
-        let mut roots: Vec<&&Agent> = loose
-            .iter()
-            .filter(|a| {
-                a.parent.as_ref().is_none_or(|p| !ids.contains(p.as_str())) && kids.contains_key(&a.id)
-            })
-            .collect();
-        roots.sort_by_key(|a| a.started_at);
-        if !roots.is_empty() {
-            rows.push(Row::Header("TEAM".into()));
-            for r in roots {
-                walk(&r.id, String::new(), String::new(), &kids, &mut rows, &mut placed);
-            }
-        }
-        for state in [
-            AgentState::NeedsYou,
-            AgentState::Working,
-            AgentState::Idle,
-            AgentState::Failed,
-            AgentState::Unknown,
-            AgentState::Gone,
-        ] {
-            let mut group: Vec<&Agent> = loose
-                .iter()
-                .copied()
-                .filter(|a| a.state == state && !placed.contains(&a.id))
-                .collect();
-            if group.is_empty() {
-                continue;
-            }
-            group.sort_by_key(|a| a.started_at);
-            rows.push(Row::Header(format!(
-                "{} · {}",
-                state.label().to_uppercase(),
-                group.len()
-            )));
-            for a in group {
-                placed.insert(a.id.clone());
-                rows.push(Row::Agent {
-                    id: a.id.clone(),
-                    prefix: String::new(),
-                });
-            }
-        }
-        self.rows = rows;
-        // Keep the selection on the same agent; fall back to the first one.
-        let keep = self.selected.as_ref().and_then(|id| self.row_of(id));
-        let pick = keep.or_else(|| self.rows.iter().position(|r| matches!(r, Row::Agent { .. })));
-        self.fleet_state.select(pick);
-        self.selected = pick.and_then(|i| match &self.rows[i] {
-            Row::Agent { id, .. } => Some(id.clone()),
-            _ => None,
-        });
-        if self
-            .grid
-            .focus
-            .as_ref()
-            .is_none_or(|f| !self.agents.contains_key(f))
-        {
-            self.grid.focus = self.grid_ids().into_iter().next();
-        }
-    }
-
-    fn row_of(&self, id: &str) -> Option<usize> {
-        self.rows
-            .iter()
-            .position(|r| matches!(r, Row::Agent { id: rid, .. } if rid == id))
+        self.store.selected_agent()
     }
 
     fn move_selection(&mut self, delta: i32) {
         match self.tab {
-            Tab::Inbox => step(&mut self.inbox_state, self.inbox.len(), delta),
+            Tab::Inbox => step(&mut self.inbox_state, self.store.inbox.len(), delta),
             Tab::Comms => {
                 let n = self.entries().len();
                 step(&mut self.comms_state, n, delta);
             }
             Tab::Terminals => self.move_focus(delta, 0),
             _ => {
-                let agents: Vec<usize> = self
-                    .rows
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, r)| matches!(r, Row::Agent { .. }))
-                    .map(|(i, _)| i)
-                    .collect();
-                if agents.is_empty() {
-                    return;
-                }
-                let cur = self
-                    .fleet_state
-                    .selected()
-                    .and_then(|s| agents.iter().position(|i| *i == s))
-                    .unwrap_or(0) as i32;
-                let next = agents[(cur + delta).clamp(0, agents.len() as i32 - 1) as usize];
-                if let Row::Agent { id, .. } = &self.rows[next]
-                    && self.selected.as_ref() != Some(id)
-                {
-                    let id = id.clone();
-                    self.selected = Some(id.clone());
-                    self.fleet_state.select(Some(next));
+                if let Some(id) = self.store.move_selection(delta) {
+                    self.fleet_state.select(self.store.selected_row());
                     // The details pane fades in for the new agent.
                     let fade = fx::fade_from_fg(c(self.pal.bg), (280, Interpolation::SineOut));
                     self.fx
@@ -687,12 +360,7 @@ impl App {
 
     /// Puts the Inbox cursor on the oldest request still waiting, else the newest item.
     fn select_waiting(&mut self) {
-        let pick = self
-            .inbox
-            .iter()
-            .position(|i| i.waiting)
-            .or(self.inbox.len().checked_sub(1));
-        self.inbox_state.select(pick);
+        self.inbox_state.select(self.store.waiting_index());
     }
 
     fn set_tab(&mut self, tab: Tab) {
@@ -732,19 +400,7 @@ impl App {
 
     /// Agents shown in the Terminals view, in rig and seat order.
     pub fn grid_ids(&self) -> Vec<String> {
-        let mut v: Vec<&Agent> = self
-            .agents
-            .values()
-            .filter(|a| a.terminal && a.state.is_live())
-            .filter(|a| {
-                self.grid
-                    .rig
-                    .as_deref()
-                    .is_none_or(|r| a.rig.as_deref() == Some(r))
-            })
-            .collect();
-        v.sort_by_key(|a| (a.rig.is_none(), a.rig.clone(), a.seat.clone(), a.started_at));
-        v.into_iter().map(|a| a.id.clone()).collect()
+        self.store.terminal_ids(self.grid.rig.as_deref())
     }
 
     fn shows_terminal(&self, id: &str) -> bool {
@@ -752,7 +408,7 @@ impl App {
             Tab::Terminals => {
                 self.areas.tiles.iter().any(|(_, t, _)| t == id) || self.grid.focus.as_deref() == Some(id)
             }
-            Tab::Fleet => self.selected.as_deref() == Some(id),
+            Tab::Fleet => self.store.selected.as_deref() == Some(id),
             _ => false,
         }
     }
@@ -764,7 +420,7 @@ impl App {
                 self.dirty.extend(ids);
             }
             Tab::Fleet => {
-                if let Some(s) = self.selected.clone() {
+                if let Some(s) = self.store.selected.clone() {
                     self.dirty.insert(s);
                 }
             }
@@ -787,25 +443,9 @@ impl App {
         for id in due {
             self.dirty.remove(&id);
             self.last_fetch.insert(id.clone(), Instant::now());
-            match &self.backend {
-                Backend::Demo(demo) => {
-                    let (rows, cols) = self.sizes.get(&id).copied().unwrap_or((24, 90));
-                    if let Some(agent) = self.agents.get(&id) {
-                        let ansi = demo.terminal(agent, self.tick, rows, cols);
-                        let plain = demo.screen(agent, self.tick);
-                        let _ = self.tx.send(Msg::Term {
-                            id,
-                            ansi,
-                            size: (rows, cols),
-                            rows: plain,
-                        });
-                    }
-                }
-                Backend::Daemon(_) => {
-                    if let Some(f) = &self.fetch {
-                        let _ = f.send(id);
-                    }
-                }
+            let size = self.sizes.get(&id).copied().unwrap_or((24, 90));
+            if let Some(agent) = self.store.agents.get(&id) {
+                self.link.fetch(agent, self.tick, size);
             }
         }
     }
@@ -822,19 +462,11 @@ impl App {
             }
             self.sizes.insert(id.clone(), size);
             self.dirty.insert(id.clone());
-            if let Backend::Daemon(socket) = &self.backend {
-                backend::request(
-                    socket,
-                    Request::Resize {
-                        agent: id,
-                        rows: size.0,
-                        cols: size.1,
-                    },
-                    &self.tx,
-                    String::new(),
-                    Duration::from_secs(3),
-                );
-            }
+            self.link.quiet(Request::Resize {
+                agent: id,
+                rows: size.0,
+                cols: size.1,
+            });
         }
     }
 
@@ -858,30 +490,13 @@ impl App {
     /// Ctrl+O: talk to the operator, OpenRig's kernel agent that picks and
     /// launches teams. Starts it (here) when it is not running.
     fn operator(&mut self) {
-        let running = self
-            .agents
-            .values()
-            .find(|a| a.rig.as_deref() == Some("operator") && a.state.is_live())
-            .map(|a| a.id.clone());
-        match running {
+        match self.store.operator().map(|a| a.id.clone()) {
             Some(id) => {
                 self.set_tab(Tab::Terminals);
                 self.grid.focus = Some(id);
                 self.start_typing();
             }
-            None => {
-                let spec = UpSpec {
-                    source: "operator".into(),
-                    cwd: std::env::current_dir().ok(),
-                    fresh: vec![],
-                    name: None,
-                    plan: false,
-                };
-                self.request(
-                    Request::Up(spec),
-                    "starting the operator; Ctrl+O again to talk to it".into(),
-                );
-            }
+            None => self.run(command::operator_up()),
         }
     }
 
@@ -896,7 +511,7 @@ impl App {
             },
             String::new(),
         );
-        let name = self.agents.get(&id).map(|a| a.label()).unwrap_or_default();
+        let name = self.store.agents.get(&id).map(|a| a.label()).unwrap_or_default();
         self.flash(format!("typing into {name} · Ctrl+] to leave"), false);
         self.dirty.insert(id);
     }
@@ -910,19 +525,11 @@ impl App {
 
     fn type_into(&mut self, bytes: Vec<u8>) {
         let Some(id) = self.grid.focus.clone() else { return };
-        if let Backend::Daemon(socket) = &self.backend {
-            let data = String::from_utf8_lossy(&bytes).into_owned();
-            backend::request(
-                socket,
-                Request::Input {
-                    agent: id.clone(),
-                    data,
-                },
-                &self.tx,
-                String::new(),
-                Duration::from_secs(3),
-            );
-        }
+        let data = String::from_utf8_lossy(&bytes).into_owned();
+        self.link.quiet(Request::Input {
+            agent: id.clone(),
+            data,
+        });
         self.dirty.insert(id);
     }
 
@@ -943,15 +550,7 @@ impl App {
 
     /// Messages and chat, oldest first.
     pub fn entries(&self) -> Vec<Entry> {
-        let mut v: Vec<Entry> = self
-            .messages
-            .iter()
-            .cloned()
-            .map(Entry::Message)
-            .chain(self.chat.iter().cloned().map(Entry::Chat))
-            .collect();
-        v.sort_by_key(Entry::created);
-        v
+        self.store.entries()
     }
 
     pub fn selected_entry(&self) -> Option<Entry> {
@@ -964,40 +563,28 @@ impl App {
 
     /// Sends a request; the outcome comes back as a flash or a popup.
     fn request(&mut self, req: Request, ok: String) {
-        match &mut self.backend {
-            Backend::Demo(demo) => {
-                let (events, outcome) = demo.handle(&req);
-                for ev in events {
-                    let _ = self.tx.send(Msg::Event(Box::new(ev)));
-                }
-                match outcome {
-                    Ok(Some(text)) => {
-                        self.popup = Some(Popup {
-                            title: ok,
-                            text,
-                            scroll: 0,
-                        })
-                    }
-                    Ok(None) if !ok.is_empty() => self.flash(ok, false),
-                    Ok(None) => {}
-                    Err(e) => self.flash(e, true),
-                }
-            }
-            Backend::Daemon(socket) => {
-                let long = matches!(
-                    req,
-                    Request::Up(_) | Request::Restore { .. } | Request::Down { .. } | Request::Discover
-                );
-                let timeout = Duration::from_secs(if long { 60 } else { 10 });
-                backend::request(socket, req, &self.tx, ok, timeout);
-            }
+        self.link.request(req, ok);
+    }
+
+    /// Carries out a command from the shared console language.
+    fn run(&mut self, cmd: Command) {
+        match cmd {
+            Command::Request(req, ok) => self.request(*req, ok),
+            Command::Answer(decision) => self.answer(decision),
+            Command::Help => self.help = true,
+            Command::Quit => self.quit(),
+            Command::Critters => self.cycle_critters(),
+            Command::View(view) => self.open_view(&view),
+            Command::Cols(cols) => self.grid.cols = cols,
+            Command::Error(text) => self.flash(text, true),
+            Command::Nothing => {}
         }
     }
 
     fn selected_item(&self) -> Option<InboxItem> {
         self.inbox_state
             .selected()
-            .and_then(|i| self.inbox.get(i))
+            .and_then(|i| self.store.inbox.get(i))
             .cloned()
     }
 
@@ -1006,73 +593,21 @@ impl App {
     fn answer(&mut self, decision: Decision) {
         if self.tab == Tab::Inbox {
             let Some(item) = self.selected_item() else { return };
-            if !item.waiting {
-                self.flash("that one is not waiting on you".into(), true);
-                return;
+            match self.store.answer(&item, decision) {
+                Ok((req, ok)) => self.request(req, ok),
+                // Answering what no longer waits is a mistake; a question
+                // just wants its answer typed.
+                Err(e) => self.flash(e, !item.waiting),
             }
-            if item.kind == InboxKind::Question && decision != Decision::Deny {
-                self.flash("type an option's number (or your answer) and Enter".into(), false);
-                return;
-            }
-            let name = self
-                .agents
-                .get(&item.agent)
-                .map(|a| a.name.clone())
-                .unwrap_or_default();
-            let verb = match decision {
-                Decision::Allow => "allowed",
-                Decision::Always => "always allowing",
-                Decision::Deny => "denied",
-            };
-            self.request(
-                Request::Answer {
-                    item: item.id,
-                    decision,
-                },
-                format!("{verb} {name}'s {}", item.kind.label()),
-            );
             return;
         }
-        let pos = self
-            .inbox
-            .iter()
-            .position(|i| i.waiting && Some(&i.agent) == self.selected.as_ref())
-            .or_else(|| self.inbox.iter().position(|i| i.waiting));
-        match pos {
+        match self.store.next_waiting() {
             Some(p) => {
                 self.inbox_state.select(Some(p));
                 self.set_tab(Tab::Inbox);
             }
             None => self.flash("nothing is waiting on you".into(), false),
         }
-    }
-
-    fn find_agent(&self, key: &str) -> Option<&Agent> {
-        let norm = |s: &str| s.to_lowercase().replace([' ', '-', '_'], "");
-        let k = norm(key.trim_start_matches('@'));
-        let live = || self.agents.values().filter(|a| a.state.is_live());
-        live()
-            .find(|a| {
-                a.seat
-                    .as_deref()
-                    .is_some_and(|s| norm(s) == k || s.starts_with(key))
-            })
-            .or_else(|| live().find(|a| norm(&a.name) == k))
-            .or_else(|| live().find(|a| norm(&a.name).starts_with(&k) || a.id.starts_with(key)))
-    }
-
-    /// The rig commands act on: the one named, else the selected agent's,
-    /// else the only one.
-    fn rig_arg(&self, given: Option<&str>) -> Option<String> {
-        given
-            .map(str::to_string)
-            .or_else(|| self.grid.rig.clone().filter(|_| self.tab == Tab::Terminals))
-            .or_else(|| self.selected_agent().and_then(|a| a.rig.clone()))
-            .or_else(|| {
-                (self.rigs.len() == 1)
-                    .then(|| self.rigs.keys().next().cloned())
-                    .flatten()
-            })
     }
 
     fn submit(&mut self) {
@@ -1095,390 +630,52 @@ impl App {
                 .selected_item()
                 .filter(|i| i.waiting && i.kind == InboxKind::Question)
         {
-            self.request(
-                Request::AnswerQuestion {
-                    item: item.id,
-                    answer: line,
-                },
-                "answered".into(),
-            );
+            self.run(command::answer_question(&item, line));
             return;
         }
         // In Comms, a line answers the selected message.
         if self.tab == Tab::Comms && !line.starts_with('@') {
             match self.selected_entry() {
-                Some(Entry::Message(m)) => {
-                    self.request(
-                        Request::Message {
-                            from: None,
-                            to: vec![],
-                            rig: None,
-                            pod: None,
-                            body: line,
-                            reply_to: Some(m.id),
-                            force: false,
-                        },
-                        format!("replied to #{}", m.id),
-                    );
-                }
-                Some(Entry::Chat(c)) => {
-                    self.request(
-                        Request::ChatSend {
-                            rig: c.rig.clone(),
-                            topic: Some(c.topic.clone()),
-                            sender: None,
-                            body: line,
-                        },
-                        "posted".into(),
-                    );
-                }
+                Some(entry) => self.run(command::reply(&entry, line)),
                 None => self.flash("select a message to answer, or start with @Name".into(), true),
             }
             return;
         }
         // @Name message, or a message for the selected agent / focused tile.
-        let (target, text) = match line.strip_prefix('@') {
-            Some(rest) => {
-                let (name, text) = rest.split_once(' ').unwrap_or((rest, ""));
-                (self.find_agent(name).cloned(), text.trim().to_string())
-            }
-            None => {
-                let id = if self.tab == Tab::Terminals {
-                    self.grid.focus.clone()
-                } else {
-                    self.selected.clone()
-                };
-                (id.and_then(|i| self.agents.get(&i).cloned()), line.clone())
-            }
+        let default = if self.tab == Tab::Terminals {
+            self.grid.focus.clone()
+        } else {
+            self.store.selected.clone()
         };
-        match target {
-            Some(a) if !text.is_empty() => {
-                // From you, into its terminal and its mailbox.
-                self.request(
-                    Request::Message {
-                        from: None,
-                        to: vec![a.id.clone()],
-                        rig: None,
-                        pod: None,
-                        body: text,
-                        reply_to: None,
-                        force: true,
-                    },
-                    format!("sent to {}", a.label()),
-                );
-            }
-            Some(_) => self.flash("nothing to send".into(), true),
-            None => self.flash("no such agent".into(), true),
-        }
+        let cmd = command::message(&self.store, &line, default.as_deref());
+        self.run(cmd);
     }
 
     /// Slash commands: the operator console.
     fn command(&mut self, cmd: &str) {
-        let words: Vec<&str> = cmd.split_whitespace().collect();
-        let arg = |i: usize| words.get(i).copied();
-        let rest = |i: usize| words.get(i..).map(|w| w.join(" ")).unwrap_or_default();
-        match arg(0).unwrap_or("") {
-            "help" | "h" | "?" => self.help = true,
-            "quit" | "q" => self.quit(),
-            "crit" | "critters" => self.cycle_critters(),
-            "allow" | "y" => self.answer(Decision::Allow),
-            "always" | "a" => self.answer(Decision::Always),
-            "deny" | "n" => self.answer(Decision::Deny),
-            "answer" => {
-                if let Some(item) = self.selected_item() {
-                    self.request(
-                        Request::AnswerQuestion {
-                            item: item.id,
-                            answer: rest(1),
-                        },
-                        "answered".into(),
-                    );
-                }
-            }
-            "view" | "terminal" | "terminals" => {
-                self.open_view(arg(1).unwrap_or("terminals"));
-            }
-            "cols" => self.grid.cols = arg(1).and_then(|c| c.parse().ok()).filter(|c: &u16| *c > 0),
-            "spawn" | "new" => {
-                let runtime = arg(1)
-                    .and_then(|r| r.parse::<Runtime>().ok())
-                    .unwrap_or(Runtime::ClaudeCode);
-                let cwd = arg(2)
-                    .map(expand)
-                    .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-                let role = rest(3);
-                let spec = SpawnSpec {
-                    runtime,
-                    cwd,
-                    role: (!role.is_empty()).then(|| role.to_uppercase()),
-                    task: None,
-                    parent: None,
-                    args: vec![],
-                };
-                self.request(Request::Spawn(spec), "spawned".into());
-            }
-            "close" | "kill" => {
-                let target = arg(1)
-                    .and_then(|k| self.find_agent(k))
-                    .or(self.selected_agent())
-                    .map(|a| (a.id.clone(), a.label()));
-                if let Some((id, name)) = target {
-                    self.request(Request::Close { agent: id }, format!("closing {name}"));
-                }
-            }
-            // Rigs.
-            "up" | "plan" => {
-                let Some(source) = arg(1) else {
-                    return self.flash("/up <spec file | library name | rig>".into(), true);
-                };
-                let cwd = arg(2).map(expand).or_else(|| std::env::current_dir().ok());
-                let plan = arg(0) == Some("plan");
-                let looks_like_path = std::path::Path::new(source).exists();
-                let spec = UpSpec {
-                    source: if looks_like_path {
-                        expand(source).display().to_string()
-                    } else {
-                        source.to_string()
-                    },
-                    cwd: if looks_like_path { arg(2).map(expand) } else { cwd },
-                    fresh: vec![],
-                    name: None,
-                    plan,
-                };
-                self.request(
-                    Request::Up(spec),
-                    if plan {
-                        format!("plan for {source}")
-                    } else {
-                        format!("launching {source}")
-                    },
-                );
-            }
-            "down" => match self.rig_arg(arg(1)) {
-                Some(rig) => self.request(
-                    Request::Down {
-                        rig: rig.clone(),
-                        snapshot: true,
-                        delete: false,
-                    },
-                    format!("{rig} is down (snapshot taken)"),
-                ),
-                None => self.flash("/down <rig>".into(), true),
+        let item = self.selected_item();
+        let view_rig = self.grid.rig.as_deref().filter(|_| self.tab == Tab::Terminals);
+        let parsed = command::parse(
+            &command::Context {
+                store: &self.store,
+                view_rig,
+                inbox_item: item.as_ref(),
             },
-            "restore" => match self.rig_arg(arg(1)) {
-                Some(rig) => self.request(
-                    Request::Restore {
-                        rig: rig.clone(),
-                        snapshot: None,
-                        fresh: vec![],
-                    },
-                    format!("restoring {rig}"),
-                ),
-                None => self.flash("/restore <rig>".into(), true),
-            },
-            "snapshot" => match self.rig_arg(arg(1)) {
-                Some(rig) => self.request(
-                    Request::SnapshotCreate {
-                        rig: rig.clone(),
-                        label: None,
-                    },
-                    format!("snapshot of {rig}"),
-                ),
-                None => self.flash("/snapshot <rig>".into(), true),
-            },
-            "snapshots" => match self.rig_arg(arg(1)) {
-                Some(rig) => self.request(
-                    Request::SnapshotList { rig: rig.clone() },
-                    format!("snapshots of {rig}"),
-                ),
-                None => self.flash("/snapshots <rig>".into(), true),
-            },
-            "ps" | "rigs" => self.request(Request::Ps, "rigs".into()),
-            "specs" | "library" => self.request(Request::Specs, "spec library".into()),
-            "spec" | "yaml" => match arg(1) {
-                Some(n) => self.request(Request::SpecShow { name: n.into() }, format!("spec {n}")),
-                None => self.flash("/spec <name>".into(), true),
-            },
-            "export" => match self.rig_arg(arg(1)) {
-                Some(rig) => self.request(Request::Export { rig: rig.clone() }, format!("{rig} as RigSpec")),
-                None => self.flash("/export <rig>".into(), true),
-            },
-            "grow" | "add" => {
-                // /grow <pod> <member> [runtime] [role…]   (in the selected rig)
-                let (Some(pod), Some(member)) = (arg(1), arg(2)) else {
-                    return self.flash("/grow <pod> <member> [runtime] [ROLE]".into(), true);
-                };
-                let Some(rig) = self.rig_arg(None) else {
-                    return self.flash("select an agent in the rig first".into(), true);
-                };
-                let runtime = arg(3).and_then(|r| r.parse::<Runtime>().ok());
-                let role = rest(if runtime.is_some() { 4 } else { 3 });
-                let seat = SeatSpec {
-                    pod: pod.into(),
-                    member: member.into(),
-                    runtime,
-                    role: (!role.is_empty()).then_some(role),
-                    ..Default::default()
-                };
-                self.request(
-                    Request::Grow {
-                        rig: rig.clone(),
-                        seats: vec![seat],
-                        edges: vec![],
-                    },
-                    format!("growing {rig}"),
-                );
-            }
-            "shrink" => match (self.rig_arg(None), arg(1)) {
-                (Some(rig), Some(pod)) => self.request(
-                    Request::Shrink { rig, pod: pod.into() },
-                    format!("removed pod {pod}"),
-                ),
-                _ => self.flash("/shrink <pod>".into(), true),
-            },
-            "remove" => match arg(1) {
-                Some(seat) => self.request(
-                    Request::RemoveSeat { seat: seat.into() },
-                    format!("removed {seat}"),
-                ),
-                None => self.flash("/remove <seat>".into(), true),
-            },
-            "launch" | "relaunch" => match arg(1)
-                .map(str::to_string)
-                .or_else(|| self.selected_agent().and_then(|a| a.seat.clone()))
-            {
-                Some(seat) => self.request(
-                    Request::Launch {
-                        seat: seat.clone(),
-                        fresh: arg(0) == Some("relaunch"),
-                    },
-                    format!("launching {seat}"),
-                ),
-                None => self.flash("/launch <seat>".into(), true),
-            },
-            "continue" => match arg(1)
-                .map(str::to_string)
-                .or_else(|| self.selected_agent().and_then(|a| a.seat.clone()))
-            {
-                Some(seat) => self.request(
-                    Request::SeatContinue { seat: seat.clone() },
-                    format!("nudged {seat}"),
-                ),
-                None => self.flash("/continue <seat>".into(), true),
-            },
-            "guard" => match (arg(1), arg(2)) {
-                (Some(seat), Some(on)) => self.request(
-                    Request::TypingGuard {
-                        seat: seat.into(),
-                        on: on == "on",
-                    },
-                    format!("typing guard {on} for {seat}"),
-                ),
-                _ => self.flash("/guard <seat> on|off".into(), true),
-            },
-            "discover" => self.request(Request::Discover, "agents outside ainet".into()),
-            "adopt" => match (arg(1), arg(2), arg(3), arg(4)) {
-                (Some(id), Some(rig), Some(pod), Some(member)) => {
-                    let seat = SeatSpec {
-                        pod: pod.into(),
-                        member: member.into(),
-                        ..Default::default()
-                    };
-                    self.request(
-                        Request::Adopt {
-                            id: id.into(),
-                            rig: rig.into(),
-                            seat,
-                        },
-                        format!("adopted {id}"),
-                    );
-                }
-                _ => self.flash("/adopt <id> <rig> <pod> <member>".into(), true),
-            },
-            // Talking.
-            "broadcast" => match self.rig_arg(None) {
-                Some(rig) => self.request(
-                    Request::Message {
-                        from: None,
-                        to: vec![],
-                        rig: Some(rig.clone()),
-                        pod: None,
-                        body: rest(1),
-                        reply_to: None,
-                        force: false,
-                    },
-                    format!("broadcast to {rig}"),
-                ),
-                None => self.flash("select an agent in the rig first".into(), true),
-            },
-            "chat" => match self.rig_arg(None) {
-                Some(rig) => self.request(
-                    Request::ChatSend {
-                        rig: rig.clone(),
-                        topic: None,
-                        sender: None,
-                        body: rest(1),
-                    },
-                    format!("posted in {rig}"),
-                ),
-                None => self.flash("select an agent in the rig first".into(), true),
-            },
-            "queue" | "task" => {
-                // /queue <destination> <summary…>
-                let Some(dest) = arg(1) else {
-                    return self.flash("/queue <seat> <summary>".into(), true);
-                };
-                let spec = QSpec {
-                    destination: dest.into(),
-                    summary: rest(2),
-                    nudge: true,
-                    ..Default::default()
-                };
-                self.request(Request::QueueCreate(spec), format!("queued for {dest}"));
-            }
-            "watchdog" => match (arg(1), arg(2).and_then(|m| m.parse::<u64>().ok())) {
-                (Some(seat), Some(min)) => self.request(
-                    Request::WatchdogRegister {
-                        target: seat.into(),
-                        interval_secs: min * 60,
-                        message: None,
-                        registered_by: None,
-                    },
-                    format!("waking {seat} every {min} min"),
-                ),
-                _ => self.flash("/watchdog <seat> <minutes>".into(), true),
-            },
-            "capture" => match arg(1).map(str::to_string).or_else(|| self.selected.clone()) {
-                Some(t) => self.request(
-                    Request::Capture {
-                        targets: vec![t],
-                        rig: None,
-                        pod: None,
-                        lines: 80,
-                    },
-                    "terminal".into(),
-                ),
-                None => self.flash("/capture <agent>".into(), true),
-            },
-            "whoami" => match self.selected.clone() {
-                Some(id) => self.request(Request::Whoami { agent: id }, "who".into()),
-                None => self.flash("select an agent".into(), true),
-            },
-            other => self.flash(format!("no command /{other}; /help lists them"), true),
-        }
+            cmd,
+        );
+        self.run(parsed);
     }
 
     /// Tab after `@Mos` completes the name.
     fn complete(&mut self) -> bool {
-        let Some(partial) = self.input.strip_prefix('@').filter(|p| !p.contains(' ')) else {
-            return false;
-        };
-        let Some(a) = self.find_agent(partial) else {
-            return false;
-        };
-        self.input = format!("@{} ", a.seat.clone().unwrap_or_else(|| a.name.replace(' ', "")));
-        self.cursor = self.input.chars().count();
-        true
+        match command::complete(&self.store, &self.input) {
+            Some(done) => {
+                self.input = done;
+                self.cursor = self.input.chars().count();
+                true
+            }
+            None => false,
+        }
     }
 
     // ---- keys and mouse -------------------------------------------------
@@ -1520,7 +717,7 @@ impl App {
             KeyCode::Char('z') if ctrl && self.tab == Tab::Terminals => self.grid.zoom = !self.grid.zoom,
             KeyCode::Char('r') if ctrl && self.tab == Tab::Terminals => {
                 // Cycle the rig filter: all → each rig → all.
-                let names: Vec<String> = self.rigs.keys().cloned().collect();
+                let names: Vec<String> = self.store.rigs.keys().cloned().collect();
                 self.grid.rig = match &self.grid.rig {
                     None => names.first().cloned(),
                     Some(r) => names.iter().skip_while(|n| *n != r).nth(1).cloned(),
@@ -1657,11 +854,4 @@ fn step(state: &mut ListState, n: usize, delta: i32) {
     }
     let cur = state.selected().unwrap_or(n - 1) as i32;
     state.select(Some((cur + delta).clamp(0, n as i32 - 1) as usize));
-}
-
-fn expand(p: &str) -> PathBuf {
-    match p.strip_prefix("~/") {
-        Some(rest) => PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(rest),
-        None => PathBuf::from(p),
-    }
 }
