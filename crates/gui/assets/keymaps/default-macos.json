@@ -62,7 +62,10 @@
       "enter": "fleet::OpenTerminal",
       "m": "fleet::MessageAgent",
       "s": "fleet::Spawn",
-      "delete": "fleet::CloseAgent"
+      "delete": "fleet::CloseAgent",
+      "left": "fleet::CollapseRig",
+      "right": "fleet::ExpandRig",
+      "shift-f10": "fleet::OpenContextMenu"
     }
   },
   {

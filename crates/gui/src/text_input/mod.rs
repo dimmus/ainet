@@ -164,7 +164,6 @@ impl TextInput {
 
     /// Makes it take several lines, showing at most `max_lines` before it
     /// scrolls.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn with_multiline(mut self, max_lines: Option<usize>) -> Self {
         self.buffer.set_multiline(true);
         self.max_lines = max_lines;

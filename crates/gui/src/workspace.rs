@@ -9,29 +9,38 @@
 //! splitting, moving between and zooming panes, opening tabs, modals, and
 //! the pane actions when the keyboard is outside the panes.
 
-use gpui::{Bounds, DragMoveEvent, Entity, FocusHandle, Focusable, Pixels, Subscription, WeakEntity, canvas};
+use ainet_model::{AgentCommand, command};
+use gpui::{
+    Bounds, DragMoveEvent, Entity, FocusHandle, Focusable, Pixels, PromptLevel, Subscription, WeakEntity,
+    canvas,
+};
 use ui::prelude::*;
 
 use crate::actions::{
     ActivateNextItem, ActivateNextPane, ActivatePaneDown, ActivatePaneLeft, ActivatePaneRight,
-    ActivatePaneUp, ActivatePreviousItem, ActivatePreviousPane, CloseActiveItem, CloseAllItems,
-    CloseOtherItems, CloseWindow, OpenComms, OpenInbox, OpenKeymap, OpenMap, OpenSettings, SelectNext,
-    SelectPrev, SplitDown, SplitRight, ToggleBottomDock, ToggleCritterSize, ToggleLeftDock, ToggleRightDock,
-    ToggleSwitcher, ToggleZoom, terminal,
+    ActivatePaneUp, ActivatePreviousItem, ActivatePreviousPane, Capture, CloseActiveItem, CloseAgent,
+    CloseAllItems, CloseOtherItems, CloseWindow, Continue, MessageAgent, OpenComms, OpenInbox, OpenKeymap,
+    OpenMap, OpenSettings, OpenTerminal, Relaunch, SelectNext, SelectPrev, ShowTranscript, SplitDown,
+    SplitRight, ToggleBottomDock, ToggleCritterSize, ToggleLeftDock, ToggleRightDock, ToggleSwitcher,
+    ToggleTypingGuard, ToggleZoom, terminal,
 };
+use crate::agent_panel::AgentPanel;
 use crate::args::View;
 use crate::decorations::client_side_decorations;
 use crate::dock::{Dock, DockPosition, DraggedDock, Panel, RESIZE_HANDLE_SIZE};
 use crate::fleet::FleetModel;
+use crate::fleet_panel::FleetPanel;
 use crate::item::Placeholder;
+use crate::message::MessageModal;
 use crate::modal_layer::{ModalLayer, ModalView};
 use crate::pane::{Pane, PaneEvent};
 use crate::pane_group::{PaneGroup, SplitDirection};
-use crate::panels::{ActivityPanel, AgentPanel, FleetPanel};
+use crate::panels::ActivityPanel;
 use crate::picker::Picker;
 use crate::settings::{self, DockSide};
 use crate::status_bar::StatusBar;
 use crate::switcher::AgentSwitcher;
+use crate::terminal_item::TerminalItem;
 use crate::title_bar::TitleBar;
 use crate::toast_layer::ToastLayer;
 use crate::{keymap, quit};
@@ -62,6 +71,7 @@ impl Default for Docks {
 
 pub struct Workspace {
     fleet: Entity<FleetModel>,
+    fleet_panel: Entity<FleetPanel>,
     title_bar: Entity<TitleBar>,
     status_bar: Entity<StatusBar>,
     center: PaneGroup<Entity<Pane>>,
@@ -143,6 +153,7 @@ impl Workspace {
         });
         Workspace {
             fleet,
+            fleet_panel,
             title_bar,
             status_bar,
             center: PaneGroup::new(first.clone()),
@@ -163,6 +174,11 @@ impl Workspace {
     #[cfg(test)]
     pub fn fleet(&self) -> &Entity<FleetModel> {
         &self.fleet
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn fleet_panel(&self) -> &Entity<FleetPanel> {
+        &self.fleet_panel
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -448,6 +464,89 @@ impl Workspace {
         }
     }
 
+    /// Opens agent `id`'s terminal: activates its tab where one is open
+    /// (in any pane), else adds one to the active pane. The tab takes the
+    /// keyboard.
+    pub fn open_terminal(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.fleet.read(cx).store.agents.contains_key(id) {
+            return;
+        }
+        for pane in self.panes() {
+            let found = pane.read(cx).items().position(|item| {
+                item.to_any()
+                    .downcast::<TerminalItem>()
+                    .is_ok_and(|t| t.read(cx).agent_id() == id)
+            });
+            if let Some(ix) = found {
+                self.active_pane = pane.clone();
+                pane.update(cx, |p, cx| p.activate_item(ix, true, window, cx));
+                window.focus(&pane.focus_handle(cx), cx);
+                return;
+            }
+        }
+        let (fleet, id) = (self.fleet.clone(), id.to_string());
+        let item = cx.new(|cx| TerminalItem::new(fleet, id, cx));
+        self.active_pane
+            .update(cx, |p, cx| p.add_item(Box::new(item), true, true, window, cx));
+    }
+
+    /// The selected agent's id.
+    fn selected(&self, cx: &App) -> Option<String> {
+        self.fleet.read(cx).store.selected.clone()
+    }
+
+    /// Asks ainetd to do `cmd` to the selected agent.
+    fn agent_command(&mut self, cmd: AgentCommand, cx: &mut Context<Self>) {
+        let Some(id) = self.selected(cx) else { return };
+        self.fleet.update(cx, |fleet, cx| {
+            let command = command::for_agent(&fleet.store, &id, cmd);
+            fleet.run(command, cx);
+        });
+    }
+
+    /// Turns the typing guard of the selected agent's seat the other way.
+    fn toggle_typing_guard(&mut self, cx: &mut Context<Self>) {
+        let store = &self.fleet.read(cx).store;
+        let on = store
+            .selected_agent()
+            .and_then(|a| store.seat_of(a))
+            .is_some_and(|s| s.typing_guard);
+        self.agent_command(AgentCommand::Guard(!on), cx);
+    }
+
+    /// Closes the selected agent once you say so: its process ends.
+    fn close_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(agent) = self.fleet.read(cx).store.selected_agent().cloned() else {
+            return;
+        };
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &format!("Close {}?", agent.label()),
+            Some("Its process ends. A rig seat can be launched again."),
+            &["Close", "Cancel"],
+            cx,
+        );
+        let fleet = self.fleet.clone();
+        cx.spawn(async move |_, cx| {
+            if answer.await == Ok(0) {
+                fleet.update(cx, |fleet, cx| {
+                    let close = command::for_agent(&fleet.store, &agent.id, AgentCommand::Close);
+                    fleet.run(close, cx);
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// Opens the message modal for the selected agent.
+    fn message_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.selected(cx) else { return };
+        let fleet = self.fleet.clone();
+        self.toggle_modal(window, cx, move |window, cx| {
+            MessageModal::new(fleet, id, window, cx)
+        });
+    }
+
     /// Opens a modal of type `V` (closing it if open).
     pub fn toggle_modal<V: ModalView>(
         &mut self,
@@ -487,8 +586,10 @@ impl Workspace {
         self.fleet.update(cx, |fleet, cx| fleet.show(text, error, cx));
     }
 
+    /// Moves the Fleet selection over the agents the Fleet panel shows.
     fn select(&mut self, delta: i32, cx: &mut Context<Self>) {
-        self.fleet.update(cx, |fleet, cx| fleet.move_selection(delta, cx));
+        self.fleet_panel
+            .update(cx, |panel, cx| panel.select_relative(delta, cx));
     }
 
     /// The docks and center, or the zoomed pane alone.
@@ -578,6 +679,27 @@ impl Render for Workspace {
                 settings::set(next, cx);
             })
             .on_action(cx.listener(|this, _: &ToggleSwitcher, window, cx| this.toggle_switcher(window, cx)))
+            // The selected agent's actions, from the Fleet's keys and menu.
+            .on_action(cx.listener(|this, _: &OpenTerminal, window, cx| {
+                if let Some(id) = this.selected(cx) {
+                    this.open_terminal(&id, window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &MessageAgent, window, cx| this.message_agent(window, cx)))
+            .on_action(cx.listener(|this, _: &CloseAgent, window, cx| this.close_agent(window, cx)))
+            .on_action(
+                cx.listener(|this, _: &ShowTranscript, _, cx| {
+                    this.agent_command(AgentCommand::Transcript, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &Relaunch, _, cx| this.agent_command(AgentCommand::Relaunch, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &Continue, _, cx| this.agent_command(AgentCommand::Continue, cx)),
+            )
+            .on_action(cx.listener(|this, _: &Capture, _, cx| this.agent_command(AgentCommand::Capture, cx)))
+            .on_action(cx.listener(|this, _: &ToggleTypingGuard, _, cx| this.toggle_typing_guard(cx)))
             .on_action(
                 cx.listener(|this, _: &OpenComms, window, cx| this.open_placeholder(View::Comms, window, cx)),
             )

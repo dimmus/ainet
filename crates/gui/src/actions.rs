@@ -87,8 +87,24 @@ actions!(
         OpenTerminal,
         /// Starts a message to the selected agent.
         MessageAgent,
-        /// Closes the selected agent.
+        /// Closes the selected agent (its process ends), after asking.
         CloseAgent,
+        /// Shows the selected agent's Claude Code transcript.
+        ShowTranscript,
+        /// Starts a new session in the selected agent's seat.
+        Relaunch,
+        /// Nudges the selected agent to carry on.
+        Continue,
+        /// Turns the typing guard of the selected agent's seat on or off.
+        ToggleTypingGuard,
+        /// Shows the last lines of the selected agent's terminal.
+        Capture,
+        /// Folds away the rig of the selected agent.
+        CollapseRig,
+        /// Unfolds the rig of the selected agent.
+        ExpandRig,
+        /// Opens the selected agent's menu, as a right click does.
+        OpenContextMenu,
         /// Spawns an agent.
         Spawn,
         /// Brings a rig up from a spec.

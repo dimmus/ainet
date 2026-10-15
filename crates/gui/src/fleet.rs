@@ -1,21 +1,24 @@
 //! The fleet as a GPUI entity: `ainet-model`'s [`Store`], kept current by a
 //! [`Link`] to ainetd (or the demo), plus the notices a front end shows as
 //! toasts (each one is also emitted as an event). Views read it and
-//! re-render when it notifies.
+//! re-render when it notifies; requests go out through it. It also keeps
+//! the animation clock: a [`Tick`] every [`TICK`], which moves the demo on
+//! and the critters of views that are showing some.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use ainet_core::Request;
 use ainet_core::client::Client;
-use ainet_model::{Backend, Change, Link, Msg, Store, Tally, daemon};
+use ainet_model::{Backend, Change, Command, Link, Msg, Store, Tally, daemon};
 use futures::StreamExt;
 use futures::channel::mpsc::UnboundedReceiver;
 use gpui::{AppContext as _, AsyncApp, Context, EventEmitter, Task, WeakEntity};
 
 use crate::sink::{self, ChannelSink};
 
-/// How often the demo fleet moves on, as in the TUI.
+/// How often the demo fleet and the critters move on, as in the TUI.
 pub const TICK: Duration = Duration::from_millis(120);
 
 /// How many notices are kept for later toasts and a log.
@@ -60,6 +63,14 @@ pub struct Notice {
 
 impl EventEmitter<Notice> for FleetModel {}
 
+/// The animation clock moved on ([`FleetModel::tick`] says where to).
+/// Emitted without re-rendering anything; views with critters redraw if
+/// they show some.
+#[derive(Clone, Copy, Debug)]
+pub struct Tick;
+
+impl EventEmitter<Tick> for FleetModel {}
+
 pub struct FleetModel {
     pub store: Store,
     link: Option<Link<ChannelSink>>,
@@ -73,6 +84,9 @@ pub struct FleetModel {
     rechecking: bool,
     tick: u64,
     notices: VecDeque<Notice>,
+    /// Every request sent, for tests.
+    #[cfg(test)]
+    pub sent: Vec<(Request, String)>,
     _tasks: Vec<Task<()>>,
 }
 
@@ -94,11 +108,19 @@ impl FleetModel {
         model
     }
 
+    /// The animation clock: ticks so far.
+    pub fn tick(&self) -> u64 {
+        self.tick
+    }
+
     /// ainetd at `socket`: starts it through the console binary (off the UI
     /// thread), then follows it. If it cannot be started, the reason shows
     /// in the status bar and on stderr, and the socket is followed anyway.
     pub fn daemon(socket: PathBuf, cx: &mut Context<Self>) -> Self {
         let mut model = FleetModel::empty(false);
+        model
+            ._tasks
+            .push(cx.spawn(async move |this, cx| ticker(this, cx).await));
         let start = cx.background_spawn({
             let socket = socket.clone();
             async move { start_daemon(&socket) }
@@ -126,6 +148,8 @@ impl FleetModel {
             rechecking: false,
             tick: 0,
             notices: VecDeque::new(),
+            #[cfg(test)]
+            sent: Vec::new(),
             _tasks: Vec::new(),
         }
     }
@@ -178,10 +202,46 @@ impl FleetModel {
         }
     }
 
-    /// Moves the Fleet selection `delta` agents down (up if negative).
-    pub fn move_selection(&mut self, delta: i32, cx: &mut Context<Self>) {
-        if self.store.move_selection(delta).is_some() {
+    /// Moves the Fleet selection `delta` agents down (up if negative),
+    /// over the rows `shown` keeps (the Fleet panel folds rigs away).
+    pub fn move_selection_where(
+        &mut self,
+        delta: i32,
+        shown: impl Fn(usize) -> bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.store.move_selection_where(delta, shown).is_some() {
             cx.notify();
+        }
+    }
+
+    /// Sends a request; `ok` is said once it is done (or titles its
+    /// report). Without a link yet, says that ainetd is not there.
+    pub fn request(&mut self, req: Request, ok: String, cx: &mut Context<Self>) {
+        #[cfg(test)]
+        self.sent.push((req.clone(), ok.clone()));
+        match &mut self.link {
+            Some(link) => link.request(req, ok),
+            None => self.show("ainetd is not running yet".into(), true, cx),
+        }
+    }
+
+    /// Carries out a command of `ainet-model`'s command layer: sends its
+    /// request, or shows why it cannot. The front-end-only commands are
+    /// the caller's.
+    pub fn run(&mut self, command: Command, cx: &mut Context<Self>) {
+        match command {
+            Command::Request(req, ok) => self.request(*req, ok, cx),
+            Command::Error(why) => self.show(why, true, cx),
+            _ => {}
+        }
+    }
+
+    /// Asks for a fresh screen of `id`'s terminal, at `size` (rows, cols)
+    /// for the demo, which draws one. It lands in the store's screens.
+    pub fn fetch_screen(&self, id: &str, size: (u16, u16)) {
+        if let (Some(link), Some(agent)) = (&self.link, self.store.agents.get(id)) {
+            link.fetch(agent, self.tick, size);
         }
     }
 
@@ -248,11 +308,12 @@ impl FleetModel {
         self.notices.push_back(notice);
     }
 
-    fn on_tick(&mut self) {
+    fn on_tick(&mut self, cx: &mut Context<Self>) {
         self.tick += 1;
         if let Some(link) = &mut self.link {
             link.tick(self.tick);
         }
+        cx.emit(Tick);
     }
 }
 
@@ -296,11 +357,12 @@ fn drain(mut rx: UnboundedReceiver<Msg>, cx: &mut Context<FleetModel>) -> Task<(
     })
 }
 
-/// Moves the demo fleet on; stops when the model is dropped.
+/// Moves the clock (and the demo fleet) on; stops when the model is
+/// dropped.
 async fn ticker(this: WeakEntity<FleetModel>, cx: &mut AsyncApp) {
     loop {
         cx.background_executor().timer(TICK).await;
-        if this.update(cx, |model, _| model.on_tick()).is_err() {
+        if this.update(cx, |model, cx| model.on_tick(cx)).is_err() {
             return;
         }
     }

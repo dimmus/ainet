@@ -168,6 +168,7 @@ dependencies = [
  "serde_json",
  "serde_json_lenient",
  "settings_content",
+ "smallvec",
  "strum",
  "theme",
  "ui",

@@ -4,13 +4,17 @@
 //! the daemon through the console binary `ainet`, never through itself.
 
 mod actions;
+mod agent_panel;
 mod args;
 mod assets;
+mod critter;
 mod decorations;
 mod dock;
 mod fleet;
+mod fleet_panel;
 mod item;
 mod keymap;
+mod message;
 mod modal_layer;
 mod pane;
 mod pane_group;
@@ -22,6 +26,7 @@ mod settings;
 mod sink;
 mod status_bar;
 mod switcher;
+mod terminal_item;
 mod text_input;
 mod themes;
 mod title_bar;

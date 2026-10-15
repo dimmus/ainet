@@ -4,13 +4,14 @@
 //! one is active follows the `theme` setting and the system's light or dark
 //! appearance.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use ainet_critter::Rgb;
 use ainet_model::Palette;
 use ainet_model::palette::mix;
-use gpui::App;
+use gpui::{App, Global};
 use serde_json::{Map, Value, json};
 use theme::{
     ActiveTheme as _, Appearance, GlobalTheme, LoadThemes, PlayerColor, SystemAppearance, Theme,
@@ -38,12 +39,18 @@ pub fn init(user: Option<&Path>, cx: &mut App) -> Vec<String> {
     theme::init(LoadThemes::All(Box::new(Assets)), cx);
     let registry = ThemeRegistry::global(cx);
     let mut problems = load_bundled(&registry);
+    let mut palettes = Palettes::default();
+    palettes.0.insert(DEEPHARNESS.into(), Palette::default());
     if let Some(palette) = Palette::omarchy() {
         match family(OMARCHY, "Omarchy (via ainet)", &palette) {
-            Ok(family) => registry.insert_theme_families([family]),
+            Ok(family) => {
+                registry.insert_theme_families([family]);
+                palettes.0.insert(OMARCHY.into(), palette);
+            }
             Err(e) => problems.push(format!("Omarchy theme: {e}")),
         }
     }
+    cx.set_global(palettes);
     if let Some(dir) = user {
         problems.extend(load_user(dir, &registry));
     }
@@ -159,6 +166,19 @@ pub fn agent_color(id: &str, cx: &App) -> PlayerColor {
     cx.theme()
         .players()
         .color_for_participant(ainet_critter::hash(id) as u32)
+}
+
+/// The palettes ainet's own themes were made from, by theme name, for
+/// what a Zed theme has no colour for (the critters' cheeks and ink).
+#[derive(Default)]
+struct Palettes(HashMap<String, Palette>);
+
+impl Global for Palettes {}
+
+/// The palette the active theme was made from, if it is one of ainet's
+/// own (Deepharness, Omarchy).
+pub fn palette(cx: &App) -> Option<&Palette> {
+    cx.try_global::<Palettes>()?.0.get(cx.theme().name.as_ref())
 }
 
 /// Zed's built-in dark theme, which is always registered.
