@@ -4,15 +4,19 @@ Plan for adding a native GUI to ainet, built on Zed's UI stack (GPUI and
 Zed's component library) and following Zed's look and interaction model,
 while the console version (CLI + TUI) stays exactly as it is.
 
-Status: **phase 4 done** (the Fleet panel with
+Status: **phase 5 done** (the command palette over every action with
+its keys and the console's command language, the agent switcher opening
+terminals, the spec picker and Up form with its plan, restore, down,
+spawn and grow forms, the theme selector saving into settings.json, user
+themes reloading on change, and the tab switcher; see [GUI.md](GUI.md)),
+phase 6 next; phase 4 done (the Fleet panel with
 critters and the agent menu, the Agent panel, the live terminal with
 Tile all, the Inbox with approval cards, questions and the glowing
 waiting badge, Comms with threads and a compose box, the bottom dock's
 Queue, Chatroom and Events panels, the Map with rig clusters and
 messages in flight, transcripts, specs and queue items as
 report tabs; review fixes applied, with `ctrl-o`, `ctrl-shift-y` and the
-Release and Remove seat entries; see [GUI.md](GUI.md)), phase 5 next;
-phase 3 done (option A: panes, splits, docks,
+Release and Remove seat entries); phase 3 done (option A: panes, splits, docks,
 modals, toasts, the text input and the picker); phase 2 done (themes,
 fonts, settings and keymaps); phase 1 done (`crates/gui`: the GPUI
 skeleton on Zed v1.24.2); phase 0 done (`crates/model`). Written 2026-10-15 against commit `c0dbb5a`.
@@ -311,8 +315,8 @@ untouched in behaviour.
    change; `KeyBinding` hints read from it.
 
 Done, with two items of §4 left for later: user themes
-(`~/.config/ainet/themes/*.json`) are read at start-up but not reloaded on
-change (phase 5, with the theme selector), and `settings.json` has no JSON
+(`~/.config/ainet/themes/*.json`) were read at start-up but not reloaded on
+change (done in phase 5, with the theme selector), and `settings.json` has no JSON
 schema yet (phase 7: without an editor in the app, a schema only helps in
 an external editor that is told about it).
 
@@ -452,6 +456,24 @@ language; agent switcher (`ctrl-p`); spec picker + `Up` modal (cwd chooser
 via `cx.prompt_for_paths`, name, fresh seats, `--plan` preview); restore /
 snapshot picker; spawn modal (runtime, cwd, role); grow modal; theme
 selector. (Operator, `ctrl-o`, came early, in phase 4.)
+
+Done: the palette (`ctrl-shift-p`) lists the actions available where the
+keyboard is, in words with their key bindings, lately used first, and runs
+a `/command` line (or words matching no action) through
+`command::parse`, saying in its row what it will do or what is wrong;
+the agent switcher opens the terminal (`ctrl-enter` only selects); `Up`
+is a spec picker (the library through the new `Link::list` /
+`Msg::Listing`, or a typed path) then a form with Browse…, name, fresh
+seats, Plan (shown in the form) and Launch; `Restore` picks a rig, a
+snapshot and the seats to start fresh; `Down` asks with a snapshot on;
+`Spawn` (`s`) and `Grow` are forms; the forms' requests are
+`command::{up, down, restore, spawn, grow}`, which the typed commands
+now share. The theme selector previews, restores on escape and saves
+only `"theme"` into settings.json's text; user themes reload when their
+directory changes; `ctrl-tab` is Zed's tab switcher. Not yet: a picker
+for `/adopt` or `/discover`, editing a rig's edges when growing, the
+palette's history kept across sessions (phase 7), and a rig's own menu
+in the Fleet with these entries.
 
 ### Phase 6 — Performance and live terminals · ~1 week
 

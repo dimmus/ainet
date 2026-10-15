@@ -11,7 +11,7 @@ use std::sync::Arc;
 use ainet_critter::Rgb;
 use ainet_model::Palette;
 use ainet_model::palette::mix;
-use gpui::{App, Global};
+use gpui::{App, Global, SharedString, Task};
 use serde_json::{Map, Value, json};
 use theme::{
     ActiveTheme as _, Appearance, GlobalTheme, LoadThemes, PlayerColor, SystemAppearance, Theme,
@@ -19,8 +19,9 @@ use theme::{
 };
 
 use crate::assets::Assets;
-use crate::settings::ThemeSelection;
+use crate::settings::{self, ThemeSelection};
 use crate::zed_theme::{ThemeFamilyContent, refine_theme_family};
+use crate::{problems, watch};
 
 /// ainet's own dark theme: the TUI's palette.
 pub const DEEPHARNESS: &str = "Deepharness";
@@ -32,10 +33,9 @@ pub fn user_dir() -> PathBuf {
     ainet_core::paths::config_dir().join("themes")
 }
 
-/// Sets up Zed's theme system with every bundled theme family, Omarchy when
-/// it is installed, and the theme files in `user` (none in tests). Returns
-/// what could not be loaded.
-pub fn init(user: Option<&Path>, cx: &mut App) -> Vec<String> {
+/// Sets up Zed's theme system with every bundled theme family and Omarchy
+/// when it is installed. Returns what could not be loaded.
+pub fn init(cx: &mut App) -> Vec<String> {
     theme::init(LoadThemes::All(Box::new(Assets)), cx);
     let registry = ThemeRegistry::global(cx);
     let mut problems = load_bundled(&registry);
@@ -51,10 +51,49 @@ pub fn init(user: Option<&Path>, cx: &mut App) -> Vec<String> {
         }
     }
     cx.set_global(palettes);
-    if let Some(dir) = user {
-        problems.extend(load_user(dir, &registry));
-    }
     problems
+}
+
+/// The user's themes as loaded, by name, to take out again when their
+/// directory changes; and the watch on it.
+#[derive(Default)]
+struct UserThemes {
+    names: Vec<SharedString>,
+    _watch: Option<Task<()>>,
+}
+
+impl Global for UserThemes {}
+
+/// Loads the theme files in `dir` and follows it: a file added, changed or
+/// removed reloads them all, and the theme in use is applied again (so an
+/// edited theme shows at once). What does not load is in the status bar.
+pub fn follow_user(dir: PathBuf, cx: &mut App) {
+    reload_user(&dir, cx);
+    let watch = watch::watch_dir(dir.clone(), cx, move |cx| {
+        reload_user(&dir, cx);
+        settings::apply_theme(cx);
+    });
+    cx.default_global::<UserThemes>()._watch = Some(watch);
+}
+
+/// Takes the user's themes loaded before out of the registry and loads
+/// `dir`'s anew. Bundled themes a user file stood in for come back.
+pub fn reload_user(dir: &Path, cx: &mut App) {
+    let registry = ThemeRegistry::global(cx);
+    let old = std::mem::take(&mut cx.default_global::<UserThemes>().names);
+    if !old.is_empty() {
+        registry.remove_user_themes(&old);
+        load_bundled(&registry);
+        if let Some(palette) = cx.try_global::<Palettes>().and_then(|p| p.0.get(OMARCHY))
+            && let Ok(family) = family(OMARCHY, "Omarchy (via ainet)", palette)
+        {
+            registry.insert_theme_families([family]);
+        }
+    }
+    let (problems, names) = load_user(dir, &registry);
+    cx.default_global::<UserThemes>().names = names;
+    let problem = (!problems.is_empty()).then(|| problems.join("; "));
+    problems::set(problems::Source::Themes, problem, cx);
 }
 
 /// Loads every theme family under `themes/`, as Zed's
@@ -80,28 +119,32 @@ pub fn load_bundled(registry: &ThemeRegistry) -> Vec<String> {
 
 /// Loads every `*.json` in `dir`: Zed theme files, such as the ones Zed's
 /// theme extensions ship. A missing directory is fine; a file that does
-/// not parse is reported and skipped. Read once, at start-up; they come
-/// after the bundled themes, so a file can replace one by name.
-pub fn load_user(dir: &Path, registry: &ThemeRegistry) -> Vec<String> {
+/// not parse is reported and skipped. They come after the bundled themes,
+/// so a file can replace one by name. Returns what could not be loaded,
+/// and the names of the themes loaded.
+pub fn load_user(dir: &Path, registry: &ThemeRegistry) -> (Vec<String>, Vec<SharedString>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     };
     let mut paths: Vec<PathBuf> = entries
         .filter_map(|e| Some(e.ok()?.path()))
         .filter(|p| p.extension().is_some_and(|e| e == "json"))
         .collect();
     paths.sort();
-    let mut problems = Vec::new();
+    let (mut problems, mut names) = (Vec::new(), Vec::new());
     for path in paths {
         let parsed = std::fs::read(&path)
             .map_err(|e| e.to_string())
             .and_then(|bytes| parse_family(&bytes));
         match parsed {
-            Ok(family) => registry.insert_theme_families([family]),
+            Ok(family) => {
+                names.extend(family.themes.iter().map(|t| t.name.clone()));
+                registry.insert_theme_families([family]);
+            }
             Err(e) => problems.push(format!("theme {}: {e}", path.display())),
         }
     }
-    problems
+    (problems, names)
 }
 
 /// A theme family from Zed theme JSON (comments and trailing commas
@@ -397,7 +440,7 @@ mod tests {
         cx.update(|cx| {
             // `theme::init` starts on Zed's built-in One Dark, which has the
             // same name as the bundled one that replaces it in the registry.
-            init(None, cx);
+            init(cx);
             let fallback = cx.theme().clone();
             assert_eq!(fallback.name, "One Dark");
             apply(Some(&ThemeSelection::Static("One Dark".into())), cx);
@@ -418,8 +461,9 @@ mod tests {
         let problems = cx.update(|cx| {
             theme::init(LoadThemes::JustBase, cx);
             let registry = ThemeRegistry::global(cx);
-            let problems = load_user(&dir, &registry);
+            let (problems, names) = load_user(&dir, &registry);
             assert!(registry.get("Mine").is_ok());
+            assert_eq!(names, ["Mine"]);
             problems
         });
         std::fs::remove_dir_all(&dir).unwrap();
@@ -429,7 +473,73 @@ mod tests {
         );
         cx.update(|cx| {
             let registry = ThemeRegistry::global(cx);
-            assert!(load_user(&dir, &registry).is_empty(), "no directory, no problem");
+            assert!(
+                load_user(&dir, &registry).0.is_empty(),
+                "no directory, no problem"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn user_themes_reload_when_their_directory_changes(cx: &mut gpui::TestAppContext) {
+        crate::tests::init_test(cx);
+        let dir = std::env::temp_dir().join(format!("ainet-gui-themes-live-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        cx.update(|cx| follow_user(dir.clone(), cx));
+        let settle = |cx: &mut gpui::TestAppContext| {
+            cx.executor().advance_clock(watch::POLL * 2);
+            cx.run_until_parked();
+        };
+
+        // A new file: its theme is there to use.
+        std::fs::create_dir_all(&dir).unwrap();
+        let mine = |bg: &str| {
+            family_json(
+                "Mine",
+                "me",
+                &Palette::from_omarchy(&format!("background = \"{bg}\"\n")),
+            )
+        };
+        std::fs::write(dir.join("mine.json"), mine("#101418").to_string()).unwrap();
+        settle(cx);
+        cx.update(|cx| {
+            assert!(ThemeRegistry::global(cx).get("Mine").is_ok());
+            settings::reload(r#"{ "theme": "Mine" }"#, cx);
+            assert_eq!(cx.theme().name, "Mine");
+        });
+        let first = cx.update(|cx| cx.theme().colors().editor_background);
+
+        // Edited: the theme in use shows the change at once.
+        std::fs::write(dir.join("mine.json"), mine("#203040").to_string()).unwrap();
+        settle(cx);
+        let second = cx.update(|cx| cx.theme().colors().editor_background);
+        assert_ne!(first, second);
+        cx.update(|cx| assert_eq!(cx.theme().name, "Mine"));
+
+        // A broken file is reported; removed, its theme is gone.
+        std::fs::write(dir.join("broken.json"), "{ \"name\": ").unwrap();
+        settle(cx);
+        cx.update(|cx| {
+            let lines = crate::problems::lines(cx);
+            assert!(
+                lines
+                    .iter()
+                    .any(|l| l.starts_with("themes:") && l.contains("broken.json")),
+                "{lines:?}"
+            );
+        });
+        std::fs::remove_dir_all(&dir).unwrap();
+        settle(cx);
+        cx.update(|cx| {
+            assert!(ThemeRegistry::global(cx).get("Mine").is_err());
+            assert_ne!(cx.theme().name, "Mine", "back to the default");
+            assert!(
+                !crate::problems::lines(cx)
+                    .iter()
+                    .any(|l| l.starts_with("themes:"))
+            );
+            // The bundled ones are all still there.
+            assert!(ThemeRegistry::global(cx).get("One Dark").is_ok());
         });
     }
 

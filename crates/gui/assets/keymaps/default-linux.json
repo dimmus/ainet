@@ -39,7 +39,7 @@
       "ctrl-a": "inbox::Always",
       "ctrl-n": "inbox::Deny",
       "ctrl-e": "ainet::ToggleCritterSize",
-      "ctrl-tab": "pane::ActivateNextItem",
+      "ctrl-tab": "tab_switcher::Toggle",
       "ctrl-shift-tab": "pane::ActivatePreviousItem",
       "ctrl-pagedown": "pane::ActivateNextItem",
       "ctrl-pageup": "pane::ActivatePreviousItem",
@@ -62,6 +62,7 @@
       "k": "fleet::SelectPrev",
       "enter": "fleet::OpenTerminal",
       "m": "fleet::MessageAgent",
+      "s": "fleet::Spawn",
       "delete": "fleet::CloseAgent",
       "left": "fleet::CollapseRig",
       "right": "fleet::ExpandRig",
@@ -224,7 +225,25 @@
       "ctrl-n": "menu::SelectNext",
       "ctrl-p": "menu::SelectPrevious",
       "enter": "menu::Confirm",
-      "escape": "menu::Cancel"
+      "escape": "menu::Cancel",
+      "ctrl-enter": "menu::SecondaryConfirm"
+    }
+  },
+  {
+    // The tab switcher: ctrl-tab again moves down (the Workspace's key),
+    // ctrl-shift-tab up; letting go of ctrl switches.
+    "context": "TabSwitcher",
+    "bindings": {
+      "ctrl-shift-tab": "menu::SelectPrevious"
+    }
+  },
+  {
+    // The rig and agent forms: tab and shift-tab go round the fields
+    // (enter moves on too, and sends from the last).
+    "context": "Form",
+    "bindings": {
+      "tab": "form::NextField",
+      "shift-tab": "form::PreviousField"
     }
   }
 ]

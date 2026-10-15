@@ -42,7 +42,8 @@ pub trait PickerDelegate: Sized + 'static {
     ) -> Task<()>;
     /// Enter: picks the selected match (`secondary` with a modifier).
     fn confirm(&mut self, secondary: bool, window: &mut Window, cx: &mut Context<Picker<Self>>);
-    /// The picker is closing without a pick.
+    /// The picker is closing: without a pick, or after one (then after
+    /// `confirm`).
     fn dismissed(&mut self, window: &mut Window, cx: &mut Context<Picker<Self>>);
     fn render_match(
         &self,
@@ -51,6 +52,10 @@ pub trait PickerDelegate: Sized + 'static {
         window: &mut Window,
         cx: &mut Context<Picker<Self>>,
     ) -> Option<Self::ListItem>;
+    /// A strip under the list (buttons, hints), as Zed's pickers have.
+    fn render_footer(&self, _: &mut Window, _: &mut Context<Picker<Self>>) -> Option<AnyElement> {
+        None
+    }
 }
 
 pub struct Picker<D: PickerDelegate> {
@@ -59,11 +64,19 @@ pub struct Picker<D: PickerDelegate> {
     scroll_handle: UniformListScrollHandle,
     pending_update: Option<Task<()>>,
     width: Rems,
+    /// Whether the delegate has heard it is closing.
+    closed: bool,
 }
 
 impl<D: PickerDelegate> EventEmitter<DismissEvent> for Picker<D> {}
 
-impl<D: PickerDelegate> ModalView for Picker<D> {}
+impl<D: PickerDelegate> ModalView for Picker<D> {
+    /// However it closes (a click outside too), the delegate hears it.
+    fn on_before_dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        self.close(window, cx);
+        true
+    }
+}
 
 impl<D: PickerDelegate> Picker<D> {
     /// A picker listing the delegate's matches, all of one height.
@@ -83,9 +96,42 @@ impl<D: PickerDelegate> Picker<D> {
             scroll_handle: UniformListScrollHandle::new(),
             pending_update: None,
             width: rems(34.),
+            closed: false,
         };
         picker.update_matches(String::new(), window, cx);
         picker
+    }
+
+    /// As wide as `width` (34 rem by default).
+    pub fn width(mut self, width: Rems) -> Self {
+        self.width = width;
+        self
+    }
+
+    /// What is typed in the query field.
+    pub fn query(&self, cx: &App) -> String {
+        self.query.read(cx).text().to_string()
+    }
+
+    /// Puts `text` in the query field and lists its matches.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn set_query(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        // A new text is matched once it is reported edited.
+        let same = self.query.read(cx).text() == text;
+        self.query.update(cx, |input, cx| {
+            input.set_text(text, cx);
+            input.move_to_end(cx);
+        });
+        if same {
+            self.update_matches(text.to_string(), window, cx);
+        }
+    }
+
+    /// Lists the matches again, for when what the delegate lists changed
+    /// (items that arrived later).
+    pub fn refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let query = self.query(cx);
+        self.update_matches(query, window, cx);
     }
 
     fn update_matches(&mut self, query: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -116,7 +162,7 @@ impl<D: PickerDelegate> Picker<D> {
     }
 
     /// Moves the selection `delta` down, wrapping round as Zed's does.
-    fn select_relative(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn select_relative(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
         let n = self.delegate.match_count() as isize;
         if n == 0 {
             return;
@@ -143,8 +189,16 @@ impl<D: PickerDelegate> Picker<D> {
 
     /// Closes without a pick.
     pub fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.delegate.dismissed(window, cx);
+        self.close(window, cx);
         cx.emit(DismissEvent);
+    }
+
+    /// Tells the delegate, once, that the picker is closing (after a pick
+    /// too).
+    fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !std::mem::replace(&mut self.closed, true) {
+            self.delegate.dismissed(window, cx);
+        }
     }
 
     fn render_list(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -191,7 +245,7 @@ impl<D: PickerDelegate> Focusable for Picker<D> {
 }
 
 impl<D: PickerDelegate> Render for Picker<D> {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
             .key_context("Picker")
             .w(self.width)
@@ -224,6 +278,7 @@ impl<D: PickerDelegate> Render for Picker<D> {
             )
             .child(Divider::horizontal())
             .child(self.render_list(cx))
+            .children(self.delegate.render_footer(window, cx))
     }
 }
 
@@ -234,10 +289,20 @@ pub fn match_strings(
     query: String,
     cx: &App,
 ) -> Task<Vec<StringMatch>> {
+    match_strings_up_to(candidates, query, MAX_MATCHES, cx)
+}
+
+/// [`match_strings`], keeping up to `limit` matches.
+pub fn match_strings_up_to(
+    candidates: Arc<Vec<StringMatchCandidate>>,
+    query: String,
+    limit: usize,
+    cx: &App,
+) -> Task<Vec<StringMatch>> {
     let executor = cx.background_executor().clone();
     cx.background_spawn(async move {
         let cancel = AtomicBool::new(false);
-        fuzzy::match_strings(&candidates, &query, true, true, MAX_MATCHES, &cancel, executor).await
+        fuzzy::match_strings(&candidates, &query, true, true, limit, &cancel, executor).await
     })
 }
 

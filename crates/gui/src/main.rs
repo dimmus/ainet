@@ -8,6 +8,8 @@ mod agent_panel;
 mod args;
 mod assets;
 mod chatroom;
+mod command_palette;
+mod commands;
 mod comms;
 mod critter;
 mod decorations;
@@ -15,8 +17,10 @@ mod dock;
 mod events_panel;
 mod fleet;
 mod fleet_panel;
+mod form;
 mod inbox;
 mod item;
+mod json_edit;
 mod keymap;
 mod map;
 mod message;
@@ -30,18 +34,23 @@ mod queue_form;
 mod queue_panel;
 mod quit;
 mod report;
+mod rig_modals;
+mod seat_modals;
 mod settings;
 mod sink;
 mod status_bar;
 mod switcher;
+mod tab_switcher;
 mod terminal_element;
 mod terminal_input;
 mod terminal_item;
 mod terminal_layout;
 mod text_input;
+mod theme_selector;
 mod themes;
 mod title_bar;
 mod toast_layer;
+mod up_modal;
 mod watch;
 mod workspace;
 mod zed_theme;
@@ -125,12 +134,16 @@ impl ConfigFiles {
 
 /// Fonts, themes, settings, the keymap and the app-wide actions.
 fn init(files: ConfigFiles, cx: &mut App) {
-    let mut startup = themes::init(files.themes.as_deref(), cx);
+    let mut startup = themes::init(cx);
     if let Err(e) = Assets::load_fonts(cx) {
         startup.push(format!("{e:#}"));
     }
     if !startup.is_empty() {
         problems::set(problems::Source::Startup, Some(startup.join("; ")), cx);
+    }
+    // Before the settings, which may name one of them.
+    if let Some(dir) = files.themes {
+        themes::follow_user(dir, cx);
     }
     settings::init(files.settings, cx);
     keymap::init(files.keymap, cx);
@@ -207,6 +220,37 @@ mod tests {
     /// The app as `main` sets it up, without the user's config.
     pub(crate) fn init_test(cx: &mut TestAppContext) {
         cx.update(|cx| init(ConfigFiles::default(), cx));
+    }
+
+    /// A window on the demo fleet, active (so focus events fire).
+    pub(crate) fn demo_workspace(
+        cx: &mut TestAppContext,
+    ) -> (gpui::Entity<Workspace>, &mut gpui::VisualTestContext) {
+        init_test(cx);
+        let (workspace, cx) = cx.add_window_view(|window, cx| {
+            let fleet = cx.new(FleetModel::demo);
+            Workspace::new(fleet, None, window, cx)
+        });
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        (workspace, cx)
+    }
+
+    /// The requests the workspace's fleet has sent so far.
+    pub(crate) fn sent(
+        workspace: &gpui::Entity<Workspace>,
+        cx: &mut gpui::VisualTestContext,
+    ) -> Vec<ainet_core::Request> {
+        let fleet = workspace.read_with(cx, |w, _| w.fleet().clone());
+        fleet.read_with(cx, |f, _| f.sent.iter().map(|(r, _)| r.clone()).collect())
+    }
+
+    /// The open modal, if it is a `V`.
+    pub(crate) fn modal<V: modal_layer::ModalView>(
+        workspace: &gpui::Entity<Workspace>,
+        cx: &mut gpui::VisualTestContext,
+    ) -> Option<gpui::Entity<V>> {
+        workspace.read_with(cx, |w, cx| w.modal_layer().read(cx).active_modal::<V>())
     }
 
     #[test]

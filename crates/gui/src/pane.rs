@@ -85,6 +85,21 @@ impl Pane {
         self.items.iter().map(|i| i.as_ref())
     }
 
+    /// The tabs, the latest used first (the active one leads).
+    pub fn items_by_recency(&self) -> Vec<&dyn ItemHandle> {
+        let mut ids: Vec<EntityId> = self.history.iter().rev().copied().collect();
+        ids.extend(
+            self.items
+                .iter()
+                .map(|i| i.item_id())
+                .filter(|id| !self.history.contains(id)),
+        );
+        ids.iter()
+            .filter_map(|id| self.index_of(*id))
+            .map(|ix| self.items[ix].as_ref())
+            .collect()
+    }
+
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn active_index(&self) -> usize {
         self.active

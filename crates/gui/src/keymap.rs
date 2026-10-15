@@ -274,6 +274,8 @@ mod tests {
                     "QueuePanel",
                     "Map",
                     "Picker",
+                    "TabSwitcher",
+                    "Form",
                     "TextInput",
                     "TextInput && multiline",
                     "CommsCompose > TextInput",

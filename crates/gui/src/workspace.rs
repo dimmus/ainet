@@ -27,9 +27,11 @@ use crate::actions::{
     ToggleBottomDock, ToggleCritterSize, ToggleLeftDock, ToggleRightDock, ToggleSwitcher, ToggleTypingGuard,
     ToggleZoom, terminal as terminal_actions,
 };
+use crate::actions::{Down, Grow, Restore, Spawn, Up, command_palette, tab_switcher, theme_selector};
 use crate::agent_panel::AgentPanel;
 use crate::args::View;
 use crate::chatroom::ChatroomPanel;
+use crate::command_palette::CommandPalette;
 use crate::comms::CommsItem;
 use crate::decorations::client_side_decorations;
 use crate::dock::{Dock, DockPosition, DraggedDock, Panel, RESIZE_HANDLE_SIZE};
@@ -46,13 +48,18 @@ use crate::pane_group::{PaneGroup, SplitDirection};
 use crate::picker::Picker;
 use crate::queue_panel::QueuePanel;
 use crate::report::ReportItem;
+use crate::rig_modals::{RigAction, RigPicker};
+use crate::seat_modals::SpawnModal;
 use crate::settings::{self, DockSide};
 use crate::status_bar::StatusBar;
 use crate::switcher::AgentSwitcher;
+use crate::tab_switcher::TabSwitcher;
 use crate::terminal_element::Metrics as TerminalMetrics;
 use crate::terminal_item::TerminalItem;
+use crate::theme_selector::ThemeSelector;
 use crate::title_bar::TitleBar;
 use crate::toast_layer::ToastLayer;
+use crate::up_modal::SpecPicker;
 use crate::{keymap, quit};
 
 /// A dock is never dragged smaller than this.
@@ -916,11 +923,76 @@ impl Workspace {
     }
 
     fn toggle_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let fleet = self.fleet.clone();
+        let (fleet, this) = (self.fleet.clone(), cx.entity().downgrade());
         self.toggle_modal(window, cx, move |window, cx| {
-            let switcher = AgentSwitcher::new(fleet, cx);
+            let switcher = AgentSwitcher::new(fleet, this, cx);
             Picker::uniform_list(switcher, window, cx)
         });
+    }
+
+    /// The command palette, over the actions where the keyboard is.
+    fn toggle_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let fleet = self.fleet.clone();
+        let focus = window.focused(cx).unwrap_or_else(|| self.focus.clone());
+        self.toggle_modal(window, cx, move |window, cx| {
+            let palette = CommandPalette::new(fleet, focus, window, cx);
+            Picker::uniform_list(palette, window, cx).width(rems(38.))
+        });
+    }
+
+    /// The theme selector, previewing as it moves.
+    fn toggle_theme_selector(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let fleet = self.fleet.clone();
+        self.toggle_modal(window, cx, move |window, cx| {
+            let selector = ThemeSelector::new(fleet, cx);
+            Picker::uniform_list(selector, window, cx)
+        });
+    }
+
+    /// The tab switcher over the active pane's tabs; its key again, while
+    /// it is open, moves down it.
+    fn toggle_tab_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(switcher) = self.modal_layer.read(cx).active_modal::<TabSwitcher>() {
+            switcher.update(cx, |switcher, cx| switcher.cycle(1, window, cx));
+            return;
+        }
+        let pane = self.active_pane.clone();
+        self.toggle_modal(window, cx, move |window, cx| TabSwitcher::new(&pane, window, cx));
+    }
+
+    /// `fleet::Up`: the spec picker, then the form.
+    fn up(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (fleet, this) = (self.fleet.clone(), cx.entity().downgrade());
+        self.toggle_modal(window, cx, move |window, cx| {
+            SpecPicker::open(fleet, this, window, cx)
+        });
+    }
+
+    /// `fleet::Spawn`: the spawn form.
+    fn spawn(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let fleet = self.fleet.clone();
+        self.toggle_modal(window, cx, move |window, cx| SpawnModal::new(fleet, window, cx));
+    }
+
+    /// Restoring, taking down or growing a rig: the selected agent's rig
+    /// (or the only one) for taking down and growing, as the TUI's
+    /// commands; else, and always to restore, a rig picker first.
+    fn rig_action(&mut self, then: RigAction, window: &mut Window, cx: &mut Context<Self>) {
+        let rig = match then {
+            RigAction::Restore => None,
+            RigAction::Down | RigAction::Grow => self.fleet.read(cx).store.rig_for(None, None),
+        };
+        let fleet = self.fleet.clone();
+        match rig {
+            Some(rig) => then.open(fleet, rig, self, window, cx),
+            None => {
+                let this = cx.entity().downgrade();
+                self.toggle_modal(window, cx, move |window, cx| {
+                    let picker = RigPicker::new(fleet, this, then, cx);
+                    Picker::uniform_list(picker, window, cx)
+                });
+            }
+        }
     }
 
     /// Runs a pane action on the active pane, for when the keyboard is
@@ -1051,6 +1123,24 @@ impl Render for Workspace {
                 settings::set(next, cx);
             })
             .on_action(cx.listener(|this, _: &ToggleSwitcher, window, cx| this.toggle_switcher(window, cx)))
+            .on_action(cx.listener(|this, _: &command_palette::Toggle, window, cx| {
+                this.toggle_command_palette(window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &theme_selector::Toggle, window, cx| {
+                this.toggle_theme_selector(window, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &tab_switcher::Toggle, window, cx| {
+                    this.toggle_tab_switcher(window, cx)
+                }),
+            )
+            .on_action(cx.listener(|this, _: &Up, window, cx| this.up(window, cx)))
+            .on_action(cx.listener(|this, _: &Spawn, window, cx| this.spawn(window, cx)))
+            .on_action(
+                cx.listener(|this, _: &Restore, window, cx| this.rig_action(RigAction::Restore, window, cx)),
+            )
+            .on_action(cx.listener(|this, _: &Down, window, cx| this.rig_action(RigAction::Down, window, cx)))
+            .on_action(cx.listener(|this, _: &Grow, window, cx| this.rig_action(RigAction::Grow, window, cx)))
             // The selected agent's actions, from the Fleet's keys and menu.
             .on_action(cx.listener(|this, _: &TileAll, window, cx| this.tile_all(window, cx)))
             .on_action(cx.listener(|this, _: &OpenTerminal, window, cx| {
@@ -1216,7 +1306,7 @@ mod tests {
         cx.simulate_keystrokes("ctrl-shift-c");
         assert_eq!(tabs(&pane, cx).1, 1);
 
-        cx.simulate_keystrokes("ctrl-tab ctrl-tab ctrl-tab");
+        cx.simulate_keystrokes("ctrl-pagedown ctrl-pagedown ctrl-pagedown");
         assert_eq!(tabs(&pane, cx).1, 0, "wraps round");
         cx.simulate_keystrokes("ctrl-shift-tab ctrl-pageup");
         assert_eq!(tabs(&pane, cx).1, 2);
@@ -1225,7 +1315,7 @@ mod tests {
         let before = activations().read_with(cx, |p, _| p.activations);
 
         // Closing the active tab goes back to the one used before it.
-        cx.simulate_keystrokes("ctrl-tab ctrl-tab");
+        cx.simulate_keystrokes("ctrl-pagedown ctrl-pagedown");
         assert_eq!(tabs(&pane, cx).1, 0);
         cx.simulate_keystrokes("ctrl-shift-tab");
         cx.simulate_keystrokes("ctrl-w");
@@ -1422,11 +1512,53 @@ mod tests {
                 .unwrap();
             (a.id.clone(), a.name.clone())
         });
+        // The secondary pick only selects it.
         cx.simulate_keystrokes("ctrl-p");
         cx.simulate_input(&name);
-        cx.simulate_keystrokes("enter");
+        cx.simulate_keystrokes("ctrl-enter");
         assert!(!open(cx));
         fleet.read_with(cx, |f, _| assert_eq!(f.store.selected.as_ref(), Some(&target)));
+        let terminals = |cx: &mut VisualTestContext| {
+            w.read_with(cx, |w, cx| {
+                w.panes()
+                    .iter()
+                    .flat_map(|p| {
+                        p.read(cx)
+                            .items()
+                            .filter_map(|i| i.to_any().downcast::<TerminalItem>().ok())
+                            .map(|t| t.read(cx).agent_id().to_string())
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>()
+            })
+        };
+        assert!(terminals(cx).is_empty());
+        assert!(
+            cx.update(|window, _| fleet_focus.is_focused(window)),
+            "the keyboard is back"
+        );
+
+        // Picking one opens its terminal, which takes the keyboard.
+        let (other, other_name) = fleet.read_with(cx, |f, _| {
+            let a = f
+                .store
+                .agents
+                .values()
+                .find(|a| a.id != target && a.state.is_live())
+                .unwrap();
+            (a.id.clone(), a.name.clone())
+        });
+        cx.simulate_keystrokes("ctrl-p");
+        cx.simulate_input(&other_name);
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(!open(cx));
+        assert_eq!(terminals(cx), std::slice::from_ref(&other));
+        let pane = active_pane(&w, cx);
+        let terminal = pane.read_with(cx, |p, _| p.active_item().unwrap().to_any());
+        let terminal = terminal.downcast::<TerminalItem>().unwrap();
+        assert!(cx.update(|window, cx| Focusable::focus_handle(&terminal, cx).contains_focused(window, cx)));
+        fleet.read_with(cx, |f, _| assert_eq!(f.store.selected.as_ref(), Some(&other)));
     }
 
     #[gpui::test]

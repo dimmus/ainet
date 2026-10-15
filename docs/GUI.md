@@ -112,8 +112,8 @@ GPUI (the pane tree, divider dragging, the text buffer).
 | `modal_layer.rs` | one modal at a time; escape, a click outside or the modal's `DismissEvent` closes it and gives the keyboard back | `workspace::modal_layer` |
 | `toast_layer.rs` | the fleet's notices as toasts, bottom right: flashes for 5 s (the TUI's flash time), requests waiting on you for 10 s (with the agent's critter and a Review button), errors for 15 s, reports (titled) until dismissed, their text in the buffer font scrolling under a title row that keeps the close button; at most 3. The empty flash a quiet request (a key, a resize, `Interact`) gets back is dropped by `FleetModel`, which also re-renders only for batches that changed something (output alone does not) | status toasts, notifications |
 | `text_input/` | `TextInput`: one line or several (soft-wrapped, `max_lines`), IME, mouse and key selection, clipboard, word moves, undo/redo, placeholder, masking, read-only; `InputEvent::{Edited, Submitted, Cancelled, Blurred}`; `erased.rs` registers it as `ui_input`'s editor | GPUI's `examples/input.rs`, `ui_input::ErasedEditor` |
-| `picker.rs` | `Picker<D: PickerDelegate>` in the modal layer: query input, fuzzy matches with highlighted characters (Zed's `fuzzy`), `menu::*` keys | `picker` |
-| `switcher.rs` | the agent switcher (`ctrl-p`), the first picker: picking selects the agent | `file_finder` |
+| `picker.rs` | `Picker<D: PickerDelegate>` in the modal layer: query input, fuzzy matches with highlighted characters (Zed's `fuzzy`), `menu::*` keys, an optional footer; the delegate hears every dismissal (a click outside too) | `picker` |
+| `switcher.rs` | the agent switcher (`ctrl-p`): picking opens the agent's terminal (`Workspace::open_terminal`), the secondary pick (`ctrl-enter`) only selects it | `file_finder` |
 
 The workspace (`workspace.rs`) ties them together: the Fleet panel docks
 left (or right, `fleet_panel.dock`) with the Agent panel opposite and the
@@ -134,7 +134,8 @@ Keys (Linux; macOS has the `cmd` equivalents), in the keymaps:
 
 | Keys | Action |
 |---|---|
-| `ctrl-tab`, `ctrl-shift-tab`, `ctrl-pagedown`, `ctrl-pageup` | next, previous tab |
+| `ctrl-tab` | the tab switcher (the latest used first; let go of `ctrl` to switch) |
+| `ctrl-shift-tab`, `ctrl-pagedown`, `ctrl-pageup` | previous, next, previous tab |
 | `ctrl-w` | close the tab |
 | `ctrl-\`, `ctrl-alt-\` | split right, down |
 | `ctrl-alt-left/right/up/down` | the pane in that direction (Zed's are `ctrl-k` chords, which a terminal needs) |
@@ -143,9 +144,10 @@ Keys (Linux; macOS has the `cmd` equivalents), in the keymaps:
 | `ctrl-shift-c`, `ctrl-shift-i`, `ctrl-t` | Comms, Inbox, Map tabs |
 | `ctrl-y`, `ctrl-a`, `ctrl-n` | allow, always allow, deny (outside the Inbox: open it on the oldest request) |
 | `ctrl-p` | the agent switcher |
+| `ctrl-shift-p` | the command palette |
 | `ctrl-o` | the operator's terminal, to type into; with no operator running, starts one (`command::operator_up`), as the TUI's |
 | `ctrl-shift-y` | select the next agent with a request waiting on you (`Store::next_waiting_agent`, round again) |
-| `escape`, `enter`, `up`, `down`, `home`, `end` | `menu::*`, for menus, pickers and modals |
+| `escape`, `enter`, `up`, `down`, `home`, `end` | `menu::*`, for menus, pickers and modals (`ctrl-enter` in a picker: `menu::SecondaryConfirm`) |
 
 `workspace::ActivateNextPane`/`ActivatePreviousPane` and
 `pane::CloseOtherItems`/`CloseAllItems` have no default keys. In a text
@@ -160,7 +162,9 @@ Testing: the pieces have headless tests (`#[gpui::test]` with
 simulated drag, the switcher modal, toasts expiring on the test clock,
 text editing through the platform input handler, and the picker.
 `crate::tests::init_test` sets the app up as `main` does, without the
-user's config.
+user's config; `demo_workspace`, `sent` and `modal::<V>` there are the
+shared helpers for a window on the demo, the requests it sent, and the
+modal open.
 
 ## The Fleet and Agent panels (phase 4, steps 1 and 2)
 
@@ -193,8 +197,8 @@ agent so the menu shows their bindings:
 
 `up`/`down` (or `j`/`k`, and `alt-up`/`alt-down` anywhere) move the
 selection, `left`/`right` fold and unfold the selected agent's rig. Seat
-entries are disabled for agents outside a rig. `s` (spawn) is not bound
-until phase 5 brings its modal. The requests come from
+entries are disabled for agents outside a rig. `s` opens the spawn
+modal (`fleet::Spawn`). The requests come from
 `ainet_model::command::for_agent(store, id, AgentCommand)`, which the
 TUI's typed commands share.
 
@@ -300,7 +304,7 @@ Keys in a focused terminal (Linux; macOS uses `cmd-c`, `cmd-v`, `cmd-k`):
 
 `terminal::SendCtrlC` is in the menu (`ctrl-c` itself goes to the agent).
 Leaving a terminal by keyboard: `ctrl-alt-left/right/up/down` (other
-panes), `ctrl-tab` (other tabs), `alt-up`/`alt-down` (the Fleet's
+panes), `ctrl-tab` (the tab switcher), `alt-up`/`alt-down` (the Fleet's
 selection).
 
 Tests: `terminal_layout` (colours, attributes, merging, wide characters,
@@ -582,6 +586,68 @@ agent inside the map without overlaps, zoom and fit, hover, click and
 double click, dragging to pan, a message sent through the fleet flying
 and landing on the test clock, and the empty fleet.
 
+## The command palette, pickers and modals (phase 5)
+
+All in the modal layer, on the picker and the text field of phase 3:
+
+| File | What | After Zed's |
+|---|---|---|
+| `command_palette.rs` | `CommandPalette` (`ctrl-shift-p`): every action available where the keyboard was (`Window::available_actions`; `menu::*` left out), named in words as Zed's (`humanize`: `workspace::ToggleLeftDock` is "workspace: toggle left dock"), with its key binding there (`ui::KeyBinding::for_action_in`), fuzzy filtered (`normalize` lets `workspace::toggle_left` find it too), the ones run from it lately first (kept for the session). Picking one goes back where the keyboard was and runs it there. A line starting with `/`, or one that matches no action, is a console command: `commands::parse` (`command::parse`, no rig in view, so the selected agent's rig) says in its row what it does (`launching docs`) or what is wrong (the usage, `no command /x`); enter runs it, or stays open while it is wrong | `command_palette` |
+| `commands.rs` | the console's command language for the app, shared with Comms: requests through the fleet, the console's own commands (`/view`, `/allow`, `/quit`, …) as the app's actions | — |
+| `up_modal.rs` | `fleet::Up`: `SpecPicker` over the library (`Request::Specs`, through the new `FleetModel::list`), with what is typed offered as a source of its own (a spec file's path, or a name); then `UpModal`: working directory (Browse… asks the system for a folder, `cx.prompt_for_paths`), rig name, fresh seats (`dev.impl, dev.review`). **Plan** shows what would launch (`UpSpec { plan: true }`, `FleetModel::ask`) in the form; **Launch** (or enter in the last field) sends `Up`. Both are `command::up` | `file_finder`, `ui::Modal` |
+| `rig_modals.rs` | `fleet::Restore`: a `RigPicker`, then `RestoreModal`: the snapshots (`Request::SnapshotList`), the latest by default, picked by click or `up`/`down`; the rig's seats as checkboxes to start fresh; enter restores (`command::restore`). `fleet::Down`: `DownModal` asks about the selected agent's rig (or the only one; else a rig picker first), with **Take a snapshot first** checked; enter takes it down (`command::down`) | — |
+| `seat_modals.rs` | `fleet::Spawn` (`s` in the Fleet): `SpawnModal`, the runtime (claude-code, codex, terminal), working directory (Browse…) and role, as `/spawn` (`command::spawn`). `fleet::Grow`: `GrowModal` for the selected agent's rig (else a rig picker): pod, member, runtime (or the rig's default), role, as `/grow` (`command::grow`); it says so when the pod or member is missing | — |
+| `form.rs` | what the forms share: Zed's `InputField`s (over `TextInput`) where enter moves to the next field and sends from the last, `tab`/`shift-tab` round the fields (`form::NextField`, `PreviousField`, context `Form`), Browse…, the runtime buttons, the frame (`ui::Modal`, `ModalHeader`, `Section`, `ModalFooter`) | — |
+| `theme_selector.rs` | `theme_selector::Toggle`: every registered theme, dark first, the one in use ticked and selected; moving previews it on the window, escape or a click outside puts the one in use back, picking it saves it (`settings::save_theme`) | `theme_selector` |
+| `json_edit.rs` | sets one value in settings.json's text (comments, order and the rest stay as written), as Zed's `settings_json` does with tree-sitter | `settings_json` |
+| `tab_switcher.rs` | `tab_switcher::Toggle` (`ctrl-tab`): the active pane's tabs, the latest used first (`Pane::items_by_recency`), the one before selected; with `ctrl` held, `ctrl-tab` again moves down and `ctrl-shift-tab` up, and letting go switches; opened from the palette, typing filters and enter switches | `tab_switcher` |
+
+The rig forms send exactly what the TUI's typed commands send: the
+request building moved into `ainet-model` (`command::{up, down, restore,
+spawn, grow}`), which `/up`, `/plan`, `/down`, `/restore`, `/spawn` and
+`/grow` now call. Pickers that need items from ainetd ask for them with
+`FleetModel::list(request, on_listing)`: `Link::list` sends it, and the
+items come back whole as `Msg::Listing` (`Change::Listing`,
+`ainet_model::Listing::{Specs, Snapshots}`), to that caller only. The demo
+lists its two rigs as the library, two snapshots of each, and answers
+`up --plan` for its rigs (its other rig requests still say it cannot).
+
+Saving the theme: only `"theme"` changes in settings.json's text (with a
+theme per appearance, `"light"` or `"dark"` for the system's appearance
+now, as Zed's selector); a file that does not parse is left alone and the
+error shows as a toast. The settings then reload from the new text.
+
+Keys (Linux; `cmd` for `ctrl` on macOS where Zed has it):
+
+| Keys | Where | Action |
+|---|---|---|
+| `ctrl-shift-p` | anywhere | `command_palette::Toggle` |
+| `ctrl-tab` | the workspace | `tab_switcher::Toggle` (again while open: down) |
+| `ctrl-shift-tab` | the tab switcher (context `TabSwitcher`) | up |
+| `ctrl-enter` | a picker | `menu::SecondaryConfirm` (the switcher: only select) |
+| `s` | the Fleet | `fleet::Spawn` |
+| `tab`, `shift-tab` | a form (context `Form`) | `form::NextField`, `PreviousField` |
+| `enter` | a form's field | the next field; the last sends |
+
+`fleet::Up`, `Down`, `Restore`, `Grow` and `theme_selector::Toggle` have
+no default keys: the palette has them.
+
+Tests: pure ones for action names, queries, seat lists and editing
+settings.json's text (in place, a missing key, comments and strings
+hiding keys, what it cannot edit); headless ones for the palette (the
+actions with their bindings, the one picked run where the keyboard was,
+lately used first, a usage error kept in the row, `/down` and `/view
+inbox` run), the switcher opening a terminal (`ctrl-enter` only
+selecting), the Up flow against the demo (the library listed, Browse…,
+the plan shown, the `UpSpec` for plan and launch, a typed name),
+restore (rig, snapshot by keys, a fresh seat), down (escape, snapshot
+on, off, the rig picker with nobody selected), spawn by `s`, grow (the
+missing pod said, then the seat), the theme selector (preview, escape
+and a click outside restoring, the pick saved into the file's text) and
+the tab switcher (by recency, `ctrl` held and let go, typing). In
+`ainet-model`: the forms' commands are the typed ones, listings by token,
+the demo's plan.
+
 ## Upgrading Zed
 
 1. Pick the release: the newest `vX.Y.Z` tag (not `-pre`) on
@@ -648,13 +714,16 @@ colours).
 
 Your own themes: put Zed theme files (the JSON a Zed theme extension ships
 in its `themes/` directory) in `~/.config/ainet/themes/*.json` and name a
-theme from them in `theme`. They are read at start-up, after the bundled
-ones, so a file can replace a bundled theme of the same name; files that do
-not parse are listed in the status bar.
+theme from them in `theme`, or pick one in the theme selector. They are
+read after the bundled ones, so a file can replace a bundled theme of the
+same name, and read again whenever a file there is added, changed or
+removed (the directory is checked every 750 ms, as settings.json): the
+theme in use shows an edit at once. Files that do not parse are listed in
+the status bar (`themes:`).
 
 Keys: `crates/gui/assets/keymaps/default-{linux,macos}.json`, in Zed's
 format, with the contexts `Workspace`, `FleetPanel`, `Terminal`, `Inbox`,
-`Comms`, `CommsCompose`, `QueuePanel`, `Map`, `Picker` and `TextInput` (see "The workspace pieces" for the
+`Comms`, `CommsCompose`, `QueuePanel`, `Map`, `Picker`, `TabSwitcher`, `Form` and `TextInput` (see "The workspace pieces" for the
 pane, dock and text keys). `~/.config/ainet/keymap.json` adds to them and
 overrides them (`null` unbinds), and reloads on save; bindings it cannot
 read are listed in the status bar and the rest apply. `ctrl-alt-,` opens

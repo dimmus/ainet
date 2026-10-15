@@ -23,7 +23,7 @@ use std::time::Duration;
 use ainet_core::Request;
 use ainet_core::client::Client;
 use ainet_model::journal::{self, Happening};
-use ainet_model::{Backend, Change, Command, Link, Msg, Pump, Store, Tally, daemon};
+use ainet_model::{Backend, Change, Command, Link, Listing, Msg, Pump, Store, Tally, daemon};
 use futures::StreamExt;
 use futures::channel::mpsc::UnboundedReceiver;
 use gpui::{App, AppContext as _, AsyncApp, Context, EntityId, EventEmitter, Subscription, Task, WeakEntity};
@@ -47,6 +47,9 @@ pub const KEEP_EVENTS: usize = 500;
 /// What hears the reply to a request asked with [`FleetModel::ask`]: its
 /// text, or the error.
 pub type OnReply = Box<dyn FnOnce(Result<String, String>, &mut App)>;
+
+/// What hears the items of a request asked with [`FleetModel::list`].
+pub type OnListing = Box<dyn FnOnce(Result<Listing, String>, &mut App)>;
 
 /// A request whose reply is long text to read whole (a transcript, a
 /// spec, a queue item): the workspace opens it as a report tab and asks
@@ -159,6 +162,8 @@ pub struct FleetModel {
     telling: Option<Task<()>>,
     /// Who hears the replies on their way, by token.
     asked: HashMap<u64, OnReply>,
+    /// Who hears the listings on their way, by token.
+    listed: HashMap<u64, OnListing>,
     next_token: u64,
     /// What happened, the latest last, at most [`KEEP_EVENTS`].
     events: VecDeque<Rc<Happening>>,
@@ -243,6 +248,7 @@ impl FleetModel {
             told: HashSet::new(),
             telling: None,
             asked: HashMap::new(),
+            listed: HashMap::new(),
             next_token: 0,
             events: VecDeque::new(),
             events_logged: 0,
@@ -390,6 +396,25 @@ impl FleetModel {
         self.next_token += 1;
         self.asked.insert(self.next_token, Box::new(on_reply));
         link.ask(req, self.next_token);
+    }
+
+    /// Sends a request that lists things to pick from (the spec library, a
+    /// rig's snapshots); `on_listing` hears the items, or the error.
+    /// Nothing else hears it.
+    pub fn list(
+        &mut self,
+        req: Request,
+        on_listing: impl FnOnce(Result<Listing, String>, &mut App) + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        #[cfg(test)]
+        self.sent.push((req.clone(), String::new()));
+        let Some(link) = &mut self.link else {
+            return cx.defer(move |cx| on_listing(Err("ainetd is not running yet".into()), cx));
+        };
+        self.next_token += 1;
+        self.listed.insert(self.next_token, Box::new(on_listing));
+        link.list(req, self.next_token);
     }
 
     /// A request only ainetd acts on (keystrokes, resizes), sent quietly.
@@ -583,6 +608,11 @@ impl FleetModel {
                 Change::Reply { token, reply } => {
                     if let Some(on_reply) = self.asked.remove(&token) {
                         on_reply(reply, cx);
+                    }
+                }
+                Change::Listing { token, listing } => {
+                    if let Some(on_listing) = self.listed.remove(&token) {
+                        on_listing(listing, cx);
                     }
                 }
                 Change::Connected(up) => {

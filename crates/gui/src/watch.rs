@@ -1,5 +1,6 @@
-//! Following a config file without a file-system watcher: a cheap check of
-//! its modification time and size every [`POLL`], off the UI thread.
+//! Following a config file, or a directory of them, without a file-system
+//! watcher: a cheap check of modification times and sizes every [`POLL`],
+//! off the UI thread.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -48,9 +49,67 @@ pub fn watch(
     })
 }
 
+/// What tells one version of a directory's `.json` files from the next.
+type DirStamp = Vec<(PathBuf, Stamp)>;
+
+fn dir_stamp(dir: &Path) -> DirStamp {
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| Some(e.ok()?.path()))
+        .filter(|p| p.extension().is_some_and(|e| e == "json"))
+        .collect();
+    files.sort();
+    files
+        .into_iter()
+        .map(|p| (stamp(&p), p))
+        .map(|(s, p)| (p, s))
+        .collect()
+}
+
+/// Calls `on_change` whenever a `.json` file in `dir` is added, changed or
+/// removed after now (the directory may come and go too). Stops when the
+/// task is dropped.
+pub fn watch_dir(dir: PathBuf, cx: &mut App, mut on_change: impl FnMut(&mut App) + 'static) -> Task<()> {
+    let mut last = dir_stamp(&dir);
+    cx.spawn(async move |cx| {
+        loop {
+            cx.background_executor().timer(POLL).await;
+            let dir = dir.clone();
+            let now = cx
+                .background_executor()
+                .spawn(async move { dir_stamp(&dir) })
+                .await;
+            if now != last {
+                last = now;
+                cx.update(|cx| on_change(cx));
+            }
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_directory_changes_with_its_json_files() {
+        let dir = std::env::temp_dir().join(format!("ainet-gui-watch-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let gone = dir_stamp(&dir);
+        assert!(gone.is_empty());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("notes.txt"), "not a theme").unwrap();
+        assert_eq!(dir_stamp(&dir), gone, "only .json files count");
+        std::fs::write(dir.join("a.json"), "{}").unwrap();
+        let one = dir_stamp(&dir);
+        assert_eq!(one.len(), 1);
+        std::fs::write(dir.join("a.json"), "{ \"name\": 1 }").unwrap();
+        assert_ne!(dir_stamp(&dir), one, "an edit");
+        std::fs::remove_file(dir.join("a.json")).unwrap();
+        assert!(dir_stamp(&dir).is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn notices_edits_and_deletion() {

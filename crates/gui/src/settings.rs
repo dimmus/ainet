@@ -11,9 +11,9 @@ use std::path::PathBuf;
 
 use gpui::{App, Font, Global, Pixels, SharedString, Task, font, px};
 use serde::Deserialize;
-use theme::{Appearance, ThemeSettingsProvider, UiDensity};
+use theme::{Appearance, SystemAppearance, ThemeSettingsProvider, UiDensity};
 
-use crate::{problems, themes, watch};
+use crate::{json_edit, problems, themes, watch};
 
 /// Where the settings live: `$XDG_CONFIG_HOME/ainet/settings.json`.
 pub fn settings_file() -> PathBuf {
@@ -276,6 +276,8 @@ pub struct AppSettings {
     pub settings: Settings,
     ui_font: Font,
     buffer_font: Font,
+    /// The file they come from and are saved to (none in tests).
+    file: Option<PathBuf>,
     _watch: Option<Task<()>>,
 }
 
@@ -287,6 +289,7 @@ impl AppSettings {
             ui_font: font(settings.ui_font_family.clone()),
             buffer_font: font(settings.terminal.font_family.clone()),
             settings,
+            file: None,
             _watch: None,
         }
     }
@@ -309,12 +312,64 @@ pub fn init(file: Option<PathBuf>, cx: &mut App) {
             Settings::default()
         }
     };
-    cx.set_global(AppSettings::new(settings));
+    let mut app_settings = AppSettings::new(settings);
+    app_settings.file = file.clone();
+    cx.set_global(app_settings);
     theme::set_theme_settings_provider(Box::new(Provider), cx);
     apply_theme(cx);
     if let Some(file) = file {
         let task = watch::watch(file, cx, |text, cx| reload(text.as_deref().unwrap_or(""), cx));
         cx.global_mut::<AppSettings>()._watch = Some(task);
+    }
+}
+
+/// Saves the settings to `file` from now on, without following it (tests).
+#[cfg(test)]
+pub fn save_to(file: PathBuf, cx: &mut App) {
+    cx.global_mut::<AppSettings>().file = Some(file);
+}
+
+/// Makes `name` the theme, in settings.json too: as Zed's theme selector,
+/// only the `"theme"` value changes in the file's text (with a theme per
+/// appearance, the one for the system's appearance now), and the rest
+/// stays as written.
+pub fn save_theme(name: &str, cx: &mut App) -> Result<(), String> {
+    let file = cx.global::<AppSettings>().file.clone();
+    let text = file
+        .as_ref()
+        .and_then(|f| std::fs::read_to_string(f).ok())
+        .unwrap_or_default();
+    let text = with_theme(&text, name, SystemAppearance::global(cx).0)?;
+    if let Some(file) = &file {
+        file.parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| std::fs::write(file, &text))
+            .map_err(|e| format!("cannot save {}: {e}", file.display()))?;
+        reload(&text, cx);
+    } else {
+        let mut next = get(cx).clone();
+        next.theme = parse(&text)?.theme;
+        set(next, cx);
+    }
+    Ok(())
+}
+
+/// settings.json's text with `name` as its theme for `appearance`.
+pub fn with_theme(text: &str, name: &str, appearance: Appearance) -> Result<String, String> {
+    let current = parse(text).map_err(|e| format!("settings.json does not parse: {e}"))?;
+    let path: &[&str] = match &current.theme {
+        Some(ThemeSelection::Dynamic { mode, .. }) => match (mode, appearance) {
+            (ThemeMode::Light, _) | (ThemeMode::System, Appearance::Light) => &["theme", "light"],
+            _ => &["theme", "dark"],
+        },
+        _ => &["theme"],
+    };
+    let value = serde_json::to_string(name).map_err(|e| e.to_string())?;
+    let edited = json_edit::set(text, path, &value).map_err(|e| format!("settings.json: {e}"))?;
+    // What was written must read back as asked.
+    match parse(&edited)?.theme {
+        Some(theme) if theme.name(appearance) == name => Ok(edited),
+        _ => Err("settings.json: the theme could not be set".into()),
     }
 }
 
@@ -336,8 +391,10 @@ pub fn set(settings: Settings, cx: &mut App) {
         return;
     }
     let watch = cx.global_mut::<AppSettings>()._watch.take();
+    let file = cx.global_mut::<AppSettings>().file.take();
     let mut next = AppSettings::new(settings);
     next._watch = watch;
+    next.file = file;
     cx.set_global(next);
     apply_theme(cx);
     cx.refresh_windows();
@@ -494,6 +551,36 @@ mod tests {
             .theme
             .unwrap();
         assert_eq!(dark.name(Appearance::Light), "Ayu Dark");
+    }
+
+    #[test]
+    fn the_theme_is_saved_into_the_text_as_written() {
+        let text = "// Mine.\n{\n  \"ui_font_size\": 15, // big\n  \"theme\": \"One Dark\",\n}\n";
+        let saved = with_theme(text, "Ayu Light", Appearance::Dark).unwrap();
+        assert_eq!(saved, text.replace("One Dark", "Ayu Light"));
+        assert_eq!(
+            with_theme("", "Ayu Light", Appearance::Dark).unwrap(),
+            "{\n  \"theme\": \"Ayu Light\"\n}\n"
+        );
+        assert_eq!(
+            parse(&with_theme(TEMPLATE, "One Light", Appearance::Dark).unwrap())
+                .unwrap()
+                .theme,
+            Some(ThemeSelection::Static("One Light".into()))
+        );
+        // A theme per appearance: the one in use now changes.
+        let dynamic = r#"{ "theme": { "mode": "system", "light": "One Light", "dark": "One Dark" } }"#;
+        let light = with_theme(dynamic, "Ayu Light", Appearance::Light).unwrap();
+        assert!(
+            light.contains(r#""light": "Ayu Light", "dark": "One Dark""#),
+            "{light}"
+        );
+        let dark = with_theme(dynamic, "Ayu Dark", Appearance::Dark).unwrap();
+        assert!(
+            dark.contains(r#""light": "One Light", "dark": "Ayu Dark""#),
+            "{dark}"
+        );
+        assert!(with_theme("{ \"theme\": ", "X", Appearance::Dark).is_err());
     }
 
     #[test]

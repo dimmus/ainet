@@ -15,20 +15,17 @@
 use std::collections::HashSet;
 use std::ops::Range;
 
-use ainet_core::{Agent, Decision, Message};
+use ainet_core::{Agent, Message};
 use ainet_model::describe::age;
 use ainet_model::{Command, Entry, Store, command};
 use gpui::{
-    Action, ClickEvent, Entity, EventEmitter, FocusHandle, Focusable, FollowMode, FontWeight, HighlightStyle,
-    Hsla, ListAlignment, ListState, MouseButton, Stateful, StyledText, Subscription, list,
+    ClickEvent, Entity, EventEmitter, FocusHandle, Focusable, FollowMode, FontWeight, HighlightStyle, Hsla,
+    ListAlignment, ListState, MouseButton, Stateful, StyledText, Subscription, list,
 };
 use ui::{Chip, Disclosure, IndentGuideColors, Indicator, Tooltip, WithScrollbar, prelude::*};
 
-use crate::actions::{
-    Allow, Always, Complete, Compose, Deny, OpenComms, OpenInbox, OpenMap, Quit, Reply, TileAll,
-    ToggleCritterSize,
-};
-use crate::args::View;
+use crate::actions::{Complete, Compose, Reply};
+use crate::commands;
 use crate::critter::{self, Critter};
 use crate::fleet::{FleetModel, Tick};
 use crate::item::{Item, ItemEvent};
@@ -457,14 +454,7 @@ impl CommsItem {
         let selected = self.selected.and_then(|row| self.entry(row, cx));
         let store = &self.fleet.read(cx).store;
         let cmd = match text.strip_prefix('/') {
-            Some(cmd) => command::parse(
-                &command::Context {
-                    store,
-                    view_rig: None,
-                    inbox_item: None,
-                },
-                cmd,
-            ),
+            Some(cmd) => commands::parse(store, cmd),
             None => command::comms(store, selected.as_ref(), &text),
         };
         // A mistake stays in the box to be put right.
@@ -482,32 +472,7 @@ impl CommsItem {
     /// Carries out a command typed in the box; the console's own (views,
     /// answers, quitting) go to the app's actions.
     fn run(&mut self, cmd: Command, window: &mut Window, cx: &mut Context<Self>) {
-        let action: Box<dyn Action> = match cmd {
-            Command::Request(..) | Command::Error(_) | Command::Nothing => {
-                self.fleet.update(cx, |fleet, cx| fleet.run(cmd, cx));
-                return;
-            }
-            Command::Answer(Decision::Allow) => Box::new(Allow),
-            Command::Answer(Decision::Always) => Box::new(Always),
-            Command::Answer(Decision::Deny) => Box::new(Deny),
-            Command::Quit => Box::new(Quit),
-            Command::Critters => Box::new(ToggleCritterSize),
-            Command::View(view) => match View::parse(&view) {
-                Ok(View::Comms) => Box::new(OpenComms),
-                Ok(View::Inbox) => Box::new(OpenInbox),
-                Ok(View::Map) => Box::new(OpenMap),
-                Ok(View::Terminals { .. }) => Box::new(TileAll),
-                _ => return self.console_only(cx),
-            },
-            Command::Help | Command::Cols(_) => return self.console_only(cx),
-        };
-        window.dispatch_action(action, cx);
-    }
-
-    fn console_only(&mut self, cx: &mut Context<Self>) {
-        let text = "that is the console's command; here the keys and menus do it";
-        self.fleet
-            .update(cx, |fleet, cx| fleet.show(text.into(), false, cx));
+        commands::run(&self.fleet, cmd, window, cx);
     }
 
     /// A sender's avatar: the agent's critter, or you.

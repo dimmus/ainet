@@ -282,10 +282,46 @@ pub mod terminal {
     );
 }
 
+/// The command palette's action, in a module of its own as each
+/// picker's `Toggle`.
+pub mod command_palette {
+    gpui::actions!(
+        command_palette,
+        [
+            /// Opens the command palette.
+            Toggle
+        ]
+    );
+}
+
+/// The theme selector's action.
+pub mod theme_selector {
+    gpui::actions!(
+        theme_selector,
+        [
+            /// Opens the theme selector.
+            Toggle
+        ]
+    );
+}
+
+/// The tab switcher's action.
+pub mod tab_switcher {
+    gpui::actions!(
+        tab_switcher,
+        [
+            /// Switches to another tab of the pane, the latest used first.
+            Toggle
+        ]
+    );
+}
+
 actions!(
-    command_palette,
+    form,
     [
-        /// Opens the command palette.
-        Toggle,
+        /// Moves to the form's next field.
+        NextField,
+        /// Moves to the form's previous field.
+        PreviousField,
     ]
 );

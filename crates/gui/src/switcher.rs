@@ -1,20 +1,23 @@
 //! The agent switcher (`ctrl-p`, as Zed's file finder): a picker over the
 //! fleet's agents by name, seat, role and rig, in Fleet order. Picking one
-//! selects it in the Fleet; phase 5 makes it open the agent's terminal.
+//! opens its terminal (and so selects it in the Fleet); the secondary pick
+//! (`ctrl-enter`) only selects it.
 
 use std::sync::Arc;
 
 use ainet_model::Row;
 use fuzzy::{StringMatch, StringMatchCandidate};
-use gpui::{DismissEvent, Entity, Task};
+use gpui::{DismissEvent, Entity, Task, WeakEntity};
 use ui::{HighlightedLabel, Indicator, ListItem, ListItemSpacing, prelude::*};
 
 use crate::fleet::FleetModel;
 use crate::panels::state_color;
 use crate::picker::{Picker, PickerDelegate, match_strings};
+use crate::workspace::Workspace;
 
 pub struct AgentSwitcher {
     fleet: Entity<FleetModel>,
+    workspace: WeakEntity<Workspace>,
     /// Agent ids, in Fleet order; candidate ids index this.
     ids: Vec<String>,
     candidates: Arc<Vec<StringMatchCandidate>>,
@@ -23,7 +26,7 @@ pub struct AgentSwitcher {
 }
 
 impl AgentSwitcher {
-    pub fn new(fleet: Entity<FleetModel>, cx: &App) -> Self {
+    pub fn new(fleet: Entity<FleetModel>, workspace: WeakEntity<Workspace>, cx: &App) -> Self {
         let store = &fleet.read(cx).store;
         let mut ids = Vec::new();
         let mut candidates = Vec::new();
@@ -46,6 +49,7 @@ impl AgentSwitcher {
         }
         AgentSwitcher {
             fleet,
+            workspace,
             ids,
             candidates: Arc::new(candidates),
             matches: Vec::new(),
@@ -92,16 +96,22 @@ impl PickerDelegate for AgentSwitcher {
         })
     }
 
-    fn confirm(&mut self, _: bool, _: &mut Window, cx: &mut Context<Picker<Self>>) {
-        if let Some(id) = self
+    fn confirm(&mut self, secondary: bool, window: &mut Window, cx: &mut Context<Picker<Self>>) {
+        let picked = self
             .matches
             .get(self.selected)
             .and_then(|m| self.ids.get(m.candidate_id))
-        {
-            let id = id.clone();
-            self.fleet.update(cx, |fleet, cx| fleet.select(&id, cx));
-        }
+            .cloned();
         cx.emit(DismissEvent);
+        let Some(id) = picked else { return };
+        self.fleet.update(cx, |fleet, cx| fleet.select(&id, cx));
+        if !secondary {
+            // Once the switcher is gone, so the terminal keeps the keyboard.
+            let workspace = self.workspace.clone();
+            window.defer(cx, move |window, cx| {
+                let _ = workspace.update(cx, |w, cx| w.open_terminal(&id, window, cx));
+            });
+        }
     }
 
     fn dismissed(&mut self, _: &mut Window, _: &mut Context<Picker<Self>>) {}

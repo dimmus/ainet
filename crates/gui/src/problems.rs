@@ -11,6 +11,8 @@ pub enum Source {
     Startup,
     Settings,
     Theme,
+    /// The user's theme files.
+    Themes,
     Keymap,
 }
 
@@ -20,6 +22,7 @@ impl Source {
             Source::Startup => "ainet-gui",
             Source::Settings => "settings.json",
             Source::Theme => "theme",
+            Source::Themes => "themes",
             Source::Keymap => "keymap.json",
         }
     }

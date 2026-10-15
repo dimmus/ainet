@@ -101,6 +101,11 @@ impl ModalLayer {
         true
     }
 
+    /// The open modal, if it is a `V`.
+    pub fn active_modal<V: ModalView>(&self) -> Option<Entity<V>> {
+        self.active.as_ref()?.modal.view().downcast::<V>().ok()
+    }
+
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn has_active_modal(&self) -> bool {
         self.active.is_some()
