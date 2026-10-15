@@ -207,10 +207,7 @@ pub fn parse(cx: &Context, cmd: &str) -> Command {
             _ => Command::error("/shrink <pod>"),
         },
         "remove" => match arg(1) {
-            Some(seat) => req(
-                Request::RemoveSeat { seat: seat.into() },
-                format!("removed {seat}"),
-            ),
+            Some(seat) => remove_seat(seat),
             None => Command::error("/remove <seat>"),
         },
         "launch" | "relaunch" => match arg(1)
@@ -341,6 +338,20 @@ pub fn launch(seat: &str, fresh: bool) -> Command {
     )
 }
 
+/// Takes a seat out of its rig (`/remove`): its agent stops.
+pub fn remove_seat(seat: &str) -> Command {
+    request(
+        Request::RemoveSeat { seat: seat.into() },
+        format!("removed {seat}"),
+    )
+}
+
+/// Lets a seat go without stopping its process (`ainet release`): the
+/// agent runs on outside the rig.
+pub fn release(seat: &str) -> Command {
+    request(Request::Release { seat: seat.into() }, format!("{seat} released"))
+}
+
 /// Nudges a seat's agent to carry on (`/continue`).
 pub fn nudge(seat: &str) -> Command {
     request(
@@ -401,6 +412,10 @@ pub enum AgentCommand {
     Guard(bool),
     /// Its terminal's last lines.
     Capture,
+    /// Let its seat go; the process runs on.
+    Release,
+    /// Take its seat out of the rig.
+    Remove,
 }
 
 /// The request for `cmd` on agent `id`: what the TUI's command for it
@@ -422,6 +437,8 @@ pub fn for_agent(store: &Store, id: &str, cmd: AgentCommand) -> Command {
         AgentCommand::Close => close(a),
         AgentCommand::Guard(on) => seated(&|s| guard(s, on)),
         AgentCommand::Capture => capture(a.id.clone()),
+        AgentCommand::Release => seated(&release),
+        AgentCommand::Remove => seated(&remove_seat),
     }
 }
 
@@ -499,21 +516,30 @@ pub fn message(store: &Store, line: &str, default: Option<&str>) -> Command {
         None => (default.and_then(|i| store.agents.get(i)), line.to_string()),
     };
     match target {
-        Some(a) if !text.is_empty() => Command::Request(
-            Box::new(Request::Message {
-                from: None,
-                to: vec![a.id.clone()],
-                rig: None,
-                pod: None,
-                body: text,
-                reply_to: None,
-                force: true,
-            }),
-            format!("sent to {}", a.label()),
-        ),
-        Some(_) => Command::error("nothing to send"),
+        Some(a) => message_to(a, text),
         None => Command::error("no such agent"),
     }
+}
+
+/// `body` for agent `a`, as [`message`] sends it, but to `a` whatever the
+/// text says: for a front end where the recipient is already chosen, so a
+/// leading `@word` is part of the message.
+pub fn message_to(a: &Agent, body: String) -> Command {
+    if body.is_empty() {
+        return Command::error("nothing to send");
+    }
+    Command::Request(
+        Box::new(Request::Message {
+            from: None,
+            to: vec![a.id.clone()],
+            rig: None,
+            pod: None,
+            body,
+            reply_to: None,
+            force: true,
+        }),
+        format!("sent to {}", a.label()),
+    )
 }
 
 /// Starts the operator rig in the current directory.
@@ -554,7 +580,9 @@ mod tests {
 
     use ainet_core::{Decision, InboxKind, Request, Runtime};
 
-    use super::{AgentCommand, Command, Context, answer_choices, complete, for_agent, message, parse};
+    use super::{
+        AgentCommand, Command, Context, answer_choices, complete, for_agent, message, message_to, parse,
+    };
     use crate::demo::Demo;
     use crate::link::{Backend, Link, Msg};
     use crate::store::Store;
@@ -690,6 +718,20 @@ mod tests {
         assert!(matches!(message(&store, "@orch-lead", None), Command::Error(e) if e == "nothing to send"));
         assert!(matches!(message(&store, "@nobody hi", None), Command::Error(e) if e == "no such agent"));
         assert!(matches!(message(&store, "hi", None), Command::Error(e) if e == "no such agent"));
+
+        // With the recipient chosen, a leading `@word` is just text.
+        let ui = store.find_agent("dev-ui@docs").unwrap();
+        assert_ne!(ui.id, lead.id);
+        match sends(message_to(&lead, "@dev-ui can you check this".into())) {
+            (Request::Message { to, body, force, .. }, ok) => {
+                assert_eq!(to, std::slice::from_ref(&lead.id));
+                assert_eq!(body, "@dev-ui can you check this");
+                assert!(force);
+                assert_eq!(ok, format!("sent to {}", lead.label()));
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(message_to(&lead, String::new()), Command::Error(e) if e == "nothing to send"));
     }
 
     #[test]
@@ -706,6 +748,7 @@ mod tests {
             (AgentCommand::Capture, "capture".to_string()),
             (AgentCommand::Guard(true), format!("guard {seat} on")),
             (AgentCommand::Guard(false), format!("guard {seat} off")),
+            (AgentCommand::Remove, format!("remove {seat}")),
         ] {
             let (menu, menu_ok) = sends(for_agent(&store, &lead.id, cmd));
             let (typed, typed_ok) = sends(run(&store, None, &line));
@@ -728,12 +771,26 @@ mod tests {
             other => panic!("{other:?}"),
         }
 
+        match sends(for_agent(&store, &lead.id, AgentCommand::Release)) {
+            (Request::Release { seat: s }, ok) => {
+                assert_eq!(s, seat);
+                assert_eq!(ok, format!("{seat} released"));
+            }
+            other => panic!("{other:?}"),
+        }
+
         // Seat commands need a seat.
         let loose = store.agents.values().find(|a| a.seat.is_none()).unwrap().clone();
         assert!(matches!(
             for_agent(&store, &loose.id, AgentCommand::Continue),
             Command::Error(e) if e.contains("not in a rig seat")
         ));
+        for cmd in [AgentCommand::Release, AgentCommand::Remove] {
+            assert!(matches!(
+                for_agent(&store, &loose.id, cmd),
+                Command::Error(e) if e.contains("not in a rig seat")
+            ));
+        }
         assert!(matches!(
             for_agent(&store, &loose.id, AgentCommand::Close),
             Command::Request(..)

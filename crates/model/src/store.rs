@@ -607,6 +607,26 @@ impl Store {
             .or_else(|| self.inbox.iter().position(|i| i.waiting))
     }
 
+    /// The next agent with a request waiting on you after the selected
+    /// one, in the inbox's order and round again: where a "next waiting"
+    /// key moves the Fleet's selection.
+    pub fn next_waiting_agent(&self) -> Option<&str> {
+        let mut agents: Vec<&str> = Vec::new();
+        for item in self.inbox.iter().filter(|i| i.waiting) {
+            if self.agents.contains_key(&item.agent) && !agents.contains(&item.agent.as_str()) {
+                agents.push(&item.agent);
+            }
+        }
+        let at = self
+            .selected
+            .as_deref()
+            .and_then(|s| agents.iter().position(|a| *a == s));
+        match at {
+            Some(at) => agents.get((at + 1) % agents.len()).copied(),
+            None => agents.first().copied(),
+        }
+    }
+
     /// What to say when inbox item `index` asks for you: its agent's name
     /// and its summary.
     pub fn inbox_alert(&self, index: usize) -> Option<String> {
@@ -932,6 +952,31 @@ mod tests {
 
         event(&mut store, Event::InboxResolved { id: 900 });
         assert!(!store.inbox.iter().any(|i| i.id == 900 && i.waiting));
+    }
+
+    #[test]
+    fn the_next_waiting_agent_goes_round_those_waiting() {
+        let mut store = demo();
+        for i in store.inbox.iter_mut() {
+            i.waiting = false;
+        }
+        assert_eq!(store.next_waiting_agent(), None);
+        let lead = by_seat(&store, "orch-lead@docs").id.clone();
+        let ui = by_seat(&store, "dev-ui@docs").id.clone();
+        for (id, agent) in [(900, &ui), (901, &lead), (902, &ui)] {
+            event(
+                &mut store,
+                Event::Inbox {
+                    item: item(id, agent, InboxKind::Permission, true),
+                },
+            );
+        }
+        store.selected = None;
+        assert_eq!(store.next_waiting_agent(), Some(ui.as_str()));
+        store.selected = Some(ui.clone());
+        assert_eq!(store.next_waiting_agent(), Some(lead.as_str()));
+        store.selected = Some(lead.clone());
+        assert_eq!(store.next_waiting_agent(), Some(ui.as_str()), "round again");
     }
 
     #[test]
