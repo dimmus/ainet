@@ -607,6 +607,18 @@ impl Store {
             .or_else(|| self.inbox.iter().position(|i| i.waiting))
     }
 
+    /// What to say when inbox item `index` asks for you: its agent's name
+    /// and its summary.
+    pub fn inbox_alert(&self, index: usize) -> Option<String> {
+        let item = self.inbox.get(index)?;
+        let name = self
+            .agents
+            .get(&item.agent)
+            .map(|a| a.name.clone())
+            .unwrap_or_default();
+        Some(format!("{name}: {}", item.summary))
+    }
+
     /// The request that answers `item` with `decision`, and what to say once
     /// it is done; or why it cannot be answered that way.
     pub fn answer(&self, item: &InboxItem, decision: Decision) -> Result<(Request, String), String> {
@@ -905,6 +917,9 @@ mod tests {
                 alert: true
             }
         );
+        let name = store.agents[&lead].name.clone();
+        assert_eq!(store.inbox_alert(before), Some(format!("{name}: Bash: ls")));
+        assert_eq!(store.inbox_alert(before + 1), None);
         let done = event(
             &mut store,
             Event::Inbox {

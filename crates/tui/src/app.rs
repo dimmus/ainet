@@ -252,15 +252,9 @@ impl App {
                     );
                     self.fx
                         .add_unique_effect("inbox-tab", glow.with_area(self.areas.inbox_tab));
-                    let item = &self.store.inbox[index];
-                    let name = self
-                        .store
-                        .agents
-                        .get(&item.agent)
-                        .map(|a| a.name.clone())
-                        .unwrap_or_default();
-                    let text = format!("{name}: {}", item.summary);
-                    self.flash(text, false);
+                    if let Some(text) = self.store.inbox_alert(index) {
+                        self.flash(text, false);
+                    }
                 }
                 if self.inbox_state.selected().is_none() {
                     self.select_waiting();

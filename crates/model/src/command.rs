@@ -440,6 +440,25 @@ pub fn answer_question(item: &InboxItem, answer: String) -> Command {
     )
 }
 
+/// Answers a waiting question with the options picked, by their index in
+/// `item.options` (from 0): their numbers, as `ainet answer` takes them
+/// ("1 3"). Out-of-range picks are dropped; with none left, says why.
+pub fn answer_choices(item: &InboxItem, picked: &[usize]) -> Command {
+    let mut numbers: Vec<usize> = picked
+        .iter()
+        .copied()
+        .filter(|&i| i < item.options.len())
+        .map(|i| i + 1)
+        .collect();
+    numbers.sort_unstable();
+    numbers.dedup();
+    if numbers.is_empty() {
+        return Command::error("pick an option or type your answer");
+    }
+    let answer = numbers.iter().map(usize::to_string).collect::<Vec<_>>().join(" ");
+    answer_question(item, answer)
+}
+
 /// A reply to a Comms entry: a threaded reply to a message, or a post in
 /// the same chat topic.
 pub fn reply(entry: &Entry, body: String) -> Command {
@@ -535,7 +554,7 @@ mod tests {
 
     use ainet_core::{Decision, InboxKind, Request, Runtime};
 
-    use super::{AgentCommand, Command, Context, complete, for_agent, message, parse};
+    use super::{AgentCommand, Command, Context, answer_choices, complete, for_agent, message, parse};
     use crate::demo::Demo;
     use crate::link::{Backend, Link, Msg};
     use crate::store::Store;
@@ -563,6 +582,22 @@ mod tests {
             },
             line,
         )
+    }
+
+    #[test]
+    fn picked_options_answer_by_their_numbers() {
+        let store = demo();
+        let mut question = store.inbox[0].clone();
+        question.kind = InboxKind::Question;
+        question.options = vec!["yes".into(), "no".into(), "later".into()];
+        let (req, ok) = sends(answer_choices(&question, &[2, 0, 2, 7]));
+        assert!(
+            matches!(&req, Request::AnswerQuestion { item, answer } if *item == question.id && answer == "1 3"),
+            "{req:?}"
+        );
+        assert_eq!(ok, "answered");
+        assert!(matches!(answer_choices(&question, &[]), Command::Error(_)));
+        assert!(matches!(answer_choices(&question, &[3]), Command::Error(_)));
     }
 
     #[test]
