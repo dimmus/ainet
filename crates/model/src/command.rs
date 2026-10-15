@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 
 use ainet_core::protocol::{QSpec, SeatSpec, SpawnSpec, UpSpec};
-use ainet_core::{Agent, Decision, InboxItem, Request, Runtime};
+use ainet_core::{Agent, Decision, InboxItem, QState, Request, Runtime};
 
 use crate::store::{Entry, Store};
 
@@ -270,15 +270,7 @@ pub fn parse(cx: &Context, cmd: &str) -> Command {
             None => Command::error("select an agent in the rig first"),
         },
         "chat" => match rig_arg(None) {
-            Some(rig) => req(
-                Request::ChatSend {
-                    rig: rig.clone(),
-                    topic: None,
-                    sender: None,
-                    body: rest(1),
-                },
-                format!("posted in {rig}"),
-            ),
+            Some(rig) => chat(&rig, None, rest(1)),
             None => Command::error("select an agent in the rig first"),
         },
         "queue" | "task" => {
@@ -555,6 +547,122 @@ pub fn message_to(a: &Agent, body: String) -> Command {
     )
 }
 
+/// A post in rig `rig`'s chatroom on `topic` (none: ainetd's `general`),
+/// from you.
+pub fn chat(rig: &str, topic: Option<&str>, body: String) -> Command {
+    let ok = match topic {
+        Some(topic) => format!("posted in #{topic} {rig}"),
+        None => format!("posted in {rig}"),
+    };
+    request(
+        Request::ChatSend {
+            rig: rig.into(),
+            topic: topic.map(str::to_string),
+            sender: None,
+            body,
+        },
+        ok,
+    )
+}
+
+/// What a front end can do to a queue item, as `ainet queue <verb>` does
+/// it when you (not an agent) run it: the daemon records you as the one
+/// acting.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum QueueCommand {
+    /// Take it: you own it and it is in progress.
+    Claim,
+    /// Give it back, saying why if you like.
+    Unclaim { reason: Option<String> },
+    /// Move it to `state`, with a note or not.
+    State(QState),
+    /// A progress note, the state unchanged.
+    Note(String),
+    /// Close it and open its successor for `to`, carrying `body`.
+    Handoff { to: String, body: String },
+    /// Block it on another item (`q-N`) or `external:<name>`; then do
+    /// `continuation`.
+    Block { on: String, continuation: String },
+    /// The item in full, as a report.
+    Show,
+}
+
+/// The request for `cmd` on queue item `id`: what the console's `ainet
+/// queue` sends, and what to say once it is done (or the report's
+/// title); or what is missing.
+pub fn queue(store: &Store, id: &str, cmd: QueueCommand) -> Command {
+    if !store.queue.contains_key(id) {
+        return Command::error("no such queue item");
+    }
+    let id = id.to_string();
+    let words = |s: &str| (!s.trim().is_empty()).then(|| s.trim().to_string());
+    match cmd {
+        QueueCommand::Claim => request(
+            Request::QueueClaim {
+                id: id.clone(),
+                by: None,
+            },
+            format!("claimed {id}"),
+        ),
+        QueueCommand::Unclaim { reason } => request(
+            Request::QueueUnclaim {
+                id: id.clone(),
+                by: None,
+                reason: reason.as_deref().and_then(words),
+            },
+            format!("gave {id} back"),
+        ),
+        QueueCommand::State(state) => request(
+            Request::QueueUpdate {
+                id: id.clone(),
+                by: None,
+                note: None,
+                state: Some(state),
+            },
+            format!("{id} is {}", state.label()),
+        ),
+        QueueCommand::Note(note) => match words(&note) {
+            Some(note) => request(
+                Request::QueueUpdate {
+                    id: id.clone(),
+                    by: None,
+                    note: Some(note),
+                    state: None,
+                },
+                format!("noted on {id}"),
+            ),
+            None => Command::error("write a note first"),
+        },
+        QueueCommand::Handoff { to, body } => match words(&to) {
+            Some(to) => request(
+                Request::QueueHandoff {
+                    id: id.clone(),
+                    by: None,
+                    body: body.trim().to_string(),
+                    summary: None,
+                    to: to.clone(),
+                },
+                format!("handed {id} to {to}"),
+            ),
+            None => Command::error("hand it off to which seat?"),
+        },
+        QueueCommand::Block { on, continuation } => match words(&on) {
+            Some(on) => request(
+                Request::QueueBlock {
+                    id: id.clone(),
+                    by: None,
+                    on: on.clone(),
+                    continuation: continuation.trim().to_string(),
+                    wake_after_secs: None,
+                },
+                format!("{id} is blocked on {on}"),
+            ),
+            None => Command::error("block it on what? q-N or external:<name>"),
+        },
+        QueueCommand::Show => request(Request::QueueShow { id: id.clone() }, id),
+    }
+}
+
 /// Starts the operator rig in the current directory.
 pub fn operator_up() -> Command {
     Command::Request(
@@ -593,9 +701,11 @@ mod tests {
 
     use ainet_core::{Decision, InboxKind, Request, Runtime};
 
+    use ainet_core::QState;
+
     use super::{
-        AgentCommand, Command, Context, answer_choices, comms, complete, for_agent, message, message_to,
-        parse,
+        AgentCommand, Command, Context, QueueCommand, answer_choices, chat, comms, complete, for_agent,
+        message, message_to, parse, queue,
     };
     use crate::demo::Demo;
     use crate::link::{Backend, Link, Msg};
@@ -889,6 +999,203 @@ mod tests {
             for_agent(&store, "nobody", AgentCommand::Close),
             Command::Error(e) if e == "no such agent"
         ));
+    }
+
+    #[test]
+    fn queue_commands_send_what_ainet_queue_sends() {
+        let store = demo();
+        let id = "q-2";
+        let run = |cmd| {
+            let (req, ok) = sends(queue(&store, id, cmd));
+            (format!("{req:?}"), ok)
+        };
+        let id_ = id.to_string();
+        // As `ainet queue …` sends them when you run it (no agent: `by` is
+        // none).
+        let cases = [
+            (
+                QueueCommand::Claim,
+                Request::QueueClaim {
+                    id: id_.clone(),
+                    by: None,
+                },
+                "claimed q-2",
+            ),
+            (
+                QueueCommand::Unclaim {
+                    reason: Some(" busy ".into()),
+                },
+                Request::QueueUnclaim {
+                    id: id_.clone(),
+                    by: None,
+                    reason: Some("busy".into()),
+                },
+                "gave q-2 back",
+            ),
+            (
+                QueueCommand::State(QState::Done),
+                Request::QueueUpdate {
+                    id: id_.clone(),
+                    by: None,
+                    note: None,
+                    state: Some(QState::Done),
+                },
+                "q-2 is done",
+            ),
+            (
+                QueueCommand::Note("half way".into()),
+                Request::QueueUpdate {
+                    id: id_.clone(),
+                    by: None,
+                    note: Some("half way".into()),
+                    state: None,
+                },
+                "noted on q-2",
+            ),
+            (
+                QueueCommand::Handoff {
+                    to: "rev-review@docs".into(),
+                    body: "please check\n".into(),
+                },
+                Request::QueueHandoff {
+                    id: id_.clone(),
+                    by: None,
+                    to: "rev-review@docs".into(),
+                    body: "please check".into(),
+                    summary: None,
+                },
+                "handed q-2 to rev-review@docs",
+            ),
+            (
+                QueueCommand::Block {
+                    on: "q-1".into(),
+                    continuation: "pick up the screen".into(),
+                },
+                Request::QueueBlock {
+                    id: id_.clone(),
+                    by: None,
+                    on: "q-1".into(),
+                    continuation: "pick up the screen".into(),
+                    wake_after_secs: None,
+                },
+                "q-2 is blocked on q-1",
+            ),
+            (QueueCommand::Show, Request::QueueShow { id: id_.clone() }, "q-2"),
+        ];
+        for (cmd, want, ok) in cases {
+            assert_eq!(run(cmd.clone()), (format!("{want:?}"), ok.to_string()), "{cmd:?}");
+        }
+        // An empty reason is no reason.
+        assert!(matches!(
+            sends(queue(
+                &store,
+                id,
+                QueueCommand::Unclaim {
+                    reason: Some(" ".into())
+                }
+            ))
+            .0,
+            Request::QueueUnclaim { reason: None, .. }
+        ));
+        // What is missing.
+        for (cmd, why) in [
+            (QueueCommand::Note("  ".into()), "write a note first"),
+            (
+                QueueCommand::Handoff {
+                    to: String::new(),
+                    body: "x".into(),
+                },
+                "hand it off to which seat?",
+            ),
+            (
+                QueueCommand::Block {
+                    on: " ".into(),
+                    continuation: String::new(),
+                },
+                "block it on what? q-N or external:<name>",
+            ),
+        ] {
+            assert!(
+                matches!(queue(&store, id, cmd), Command::Error(e) if e == why),
+                "{why}"
+            );
+        }
+        assert!(matches!(
+            queue(&store, "q-99", QueueCommand::Claim),
+            Command::Error(e) if e == "no such queue item"
+        ));
+    }
+
+    #[test]
+    fn chat_posts_go_to_a_rig_and_topic() {
+        let store = demo();
+        match sends(chat("docs", Some("design"), "hi".into())) {
+            (
+                Request::ChatSend {
+                    rig,
+                    topic,
+                    sender,
+                    body,
+                },
+                ok,
+            ) => {
+                assert_eq!(
+                    (rig.as_str(), topic.as_deref(), sender, body.as_str()),
+                    ("docs", Some("design"), None, "hi")
+                );
+                assert_eq!(ok, "posted in #design docs");
+            }
+            other => panic!("{other:?}"),
+        }
+        // `/chat` is unchanged: no topic, ainetd's general.
+        assert_eq!(
+            format!("{:?}", sends(run(&store, None, "chat hello all"))),
+            format!("{:?}", sends(chat("docs", None, "hello all".into())))
+        );
+        assert_eq!(sends(run(&store, None, "chat hi")).1, "posted in docs");
+    }
+
+    #[test]
+    fn asked_replies_come_back_whole_by_their_token() {
+        let (tx, rx) = mpsc::channel();
+        let (mut link, snapshot) = Link::new(Backend::Demo(Box::default()), tx);
+        let mut store = Store::new();
+        store.apply(Msg::Snapshot(Box::new(snapshot.unwrap())));
+        let lead = store.find_agent("orch-lead@docs").unwrap().clone();
+        let reply = |rx: &mpsc::Receiver<Msg>| {
+            rx.try_iter()
+                .find_map(|m| match m {
+                    Msg::Reply { token, reply } => Some((token, reply)),
+                    _ => None,
+                })
+                .expect("a reply")
+        };
+
+        let (req, _) = sends(for_agent(&store, &lead.id, AgentCommand::Transcript));
+        link.ask(req, 7);
+        let (token, text) = reply(&rx);
+        assert_eq!(token, 7);
+        let text = text.unwrap();
+        assert!(text.contains(lead.task.as_deref().unwrap()), "{text}");
+
+        link.ask(Request::SpecShow { name: "docs".into() }, 8);
+        let (token, yaml) = reply(&rx);
+        assert_eq!(token, 8);
+        assert!(yaml.unwrap().contains("name: docs"));
+        link.ask(Request::Export { rig: "nope".into() }, 9);
+        assert_eq!(reply(&rx), (9, Err("no spec named nope in the demo".into())));
+
+        // A request that only does something: its events, then an empty
+        // reply; never a flash.
+        let (req, _) = sends(queue(&store, "q-2", QueueCommand::Claim));
+        link.ask(req, 10);
+        let msgs: Vec<Msg> = rx.try_iter().collect();
+        assert!(msgs.iter().any(|m| matches!(m, Msg::Event(_))));
+        assert!(
+            msgs.iter()
+                .any(|m| matches!(m, Msg::Reply { token: 10, reply: Ok(t) } if t.is_empty()))
+        );
+        assert!(!msgs.iter().any(|m| matches!(m, Msg::Flash(..))));
     }
 
     #[test]

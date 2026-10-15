@@ -5,8 +5,8 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use ainet_core::{
-    Agent, AgentState, ChatMessage, Decision, Event, InboxItem, InboxKind, Message, QItem, Request, Response,
-    Rig, Seat, SeatStatus,
+    Agent, AgentState, ChatMessage, Decision, Event, InboxItem, InboxKind, Message, QItem, QState, Request,
+    Response, Rig, Seat, SeatStatus,
 };
 
 use crate::link::Msg;
@@ -72,6 +72,11 @@ pub enum Change {
     Flash(String, bool),
     /// A result to show in full: a title and text.
     Popup(String, String),
+    /// The reply to a request sent with `Link::ask`, for whoever asked.
+    Reply {
+        token: u64,
+        reply: Result<String, String>,
+    },
     /// The connection to ainetd came up or went down.
     Connected(bool),
 }
@@ -101,6 +106,9 @@ pub struct RigCounts {
 
 /// How many messages and chat posts are kept.
 const KEEP: usize = 2000;
+
+/// The chat topic a post without one goes to, as ainetd's.
+pub const GENERAL: &str = "general";
 
 #[derive(Default)]
 pub struct Store {
@@ -168,6 +176,7 @@ impl Store {
             }
             Msg::Flash(text, err) => Change::Flash(text, err),
             Msg::Popup(title, text) => Change::Popup(title, text),
+            Msg::Reply { token, reply } => Change::Reply { token, reply },
             Msg::Connected(up) => {
                 let was = std::mem::replace(&mut self.connected, up);
                 if was == up {
@@ -667,7 +676,51 @@ impl Store {
         ))
     }
 
+    // ---- the queue -----------------------------------------------------------
+
+    /// Queue items as the TUI lists them: in progress, blocked, pending,
+    /// then done and canceled, each latest first. `open_only` leaves out
+    /// the done and canceled.
+    pub fn queue_items(&self, open_only: bool) -> Vec<&QItem> {
+        let order = |s: QState| match s {
+            QState::InProgress => 0,
+            QState::Blocked => 1,
+            QState::Pending => 2,
+            QState::Done => 3,
+            QState::Canceled => 4,
+        };
+        let mut items: Vec<&QItem> = self
+            .queue
+            .values()
+            .filter(|q| !open_only || q.state.is_open())
+            .collect();
+        items.sort_by_key(|q| (order(q.state), std::cmp::Reverse(q.updated)));
+        items
+    }
+
     // ---- comms -------------------------------------------------------------
+
+    /// The chatrooms: every rig's `general` topic (where a post without a
+    /// topic goes), and every rig and topic posted in, by rig then topic.
+    pub fn chat_rooms(&self) -> Vec<(String, String)> {
+        let mut rooms: Vec<(String, String)> = self
+            .rigs
+            .keys()
+            .map(|rig| (rig.clone(), GENERAL.to_string()))
+            .chain(self.chat.iter().map(|c| (c.rig.clone(), c.topic.clone())))
+            .collect();
+        rooms.sort();
+        rooms.dedup();
+        rooms
+    }
+
+    /// The posts in one chatroom, oldest first.
+    pub fn chat_in(&self, rig: &str, topic: &str) -> Vec<&ChatMessage> {
+        self.chat
+            .iter()
+            .filter(|c| c.rig == rig && c.topic == topic)
+            .collect()
+    }
 
     /// Messages and chat, oldest first.
     pub fn entries(&self) -> Vec<Entry> {
@@ -1103,6 +1156,64 @@ mod tests {
         assert_eq!(replies(2), [(1, 3)]);
         assert!(replies(5).is_empty());
         assert!(replies(6).is_empty(), "a reply to itself is not its own reply");
+    }
+
+    #[test]
+    fn the_queue_lists_as_the_tui_does() {
+        let mut store = demo();
+        let states = |items: Vec<&ainet_core::QItem>| items.iter().map(|q| q.state).collect::<Vec<_>>();
+        use ainet_core::QState::*;
+        let mut done = store.queue["q-2"].clone();
+        done.state = Done;
+        event(&mut store, Event::Queue { item: done });
+        assert_eq!(
+            states(store.queue_items(false)),
+            [InProgress, InProgress, Blocked, Done]
+        );
+        assert_eq!(states(store.queue_items(true)), [InProgress, InProgress, Blocked]);
+        // Latest first within a state.
+        let ids: Vec<&str> = store.queue_items(true).iter().map(|q| q.id.as_str()).collect();
+        let (a, b) = (&store.queue[ids[0]], &store.queue[ids[1]]);
+        assert!(a.updated >= b.updated);
+    }
+
+    #[test]
+    fn chatrooms_are_every_rigs_general_and_topics_posted_in() {
+        let mut store = demo();
+        let mut post = store.chat[0].clone();
+        post.topic = "design".into();
+        post.body = "colours?".into();
+        event(&mut store, Event::Chat { message: post });
+        let rooms: Vec<(String, String)> = store.chat_rooms();
+        let pairs = |v: &[(&str, &str)]| -> Vec<(String, String)> {
+            v.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect()
+        };
+        assert_eq!(
+            rooms,
+            pairs(&[("docs", "design"), ("docs", "general"), ("infra", "general")])
+        );
+        let design: Vec<&str> = store
+            .chat_in("docs", "design")
+            .iter()
+            .map(|c| c.body.as_str())
+            .collect();
+        assert_eq!(design, ["colours?"]);
+        assert_eq!(store.chat_in("docs", "general").len(), 2);
+    }
+
+    #[test]
+    fn replies_are_handed_to_whoever_asked() {
+        let mut store = Store::new();
+        assert_eq!(
+            store.apply(Msg::Reply {
+                token: 3,
+                reply: Ok("text".into())
+            }),
+            Change::Reply {
+                token: 3,
+                reply: Ok("text".into())
+            }
+        );
     }
 
     #[test]

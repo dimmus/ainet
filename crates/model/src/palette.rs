@@ -3,6 +3,7 @@
 //! Follows the current Omarchy theme when there is one. Shared by the TUI
 //! and the GUI, which turns it into a Zed theme.
 
+use ainet_core::QState;
 use ainet_critter::{Rgb, parse_hex};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -112,6 +113,18 @@ impl Palette {
             bodies: vec![self.hue(id)],
             dark: self.bg,
             blush: self.blush,
+        }
+    }
+
+    /// A queue item's state chip: its background and text. Open work in
+    /// the status hues, finished work faded.
+    pub fn qstate(&self, s: QState) -> (Rgb, Rgb) {
+        match s {
+            QState::InProgress => (self.ok, self.bg),
+            QState::Blocked => (self.attn, self.bg),
+            QState::Pending => (self.info, self.bg),
+            QState::Done => (self.surface2(), self.fg_dim),
+            QState::Canceled => (self.surface2(), self.muted),
         }
     }
 

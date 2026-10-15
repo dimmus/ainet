@@ -1,6 +1,79 @@
-//! Turns daemon replies into text for the TUI's result popup.
+//! Turns daemon replies into text: for the TUI's result popup, the GUI's
+//! report tabs, and (a queue item) the console's `ainet queue show`.
 
-use ainet_core::Response;
+use ainet_core::{QItem, Response};
+
+/// A reply wanted whole ([`crate::Link::ask`]): its text, empty when it
+/// says no more than "done", or the daemon's error.
+pub fn reply(resp: &Response) -> Result<String, String> {
+    match resp {
+        Response::Error { message } => Err(message.clone()),
+        Response::Text { text } => Ok(text.clone()),
+        Response::Spawned { agent } => Ok(format!("{} joined the fleet", agent.name)),
+        Response::Rig { rig } => Ok(format!("rig {} is {}", rig.name, rig.status.label())),
+        Response::Discovered { .. }
+        | Response::Rigs { .. }
+        | Response::Specs { .. }
+        | Response::Snapshots { .. }
+        | Response::Watchdogs { .. }
+        | Response::Captures { .. }
+        | Response::Whoami { .. }
+        | Response::QItem { .. } => Ok(render(resp)),
+        _ => Ok(String::new()),
+    }
+}
+
+/// A queue item in full, as `ainet queue show` prints it: what, from whom
+/// to whom, its state, body and notes, with how long ago as of `now`
+/// (Unix ms).
+pub fn qitem_text(q: &QItem, now: i64) -> String {
+    let mut out = format!("{}  {}  {}\n", q.id, q.state.label(), q.summary);
+    out.push_str(&format!("from {} to {}", q.source, q.destination));
+    if let Some(o) = &q.owner {
+        out.push_str(&format!(", owned by {o}"));
+    }
+    out.push_str(&format!(", priority {}", q.priority));
+    if let Some(r) = &q.rig {
+        out.push_str(&format!(", rig {r}"));
+    }
+    out.push('\n');
+    if !q.tags.is_empty() {
+        out.push_str(&format!("tags: {}\n", q.tags.join(", ")));
+    }
+    if let Some(r) = &q.reply_to {
+        out.push_str(&format!("reply to: {r}\n"));
+    }
+    if let Some(b) = &q.block {
+        out.push_str(&format!("blocked on {}; then: {}\n", b.on, b.continuation));
+    }
+    if let Some(s) = &q.successor {
+        out.push_str(&format!("handed off as {s}\n"));
+    }
+    if !q.body.is_empty() {
+        out.push('\n');
+        out.push_str(q.body.trim_end());
+        out.push('\n');
+    }
+    if !q.notes.is_empty() {
+        out.push('\n');
+        for n in &q.notes {
+            let st = n.state.map(|s| format!(" [{}]", s.label())).unwrap_or_default();
+            out.push_str(&format!("- {} {}{st}: {}\n", ago(now, n.at), n.by, n.text));
+        }
+    }
+    out
+}
+
+/// `5s ago`, `3m ago`, `2h ago`, `4d ago`.
+pub fn ago(now_ms: i64, then_ms: i64) -> String {
+    let s = ((now_ms - then_ms) / 1000).max(0);
+    match s {
+        0..60 => format!("{s}s ago"),
+        60..3600 => format!("{}m ago", s / 60),
+        3600..86400 => format!("{}h ago", s / 3600),
+        _ => format!("{}d ago", s / 86400),
+    }
+}
 
 pub fn render(resp: &Response) -> String {
     let mut out = String::new();
@@ -110,6 +183,7 @@ pub fn render(resp: &Response) -> String {
             ));
         }
         Response::Text { text } => out.push_str(text),
+        Response::QItem { item } => out.push_str(&qitem_text(item, ainet_core::now_ms())),
         other => out.push_str(&format!("{other:?}")),
     }
     out

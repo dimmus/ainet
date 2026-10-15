@@ -11,13 +11,14 @@ pub mod command;
 pub mod daemon;
 pub mod demo;
 pub mod describe;
+pub mod journal;
 pub mod link;
 pub mod palette;
 pub mod popup;
 pub mod store;
 pub mod terminal;
 
-pub use command::{AgentCommand, Command, Context};
+pub use command::{AgentCommand, Command, Context, QueueCommand};
 pub use demo::Demo;
 pub use link::{Backend, Link, Msg, Sink};
 pub use palette::Palette;

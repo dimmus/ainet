@@ -232,7 +232,13 @@ impl App {
 
     fn apply(&mut self, msg: Msg) {
         match self.store.apply(msg) {
-            Change::None | Change::InboxResolved | Change::Comms | Change::Term(_) | Change::History(_) => {}
+            Change::None
+            | Change::InboxResolved
+            | Change::Comms
+            | Change::Term(_)
+            | Change::History(_)
+            // The TUI never asks for a reply of its own.
+            | Change::Reply { .. } => {}
             Change::Snapshot => {
                 self.select_waiting();
                 self.after_fleet();

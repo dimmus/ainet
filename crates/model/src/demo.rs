@@ -8,8 +8,8 @@
 use std::path::PathBuf;
 
 use ainet_core::{
-    Agent, AgentState, ChatMessage, Decision, Edge, EdgeKind, Event, InboxItem, InboxKind, Message, QItem,
-    QNote, QState, Request, Response, Rig, RigStatus, Runtime, Seat, SeatStatus, Transport, now_ms,
+    Agent, AgentState, ChatMessage, Decision, Edge, EdgeKind, Event, InboxItem, InboxKind, Message, QBlock,
+    QItem, QNote, QState, Request, Response, Rig, RigStatus, Runtime, Seat, SeatStatus, Transport, now_ms,
 };
 
 const MIN: i64 = 60_000;
@@ -682,11 +682,11 @@ impl Demo {
                 }
                 (events, Ok(None))
             }
-            Request::ChatSend { rig, body, .. } => {
+            Request::ChatSend { rig, topic, body, .. } => {
                 let m = ChatMessage {
                     id: self.chat.len() as u64 + 1,
                     rig: rig.clone(),
-                    topic: "general".into(),
+                    topic: topic.clone().unwrap_or_else(|| "general".into()),
                     sender: "you (operator)".into(),
                     body: body.clone(),
                     created: now_ms(),
@@ -711,6 +711,25 @@ impl Demo {
                     Ok(None),
                 )
             }
+            Request::QueueClaim { id, .. }
+            | Request::QueueUnclaim { id, .. }
+            | Request::QueueUpdate { id, .. }
+            | Request::QueueHandoff { id, .. }
+            | Request::QueueBlock { id, .. }
+            | Request::QueueShow { id } => match self.queue.iter().position(|q| q.id == *id) {
+                Some(at) => self.queue_request(at, req),
+                None => (vec![], Err(format!("no queue item {id}"))),
+            },
+            Request::Transcript { agent, .. } => match self.index(agent) {
+                Some(i) => (vec![], Ok(Some(self.transcript(&self.agents[i])))),
+                None => (vec![], Err(format!("no agent {agent}"))),
+            },
+            Request::SpecShow { name: rig } | Request::Export { rig } => {
+                match self.rigs.iter().find(|r| r.name == *rig) {
+                    Some(r) => (vec![], Ok(Some(rig_yaml(r)))),
+                    None => (vec![], Err(format!("no spec named {rig} in the demo"))),
+                }
+            }
             Request::Ps => (
                 vec![],
                 Ok(Some(crate::popup::render(&Response::Rigs {
@@ -726,6 +745,112 @@ impl Demo {
                 Err("the demo cannot do that; run ainet without --demo".into()),
             ),
         }
+    }
+
+    /// A queue request on item `at`, as ainetd would carry it out, by you.
+    fn queue_request(&mut self, at: usize, req: &Request) -> (Vec<Event>, Result<Option<String>, String>) {
+        let now = now_ms();
+        let note = |text: String, state: Option<QState>| QNote {
+            by: "operator".into(),
+            text,
+            at: now,
+            state,
+        };
+        let mut successor = None;
+        let next_id = format!("q-{}", self.queue.len() + 1);
+        let q = &mut self.queue[at];
+        match req {
+            Request::QueueShow { .. } => {
+                return (vec![], Ok(Some(crate::popup::qitem_text(q, now))));
+            }
+            Request::QueueClaim { .. } => {
+                q.owner = Some("operator".into());
+                q.state = QState::InProgress;
+                q.notes.push(note("claimed".into(), Some(QState::InProgress)));
+            }
+            Request::QueueUnclaim { reason, .. } => {
+                q.owner = None;
+                q.state = QState::Pending;
+                let why = reason.clone().unwrap_or_else(|| "unclaimed".into());
+                q.notes.push(note(why, Some(QState::Pending)));
+            }
+            Request::QueueUpdate {
+                note: text, state, ..
+            } => {
+                if let Some(state) = state {
+                    q.state = *state;
+                    q.block = None;
+                }
+                q.notes.push(note(text.clone().unwrap_or_default(), *state));
+            }
+            Request::QueueBlock { on, continuation, .. } => {
+                q.state = QState::Blocked;
+                q.block = Some(QBlock {
+                    on: on.clone(),
+                    continuation: continuation.clone(),
+                    wake_at: None,
+                });
+                q.notes
+                    .push(note(format!("blocked on {on}"), Some(QState::Blocked)));
+            }
+            Request::QueueHandoff {
+                to, body, summary, ..
+            } => {
+                let id = next_id;
+                q.state = QState::Done;
+                q.successor = Some(id.clone());
+                q.notes
+                    .push(note(format!("handed off to {to}"), Some(QState::Done)));
+                let mut next = q.clone();
+                next.id = id;
+                next.source = "operator".into();
+                next.destination = to.clone();
+                next.owner = None;
+                next.state = QState::Pending;
+                next.summary = summary.clone().unwrap_or_else(|| q.summary.clone());
+                next.body = body.clone();
+                next.reply_to = Some(q.id.clone());
+                next.successor = None;
+                next.notes = vec![note("created".into(), Some(QState::Pending))];
+                next.created = now;
+                successor = Some(next);
+            }
+            _ => {}
+        }
+        q.updated = now;
+        let mut events = vec![Event::Queue { item: q.clone() }];
+        if let Some(next) = successor {
+            self.queue.push(next.clone());
+            events.push(Event::Queue { item: next });
+        }
+        (events, Ok(None))
+    }
+
+    /// A believable Claude Code transcript of what `agent` has been at.
+    fn transcript(&self, agent: &Agent) -> String {
+        let task = agent.task.clone().unwrap_or_default();
+        let mut out = format!(
+            "── {} ({}) ──\n\nyou: {task}\n\n{}: I'll start by looking at what's there for \"{task}\".\n",
+            agent.label(),
+            agent.runtime.label(),
+            agent.name
+        );
+        if let Some(tool) = &agent.last_tool {
+            out.push_str(&format!("  [tool] {tool}\n"));
+        }
+        for m in self
+            .messages
+            .iter()
+            .filter(|m| m.to == agent.id || m.from == agent.id)
+        {
+            let who = if m.from == agent.id {
+                &agent.name
+            } else {
+                &m.from_label
+            };
+            out.push_str(&format!("\n{who}: {}\n", m.body));
+        }
+        out
     }
 
     fn answer(&mut self, item: u64, decision: Decision) -> Vec<Event> {
@@ -879,6 +1004,42 @@ impl Demo {
         out.push_str(&format!("\x1b[{};5H", base + 2));
         out
     }
+}
+
+/// A rig as the YAML of a RigSpec, as `ainet export` writes one: its
+/// pods, their members and the edges between seats.
+fn rig_yaml(rig: &Rig) -> String {
+    let mut out = format!("version: \"0.2\"\nname: {}\n", rig.name);
+    if let Some(summary) = &rig.summary {
+        out.push_str(&format!("summary: >\n  {summary}\n"));
+    }
+    out.push_str("\npods:\n");
+    let mut pods: Vec<&str> = rig.seats.iter().map(|s| s.pod.as_str()).collect();
+    pods.dedup();
+    for pod in pods {
+        out.push_str(&format!("  - id: {pod}\n    members:\n"));
+        for seat in rig.seats.iter().filter(|s| s.pod == pod) {
+            out.push_str(&format!(
+                "      - id: {}\n        runtime: {}\n        cwd: \"{}\"\n",
+                seat.member,
+                seat.runtime.spec_name(),
+                seat.cwd.display()
+            ));
+            if let Some(role) = &seat.role {
+                out.push_str(&format!("        role: {role}\n"));
+            }
+        }
+    }
+    out.push_str("\nedges:\n");
+    for e in &rig.edges {
+        out.push_str(&format!(
+            "  - kind: {}\n    from: {}\n    to: {}\n",
+            e.kind.label(),
+            e.from,
+            e.to
+        ));
+    }
+    out
 }
 
 #[cfg(test)]

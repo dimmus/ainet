@@ -33,6 +33,13 @@ pub enum Msg {
     },
     Flash(String, bool),
     Popup(String, String),
+    /// The reply to a request sent with [`Link::ask`]: its token, and the
+    /// reply as text (empty when it says no more than "done"), or the
+    /// error.
+    Reply {
+        token: u64,
+        reply: Result<String, String>,
+    },
     Connected(bool),
 }
 
@@ -127,6 +134,34 @@ impl<S: Sink> Link<S> {
                 );
                 let timeout = Duration::from_secs(if long { 60 } else { 10 });
                 request(socket, req, &self.sink, ok, timeout);
+            }
+        }
+    }
+
+    /// Sends a request whose reply is wanted whole by whoever asked (a
+    /// transcript, a spec, to show in a view of its own): it comes back as
+    /// [`Msg::Reply`] with `token`, never as a flash or popup.
+    pub fn ask(&mut self, req: Request, token: u64) {
+        match &mut self.backend {
+            Backend::Demo(demo) => {
+                let (events, outcome) = demo.handle(&req);
+                for ev in events {
+                    self.sink.send(Msg::Event(Box::new(ev)));
+                }
+                self.sink.send(Msg::Reply {
+                    token,
+                    reply: outcome.map(Option::unwrap_or_default),
+                });
+            }
+            Backend::Daemon(socket) => {
+                let (socket, tx) = (socket.clone(), self.sink.clone());
+                thread::spawn(move || {
+                    let reply = match call(&socket, &req, Duration::from_secs(10)) {
+                        Ok(resp) => crate::popup::reply(&resp),
+                        Err(e) => Err(format!("ainetd: {e}")),
+                    };
+                    tx.send(Msg::Reply { token, reply });
+                });
             }
         }
     }

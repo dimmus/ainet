@@ -2,7 +2,7 @@
 //! the rig chatrooms) as one stream, the thread of the selected message,
 //! and the queue of owned work. Typing a line answers the selected message.
 
-use ainet_core::{QItem, QState};
+use ainet_core::QItem;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
@@ -10,7 +10,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{HighlightSpacing, List, ListItem, Paragraph, Wrap};
 
 use crate::app::{App, Entry};
-use crate::theme::{Palette, Styles as _, c, mix};
+use crate::theme::{Styles as _, c, mix};
 use crate::view::{age, chip, panel};
 
 fn hue_of(app: &App, id: &str) -> [u8; 3] {
@@ -121,20 +121,12 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     }
 
     // The queue.
-    let mut items: Vec<&QItem> = app.store.queue.values().collect();
-    let order = |s: QState| match s {
-        QState::InProgress => 0,
-        QState::Blocked => 1,
-        QState::Pending => 2,
-        QState::Done => 3,
-        QState::Canceled => 4,
-    };
-    items.sort_by_key(|q| (order(q.state), std::cmp::Reverse(q.updated)));
+    let items: Vec<&QItem> = app.store.queue_items(false);
     let lines: Vec<Line> = items
         .iter()
         .take(queue_area.height.saturating_sub(2) as usize)
         .map(|q| {
-            let (bg, fg) = state_colors(&pal, q.state);
+            let (bg, fg) = pal.qstate(q.state);
             Line::from(vec![
                 Span::styled(format!("{:<5}", q.id), pal.muted()),
                 chip(&format!("{:<11}", q.state.label()), bg, fg),
@@ -206,16 +198,6 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
             .block(panel(&pal, "Thread", false)),
         thread_area,
     );
-}
-
-fn state_colors(pal: &Palette, s: QState) -> ([u8; 3], [u8; 3]) {
-    match s {
-        QState::InProgress => (pal.ok, pal.bg),
-        QState::Blocked => (pal.attn, pal.bg),
-        QState::Pending => (pal.info, pal.bg),
-        QState::Done => (pal.surface2(), pal.fg_dim),
-        QState::Canceled => (pal.surface2(), pal.muted),
-    }
 }
 
 fn first_lines(s: &str, n: usize) -> Vec<String> {
