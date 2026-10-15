@@ -1,15 +1,17 @@
 //! The workspace's docks and center, as placeholders for the views of
-//! phase 4: the Fleet panel (left) already lists the Store's Fleet rows and
-//! selects agents; the Agent panel (right) names the selected agent; the
-//! center and the bottom dock say what will live there.
+//! phase 4: the Fleet panel (left by default) already lists the Store's
+//! Fleet rows and selects agents, by click or keys; the Agent panel names
+//! the selected agent; the center and the bottom dock say what will live
+//! there.
 
 use ainet_core::AgentState;
 use ainet_model::Row;
-use gpui::Entity;
+use gpui::{Entity, FocusHandle};
 use ui::{Indicator, ListItem, ListItemSpacing, prelude::*};
 
 use crate::args::View;
 use crate::fleet::FleetModel;
+use crate::themes;
 
 /// Default dock sizes, Zed's.
 const SIDE_DOCK_WIDTH: Pixels = px(260.);
@@ -28,7 +30,7 @@ pub fn state_color(state: AgentState) -> Color {
 }
 
 /// A dock's title strip.
-fn header(title: &'static str, icon: IconName, cx: &App) -> impl IntoElement {
+fn header(title: &'static str, icon: IconName, cx: &App) -> Div {
     h_flex()
         .flex_none()
         .h(px(32.))
@@ -40,8 +42,16 @@ fn header(title: &'static str, icon: IconName, cx: &App) -> impl IntoElement {
         .child(Label::new(title).size(LabelSize::Small).color(Color::Muted))
 }
 
-/// The left dock: the Fleet tree, one plain row per Store row.
-pub fn fleet_panel(fleet: &Entity<FleetModel>, cx: &App) -> impl IntoElement {
+/// The Fleet tree, one plain row per Store row, `width` wide, docked left
+/// or right. Its keys work while `focus` is focused (`FleetPanel` context).
+pub fn fleet_panel(
+    fleet: &Entity<FleetModel>,
+    focus: &FocusHandle,
+    width: Pixels,
+    on_left: bool,
+    focused: bool,
+    cx: &App,
+) -> impl IntoElement {
     let model = fleet.read(cx);
     let store = &model.store;
     let rows: Vec<AnyElement> = store
@@ -105,13 +115,16 @@ pub fn fleet_panel(fleet: &Entity<FleetModel>, cx: &App) -> impl IntoElement {
 
     v_flex()
         .id("fleet-panel")
+        .key_context("FleetPanel")
+        .track_focus(focus)
         .flex_none()
-        .w(SIDE_DOCK_WIDTH)
+        .w(width)
         .h_full()
         .bg(cx.theme().colors().panel_background)
-        .border_r_1()
-        .border_color(cx.theme().colors().border)
-        .child(header("Fleet", IconName::ListTree, cx))
+        .map(|el| docked(el, on_left, cx))
+        .child(header("Fleet", IconName::ListTree, cx).when(focused, |el| {
+            el.border_color(cx.theme().colors().panel_focused_border)
+        }))
         .child(
             v_flex()
                 .id("fleet-rows")
@@ -125,9 +138,15 @@ pub fn fleet_panel(fleet: &Entity<FleetModel>, cx: &App) -> impl IntoElement {
         )
 }
 
-/// The right dock: who is selected. Phase 4 adds the critter, context
-/// gauge, cost, task and queue.
-pub fn agent_panel(fleet: &FleetModel, cx: &App) -> impl IntoElement {
+/// A side dock's border, on the side facing the center.
+fn docked<E: Styled>(el: E, on_left: bool, cx: &App) -> E {
+    let el = if on_left { el.border_r_1() } else { el.border_l_1() };
+    el.border_color(cx.theme().colors().border)
+}
+
+/// Who is selected, docked opposite the Fleet. Phase 4 adds the critter,
+/// context gauge, cost, task and queue.
+pub fn agent_panel(fleet: &FleetModel, on_left: bool, cx: &App) -> impl IntoElement {
     let field = |name: &'static str, value: String| {
         h_flex()
             .gap_2()
@@ -146,7 +165,12 @@ pub fn agent_panel(fleet: &FleetModel, cx: &App) -> impl IntoElement {
                     .gap_2()
                     .pb_1()
                     .child(Indicator::dot().color(state_color(agent.state)))
-                    .child(Label::new(agent.name.clone()).size(LabelSize::Large)),
+                    // The agent's body colour, as its critter wears it.
+                    .child(
+                        Label::new(agent.name.clone())
+                            .size(LabelSize::Large)
+                            .color(Color::Custom(themes::agent_color(&agent.id, cx).cursor)),
+                    ),
             )
             .child(field("role", agent.role.clone().unwrap_or_else(|| "—".into())))
             .child(field("state", agent.state.label().into()))
@@ -162,8 +186,7 @@ pub fn agent_panel(fleet: &FleetModel, cx: &App) -> impl IntoElement {
         .w(SIDE_DOCK_WIDTH)
         .h_full()
         .bg(cx.theme().colors().panel_background)
-        .border_l_1()
-        .border_color(cx.theme().colors().border)
+        .map(|el| docked(el, on_left, cx))
         .child(header("Agent", IconName::UserGroup, cx))
         .child(div().p_3().child(body))
 }

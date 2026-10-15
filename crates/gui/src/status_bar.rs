@@ -1,13 +1,15 @@
 //! The status bar: the connection to ainetd on the left (or why there is
-//! none), the latest flash, and the fleet in numbers on the right: the
-//! TUI header's agents, working, need-you and waiting counts.
+//! none), what is wrong with the user's settings or keymap, the latest
+//! flash, and the fleet in numbers on the right: the TUI header's agents,
+//! working, need-you and waiting counts.
 
 use ainet_model::Tally;
 use gpui::{Decorations, Entity};
 use theme::CLIENT_SIDE_DECORATION_ROUNDING;
-use ui::{Indicator, prelude::*};
+use ui::{Indicator, Tooltip, prelude::*};
 
 use crate::fleet::{Connection, FleetModel};
+use crate::problems;
 use crate::title_bar::connection_badge;
 
 /// What the status bar says, apart from how it looks.
@@ -70,6 +72,7 @@ impl StatusBar {
 impl Render for StatusBar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let status = Status::of(self.fleet.read(cx));
+        let problems = problems::lines(cx);
         let (dot, _) = connection_badge(&status.connection);
         let connection_color = match status.connection {
             Connection::Failed(_) => Color::Error,
@@ -120,6 +123,28 @@ impl Render for StatusBar {
                             .color(connection_color)
                             .truncate(),
                     )
+                    .when_some(problems.first().cloned(), |el, first| {
+                        let all = problems.join("\n");
+                        el.child(Label::new("·").size(LabelSize::Small).color(Color::Disabled))
+                            .child(
+                                h_flex()
+                                    .id("config-problems")
+                                    .gap_1()
+                                    .min_w_0()
+                                    .child(
+                                        Icon::new(IconName::Warning)
+                                            .size(IconSize::Small)
+                                            .color(Color::Warning),
+                                    )
+                                    .child(
+                                        Label::new(first)
+                                            .size(LabelSize::Small)
+                                            .color(Color::Warning)
+                                            .truncate(),
+                                    )
+                                    .tooltip(Tooltip::text(all)),
+                            )
+                    })
                     .when_some(status.flash.clone(), |el, (text, error)| {
                         el.child(Label::new("·").size(LabelSize::Small).color(Color::Disabled))
                             .child(

@@ -10,7 +10,7 @@ use theme::{CLIENT_SIDE_DECORATION_BORDER, CLIENT_SIDE_DECORATION_ROUNDING};
 use ui::utils::platform_title_bar_height;
 use ui::{Indicator, Tooltip, prelude::*};
 
-use crate::CloseWindow;
+use crate::actions::CloseWindow;
 use crate::fleet::{Connection, FleetModel};
 
 pub struct TitleBar {

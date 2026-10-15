@@ -3,42 +3,35 @@
 //! ainetd like the TUI, sharing its state model (`ainet-model`), and starts
 //! the daemon through the console binary `ainet`, never through itself.
 
+mod actions;
 mod args;
 mod assets;
 mod decorations;
 mod docks;
 mod fleet;
+mod keymap;
+mod problems;
 mod settings;
 mod sink;
 mod status_bar;
+mod themes;
 mod title_bar;
+mod watch;
 mod workspace;
+mod zed_theme;
 
 use clap::Parser;
 use gpui::{
-    App, AppContext, Bounds, KeyBinding, TitlebarOptions, WindowBounds, WindowDecorations, WindowOptions,
-    actions, point, px, size,
+    App, AppContext, Bounds, PromptLevel, TitlebarOptions, WindowBounds, WindowDecorations, WindowOptions,
+    point, px, size,
 };
-use theme::ActiveTheme;
+use theme::{ActiveTheme, SystemAppearance};
 
+use crate::actions::Quit;
 use crate::args::Args;
+use crate::assets::Assets;
 use crate::fleet::FleetModel;
 use crate::workspace::Workspace;
-
-actions!(
-    workspace,
-    [
-        /// Closes the window.
-        CloseWindow
-    ]
-);
-actions!(
-    ainet,
-    [
-        /// Quits the app.
-        Quit
-    ]
-);
 
 fn main() -> std::process::ExitCode {
     let args = Args::parse();
@@ -53,7 +46,7 @@ fn main() -> std::process::ExitCode {
     gpui_platform::application()
         .with_assets(assets::Assets)
         .run(move |cx: &mut App| {
-            init(cx);
+            init(ConfigFiles::user(), cx);
             if let Err(e) = open_window(&args, cx) {
                 eprintln!("ainet-gui: cannot open a window: {e:#}");
                 cx.quit();
@@ -69,21 +62,63 @@ fn has_display(wayland: &Option<std::ffi::OsString>, x11: &Option<std::ffi::OsSt
     !cfg!(any(target_os = "linux", target_os = "freebsd")) || set(wayland) || set(x11)
 }
 
-/// Theme, appearance settings, app-wide actions and their keys.
-fn init(cx: &mut App) {
-    theme::init(theme::LoadThemes::JustBase, cx);
-    settings::init(settings::Appearance::default(), cx);
-    cx.on_action(|_: &Quit, cx| cx.quit());
-    cx.bind_keys([
-        KeyBinding::new("ctrl-q", Quit, None),
-        KeyBinding::new("ctrl-shift-w", CloseWindow, Some("Workspace")),
-    ]);
+/// Where the user's config is read from; tests read none.
+#[derive(Clone, Default)]
+struct ConfigFiles {
+    settings: Option<std::path::PathBuf>,
+    keymap: Option<std::path::PathBuf>,
+}
+
+impl ConfigFiles {
+    fn user() -> Self {
+        ConfigFiles {
+            settings: Some(settings::settings_file()),
+            keymap: Some(keymap::keymap_file()),
+        }
+    }
+}
+
+/// Fonts, themes, settings, the keymap and the app-wide actions.
+fn init(files: ConfigFiles, cx: &mut App) {
+    let mut startup = themes::init(cx);
+    if let Err(e) = Assets::load_fonts(cx) {
+        startup.push(format!("{e:#}"));
+    }
+    if !startup.is_empty() {
+        problems::set(problems::Source::Startup, Some(startup.join("; ")), cx);
+    }
+    settings::init(files.settings, cx);
+    keymap::init(files.keymap, cx);
+
+    cx.on_action(quit);
     cx.on_window_closed(|cx, _| {
         if cx.windows().is_empty() {
             cx.quit();
         }
     })
     .detach();
+}
+
+/// Quits, asking first in the active window if `confirm_quit` is set.
+fn quit(_: &Quit, cx: &mut App) {
+    let window = cx.active_window().or_else(|| cx.windows().into_iter().next());
+    let Some(window) = window.filter(|_| settings::get(cx).confirm_quit) else {
+        cx.quit();
+        return;
+    };
+    let asked = window.update(cx, |_, window, cx| {
+        window.prompt(PromptLevel::Info, "Quit ainet?", None, &["Quit", "Cancel"], cx)
+    });
+    match asked {
+        Ok(answer) => cx
+            .spawn(async move |cx| {
+                if answer.await == Ok(0) {
+                    cx.update(|cx| cx.quit());
+                }
+            })
+            .detach(),
+        Err(_) => cx.quit(),
+    }
 }
 
 /// The fleet the window shows: the demo, or ainetd at the chosen socket.
@@ -102,7 +137,15 @@ fn open_window(args: &Args, cx: &mut App) -> anyhow::Result<()> {
     let bounds = Bounds::centered(None, size(px(1280.), px(800.)), cx);
     cx.open_window(window_options(bounds, cx), |window, cx| {
         window.activate_window();
-        cx.new(|cx| Workspace::new(fleet, view, cx))
+        let workspace = cx.new(|cx| Workspace::new(fleet, view, window, cx));
+        // As Zed: follow the system's light or dark appearance.
+        window
+            .observe_window_appearance(|window, cx| {
+                *SystemAppearance::global_mut(cx) = SystemAppearance(window.appearance().into());
+                settings::apply_theme(cx);
+            })
+            .detach();
+        workspace
     })?;
     Ok(())
 }
@@ -138,7 +181,7 @@ mod tests {
     use crate::status_bar::Status;
 
     fn init_test(cx: &mut TestAppContext) {
-        cx.update(init);
+        cx.update(|cx| init(ConfigFiles::default(), cx));
     }
 
     #[test]
@@ -153,9 +196,9 @@ mod tests {
     #[gpui::test]
     async fn demo_workspace_shows_the_fleet_numbers(cx: &mut TestAppContext) {
         init_test(cx);
-        let (workspace, cx) = cx.add_window_view(|_, cx| {
+        let (workspace, cx) = cx.add_window_view(|window, cx| {
             let fleet = cx.new(FleetModel::demo);
-            Workspace::new(fleet, None, cx)
+            Workspace::new(fleet, None, window, cx)
         });
         cx.run_until_parked();
 
@@ -202,5 +245,95 @@ mod tests {
         fleet.read_with(cx, |f, _| assert_eq!(f.store.selected.as_ref(), Some(&other)));
         fleet.update(cx, |f, cx| f.select("no-such-agent", cx));
         fleet.read_with(cx, |f, _| assert_eq!(f.store.selected.as_ref(), Some(&other)));
+    }
+
+    #[gpui::test]
+    async fn bundled_themes_are_registered_and_deepharness_is_the_default(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.update(|cx| {
+            let registry = theme::ThemeRegistry::global(cx);
+            let names = registry.list_names();
+            for name in [
+                "One Dark",
+                "One Light",
+                "Ayu Dark",
+                "Gruvbox Dark",
+                themes::DEEPHARNESS,
+            ] {
+                assert!(names.iter().any(|n| n == name), "{name} in {names:?}");
+            }
+            let active = cx.theme().name.clone();
+            assert!(active == themes::default_dark(&registry), "{active}");
+            assert!(problems::lines(cx).is_empty(), "{:?}", problems::lines(cx));
+        });
+    }
+
+    #[gpui::test]
+    async fn settings_reload_switches_theme_and_survives_bad_files(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.update(|cx| {
+            settings::reload(r#"{ "theme": "One Light", "ui_font_size": 14, }"#, cx);
+            assert_eq!(cx.theme().name, "One Light");
+            assert_eq!(settings::ui_font(cx).1, px(14.));
+
+            // A broken file keeps the last good settings and says why.
+            settings::reload(r#"{ "theme": "Ayu Dark", "ui_font_size": "big" }"#, cx);
+            assert_eq!(cx.theme().name, "One Light");
+            assert_eq!(settings::ui_font(cx).1, px(14.));
+            let problems = problems::lines(cx);
+            assert!(
+                problems.len() == 1 && problems[0].starts_with("settings.json"),
+                "{problems:?}"
+            );
+
+            // An unknown theme falls back, and says so.
+            settings::reload(r#"{ "theme": "No Such Theme" }"#, cx);
+            assert_eq!(cx.theme().name, themes::DEEPHARNESS);
+            assert!(problems::lines(cx).iter().any(|p| p.contains("No Such Theme")));
+
+            settings::reload("", cx);
+            assert!(problems::lines(cx).is_empty());
+            assert_eq!(settings::ui_font(cx).1, px(16.));
+        });
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[gpui::test]
+    async fn default_keys_toggle_docks_and_step_through_the_fleet(cx: &mut TestAppContext) {
+        init_test(cx);
+        let (workspace, cx) = cx.add_window_view(|window, cx| {
+            let fleet = cx.new(FleetModel::demo);
+            Workspace::new(fleet, None, window, cx)
+        });
+        cx.run_until_parked();
+        let docks = |cx: &mut gpui::VisualTestContext| workspace.read_with(cx, |w, _| w.docks());
+        assert_eq!(docks(cx), workspace::Docks::default());
+        cx.simulate_keystrokes("ctrl-b");
+        assert!(!docks(cx).left && docks(cx).right);
+        cx.simulate_keystrokes("ctrl-alt-b");
+        assert!(!docks(cx).right, "{:?}", docks(cx));
+        cx.simulate_keystrokes("ctrl-j");
+        assert!(!docks(cx).bottom, "{:?}", docks(cx));
+        cx.simulate_keystrokes("ctrl-b ctrl-alt-b ctrl-j");
+        assert_eq!(docks(cx), workspace::Docks::default());
+        // A setting can move the Fleet to the right; ctrl-alt-b then hides it.
+        cx.update(|_, cx| {
+            settings::reload(r#"{ "fleet_panel": { "dock": "right" } }"#, cx);
+        });
+        cx.simulate_keystrokes("ctrl-alt-b");
+        assert!(docks(cx).left && !docks(cx).right);
+        cx.simulate_keystrokes("ctrl-alt-b");
+        cx.update(|_, cx| settings::reload("", cx));
+
+        // The Fleet panel has the keyboard: down and up move the selection.
+        let fleet = workspace.read_with(cx, |w, _| w.fleet().clone());
+        let selected =
+            |cx: &mut gpui::VisualTestContext| fleet.read_with(cx, |f, _| f.store.selected.clone());
+        let first = selected(cx);
+        cx.simulate_keystrokes("down");
+        let second = selected(cx);
+        assert_ne!(first, second);
+        cx.simulate_keystrokes("up");
+        assert_eq!(selected(cx), first);
     }
 }

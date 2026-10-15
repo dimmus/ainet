@@ -150,6 +150,19 @@ impl FleetModel {
         }
     }
 
+    /// Moves the Fleet selection `delta` agents down (up if negative).
+    pub fn move_selection(&mut self, delta: i32, cx: &mut Context<Self>) {
+        if self.store.move_selection(delta).is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Shows `text` in the status bar for a while.
+    pub fn show(&mut self, text: String, error: bool, cx: &mut Context<Self>) {
+        self.notice(None, text, error, cx);
+        cx.notify();
+    }
+
     /// Applies messages from the link, then re-renders once.
     fn apply(&mut self, msgs: Vec<Msg>, cx: &mut Context<Self>) {
         for msg in msgs {

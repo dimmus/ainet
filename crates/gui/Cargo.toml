@@ -16,19 +16,32 @@ path = "src/main.rs"
 
 [dependencies]
 ainet-core.workspace = true
+ainet-critter.workspace = true
 ainet-model.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 futures = "0.3"
-# Zed, pinned to one release; upgrade all four together (docs/GUI.md).
+# Bundled themes, icons, fonts and keymaps, embedded in debug builds too so
+# the binary is always self-contained.
+rust-embed = { version = "8.11", features = ["debug-embed", "include-exclude"] }
+serde.workspace = true
+serde_json.workspace = true
+# Zed's lenient JSON: comments and trailing commas in settings and keymaps.
+serde_json_lenient = "0.2"
+# Zed, pinned to one release; upgrade all of them together (docs/GUI.md).
 gpui = { git = "https://github.com/zed-industries/zed", tag = "v1.24.2" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", tag = "v1.24.2", features = ["font-kit", "wayland", "x11"] }
+# The theme JSON schema (`ThemeStyleContent`); Zed's `settings` and
+# `theme_settings` would pull in fs, git and wasmtime.
+settings_content = { git = "https://github.com/zed-industries/zed", tag = "v1.24.2" }
 theme = { git = "https://github.com/zed-industries/zed", tag = "v1.24.2" }
 ui = { git = "https://github.com/zed-industries/zed", tag = "v1.24.2" }
 
 [dev-dependencies]
 # Headless app and window contexts for tests (`#[gpui::test]`).
 gpui = { git = "https://github.com/zed-industries/zed", tag = "v1.24.2", features = ["test-support"] }
+# To check that every `ui::IconName` has a bundled icon.
+strum = "0.28"
 
 [lints]
 workspace = true

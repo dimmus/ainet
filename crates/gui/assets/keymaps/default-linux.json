@@ -1,0 +1,107 @@
+// ainet's default key bindings on Linux, in Zed's keymap format. Override
+// them in ~/.config/ainet/keymap.json (`null` unbinds). Zed's keys where
+// Zed has the feature; the TUI's keys for ainet's own. No `ctrl-k` chords:
+// a focused terminal needs `ctrl-k` itself.
+[
+  {
+    "bindings": {
+      "ctrl-q": "ainet::Quit",
+      "ctrl-,": "workspace::OpenSettings",
+      "ctrl-shift-p": "command_palette::Toggle"
+    }
+  },
+  {
+    "context": "Workspace",
+    "bindings": {
+      "ctrl-b": "workspace::ToggleLeftDock",
+      "ctrl-alt-b": "workspace::ToggleRightDock",
+      "ctrl-j": "workspace::ToggleBottomDock",
+      "ctrl-shift-n": "workspace::NewWindow",
+      "ctrl-shift-w": "workspace::CloseWindow",
+      "ctrl-shift-c": "workspace::OpenComms",
+      "ctrl-shift-i": "workspace::OpenInbox",
+      "ctrl-t": "workspace::OpenMap",
+      "ctrl-p": "fleet::ToggleSwitcher",
+      "ctrl-o": "fleet::Operator",
+      "ctrl-g": "fleet::TileAll",
+      "alt-down": "fleet::SelectNext",
+      "alt-up": "fleet::SelectPrev",
+      "ctrl-shift-y": "fleet::NextWaiting",
+      "ctrl-y": "inbox::Allow",
+      "ctrl-a": "inbox::Always",
+      "ctrl-n": "inbox::Deny",
+      "ctrl-e": "ainet::ToggleCritterSize",
+      "ctrl-tab": "pane::ActivateNextItem",
+      "ctrl-shift-tab": "pane::ActivatePreviousItem",
+      "ctrl-w": "pane::CloseActiveItem",
+      "ctrl-\\": "pane::SplitRight"
+    }
+  },
+  {
+    "context": "FleetPanel",
+    "bindings": {
+      "down": "fleet::SelectNext",
+      "up": "fleet::SelectPrev",
+      "j": "fleet::SelectNext",
+      "k": "fleet::SelectPrev",
+      "enter": "fleet::OpenTerminal",
+      "m": "fleet::MessageAgent",
+      "s": "fleet::Spawn",
+      "delete": "fleet::CloseAgent"
+    }
+  },
+  {
+    // Keys typed into a focused terminal go to the agent, so the
+    // workspace's ctrl keys step aside here.
+    "context": "Terminal",
+    "bindings": {
+      "ctrl-a": null,
+      "ctrl-e": null,
+      "ctrl-g": null,
+      "ctrl-n": null,
+      "ctrl-o": null,
+      "ctrl-p": null,
+      "ctrl-t": null,
+      "ctrl-w": null,
+      "ctrl-y": null,
+      "ctrl-shift-c": "terminal::Copy",
+      "ctrl-shift-v": "terminal::Paste",
+      "shift-insert": "terminal::Paste",
+      "ctrl-shift-l": "terminal::Clear",
+      "shift-pageup": "terminal::ScrollUp",
+      "shift-pagedown": "terminal::ScrollDown",
+      "shift-escape": "terminal::ToggleZoom"
+    }
+  },
+  {
+    "context": "Inbox",
+    "bindings": {
+      "down": "menu::SelectNext",
+      "up": "menu::SelectPrevious",
+      "y": "inbox::Allow",
+      "a": "inbox::Always",
+      "n": "inbox::Deny",
+      "enter": "inbox::Answer"
+    }
+  },
+  {
+    "context": "Comms",
+    "bindings": {
+      "down": "menu::SelectNext",
+      "up": "menu::SelectPrevious",
+      "c": "comms::Compose",
+      "r": "comms::Reply"
+    }
+  },
+  {
+    "context": "Picker",
+    "bindings": {
+      "down": "menu::SelectNext",
+      "up": "menu::SelectPrevious",
+      "ctrl-n": "menu::SelectNext",
+      "ctrl-p": "menu::SelectPrevious",
+      "enter": "menu::Confirm",
+      "escape": "menu::Cancel"
+    }
+  }
+]
