@@ -108,7 +108,7 @@ GPUI (the pane tree, divider dragging, the text buffer).
 | `pane.rs` | `Pane`: a `TabBar` of `Tab`s (click activates, middle click or the hover close button closes, right click for Close/Close Others/Close All/Split), a split menu and a zoom button; closing the active tab activates the one used before it; `PaneEvent`s for the workspace | `workspace::pane` |
 | `pane_group.rs` | `PaneGroup<P>`: the split tree (generic, so tested with numbers), neighbours by drawn position, and the axis element whose dividers drag (double click evens them) | `workspace::pane_group` |
 | `dock.rs` | `Dock` (left, right, bottom) holding `Panel`s, opened and closed, resized by dragging its inner edge (double click: default size) | `workspace::dock` |
-| `panels.rs` | the Fleet, Agent and Activity panels (placeholders until phase 4) | — |
+| `panels.rs` | the panels' title strip and state colours, and the Activity panel (a placeholder until phase 4 step 6) | — |
 | `modal_layer.rs` | one modal at a time; escape, a click outside or the modal's `DismissEvent` closes it and gives the keyboard back | `workspace::modal_layer` |
 | `toast_layer.rs` | the fleet's notices as toasts, bottom right: flashes for 5 s (the TUI's flash time), errors for 15 s, reports (titled) until dismissed; at most 3 | status toasts, notifications |
 | `text_input/` | `TextInput`: one line or several (soft-wrapped, `max_lines`), IME, mouse and key selection, clipboard, word moves, undo/redo, placeholder, masking, read-only; `InputEvent::{Edited, Submitted, Cancelled, Blurred}`; `erased.rs` registers it as `ui_input`'s editor | GPUI's `examples/input.rs`, `ui_input::ErasedEditor` |
@@ -152,6 +152,46 @@ simulated drag, the switcher modal, toasts expiring on the test clock,
 text editing through the platform input handler, and the picker.
 `crate::tests::init_test` sets the app up as `main` does, without the
 user's config.
+
+## The Fleet and Agent panels (phase 4, steps 1 and 2)
+
+The first views on top of the workspace pieces. They read the same
+`Store` as the TUI and send what the TUI sends, through `ainet-model`:
+
+| File | What | After Zed's |
+|---|---|---|
+| `fleet_panel.rs` | the Fleet tree in the Store's (the TUI's) order, virtualised (`uniform_list`, every row one height): rigs with a `Disclosure`, status dot, running/total seats, open queue items and summary; agents with their critter, name, role in their colour, `directs N`, a `CountBadge` of requests waiting on you, an envelope with unread messages, the state `Indicator`, task and the TUI's meta line (age, runtime, model, context); empty seats; the loose groups' headers. Who directs whom is drawn with indent guides; folded rigs are skipped by the keys. The selection is the Store's: a new one (from the switcher, a click elsewhere) unfolds its rig and scrolls to it. A right click (or `shift-f10`) opens the agent's `ContextMenu` | `project_panel` |
+| `agent_panel.rs` | the TUI's details pane: a big moving critter, name, role chip, "you › … › name", task and last tool, model and cwd, state, the context gauge gliding a quarter of the way each tick (`ProgressBar`, warning past 60 %, error past 80 %), the activity sparkline, the facts table, the last messages to or from it and its open queue items; the empty den when nobody is selected | — |
+| `critter.rs` | `Critter`, the avatar element: a sprite as quads, one per run of same-coloured pixels, snapped to whole device pixels at any size; `Critter::agent` hops while working and is a still grey ghost once gone. Colours: the palette's own for Deepharness and Omarchy (exactly the TUI's), else the theme's player colour | — |
+| `terminal_item.rs` | `TerminalItem`, an agent's tab (critter in the tab), opened by `Workspace::open_terminal(id)`: one per agent, reused wherever it is open. Until the live terminal (step 3) it shows the last plain-text screen | `terminal_view` |
+| `message.rs` | the message modal (`m`): what `command::message` sends for `@Name text`, so delivered through the typing guard and kept in the mailbox | — |
+
+The agent's menu and keys, all handled by the workspace for the selected
+agent so the menu shows their bindings:
+
+| Menu entry | Key in the Fleet | Sends (as the TUI's command) |
+|---|---|---|
+| Message… | `m` | `Message { to: [id], force: true }` (`@Name text`) |
+| Open Terminal | `enter`, double click | — (opens the tab) |
+| Show Transcript | | `Transcript { agent }`, shown as a report |
+| Capture Screen | | `Capture` (`/capture`) |
+| Relaunch | | `Launch { fresh: true }` (`/relaunch`) |
+| Continue | | `SeatContinue` (`/continue`) |
+| Typing Guard (checked when on) | | `TypingGuard` (`/guard`) |
+| Close Agent… | `delete` | `Close` (`/close`), after asking |
+
+`up`/`down` (or `j`/`k`, and `alt-up`/`alt-down` anywhere) move the
+selection, `left`/`right` fold and unfold the selected agent's rig. Seat
+entries are disabled for agents outside a rig. The requests come from
+`ainet_model::command::for_agent(store, id, AgentCommand)`, which the
+TUI's typed commands share.
+
+Animation: `FleetModel` ticks every 120 ms (`fleet::TICK`, the TUI's) also
+when following ainetd, emitting `fleet::Tick` without re-rendering. A view
+that draws critters keeps a `critter::Animation`, passes it to each
+`Critter::animate`, and on `Tick` calls `cx.notify()` only if
+`animation.take()` says one was painted since: critters in a closed dock,
+an inactive tab or rows scrolled away cost nothing.
 
 ## Upgrading Zed
 

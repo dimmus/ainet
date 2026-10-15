@@ -4,11 +4,12 @@ Plan for adding a native GUI to ainet, built on Zed's UI stack (GPUI and
 Zed's component library) and following Zed's look and interaction model,
 while the console version (CLI + TUI) stays exactly as it is.
 
-Status: **phase 3 done** (option A: panes, splits, docks, modals,
-toasts, the text input and the picker, see [GUI.md](GUI.md)); phase 2
-done (themes, fonts, settings and keymaps); phase 1 done (`crates/gui`:
-the GPUI skeleton on Zed v1.24.2); phase 0 done (`crates/model`); phase 4
-next. Written 2026-10-15 against commit `c0dbb5a`.
+Status: **phase 4 steps 1–2 done** (the Fleet panel with critters and
+the agent menu, the Agent panel; see [GUI.md](GUI.md)), step 3 (the
+terminal element) next; phase 3 done (option A: panes, splits, docks,
+modals, toasts, the text input and the picker); phase 2 done (themes,
+fonts, settings and keymaps); phase 1 done (`crates/gui`: the GPUI
+skeleton on Zed v1.24.2); phase 0 done (`crates/model`). Written 2026-10-15 against commit `c0dbb5a`.
 
 **Decided (2026-10-15): option A.** The GUI uses Zed's real `ui` and `theme`
 crates from a pinned Zed git revision, and the `ainet-gui` crate and binary
@@ -358,6 +359,15 @@ In this order, each usable on its own against `--demo` and a live daemon:
    Chatroom, Events log.
 7. Map item (canvas).
 8. Transcript item and Spec viewer (read-only text).
+
+Steps 1 and 2 done: the Fleet panel (tree in the TUI's order, foldable
+rigs, indent guides, critters, waiting and unread badges, the agent's
+right-click menu and keys, sending what the TUI's commands send through
+`command::for_agent`), the Agent panel (details, gliding context gauge,
+activity, messages, queue), the `Critter` avatar element, a message modal,
+and `TerminalItem` as a stand-in tab that step 3 fills with the live
+terminal. Not yet: cost (ainetd does not report it), the TUI's spinner and
+pulsing glyph for working and waiting agents (a state dot instead).
 
 ### Phase 5 — Command palette, pickers, modals · ~1 week
 
