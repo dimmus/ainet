@@ -603,12 +603,10 @@ impl App {
             self.run(command::answer_question(&item, line));
             return;
         }
-        // In Comms, a line answers the selected message.
-        if self.tab == Tab::Comms && !line.starts_with('@') {
-            match self.selected_entry() {
-                Some(entry) => self.run(command::reply(&entry, line)),
-                None => self.flash("select a message to answer, or start with @Name".into(), true),
-            }
+        // In Comms, a line answers the selected message (or `@Name`s one).
+        if self.tab == Tab::Comms {
+            let entry = self.selected_entry();
+            self.run(command::comms(&self.store, entry.as_ref(), &line));
             return;
         }
         // @Name message, or a message for the selected agent / focused tile.

@@ -504,6 +504,19 @@ pub fn reply(entry: &Entry, body: String) -> Command {
     }
 }
 
+/// A line typed in Comms: `@Name text` to that agent, else a reply to the
+/// selected entry (a threaded reply to a message, a post in a chat's
+/// topic), else what to do.
+pub fn comms(store: &Store, selected: Option<&Entry>, line: &str) -> Command {
+    if line.starts_with('@') {
+        return message(store, line, None);
+    }
+    match selected {
+        Some(entry) => reply(entry, line.to_string()),
+        None => Command::error("select a message to answer, or start with @Name"),
+    }
+}
+
 /// A message from you: `@Name text` to that agent, or plain text to
 /// `default` (the selected agent or focused terminal). Delivered into its
 /// terminal (through any typing guard) and kept in its mailbox.
@@ -581,11 +594,12 @@ mod tests {
     use ainet_core::{Decision, InboxKind, Request, Runtime};
 
     use super::{
-        AgentCommand, Command, Context, answer_choices, complete, for_agent, message, message_to, parse,
+        AgentCommand, Command, Context, answer_choices, comms, complete, for_agent, message, message_to,
+        parse,
     };
     use crate::demo::Demo;
     use crate::link::{Backend, Link, Msg};
-    use crate::store::Store;
+    use crate::store::{Entry, Store};
 
     fn demo() -> Store {
         let mut store = Store::new();
@@ -732,6 +746,82 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert!(matches!(message_to(&lead, String::new()), Command::Error(e) if e == "nothing to send"));
+    }
+
+    #[test]
+    fn comms_lines_reply_or_message() {
+        let store = demo();
+        let entries = store.entries();
+        let message = entries
+            .iter()
+            .find_map(|e| match e {
+                Entry::Message(m) => Some(m.clone()),
+                Entry::Chat(_) => None,
+            })
+            .unwrap();
+        let chat = entries
+            .iter()
+            .find_map(|e| match e {
+                Entry::Chat(c) => Some(c.clone()),
+                Entry::Message(_) => None,
+            })
+            .unwrap();
+
+        // With an entry selected, a line answers it.
+        match sends(comms(&store, Some(&Entry::Message(message.clone())), "on it")) {
+            (
+                Request::Message {
+                    to,
+                    body,
+                    reply_to,
+                    force,
+                    ..
+                },
+                ok,
+            ) => {
+                assert!(to.is_empty());
+                assert_eq!(
+                    (body.as_str(), reply_to, force),
+                    ("on it", Some(message.id), false)
+                );
+                assert_eq!(ok, format!("replied to #{}", message.id));
+            }
+            other => panic!("{other:?}"),
+        }
+        match sends(comms(&store, Some(&Entry::Chat(chat.clone())), "same here")) {
+            (
+                Request::ChatSend {
+                    rig,
+                    topic,
+                    body,
+                    sender,
+                },
+                ok,
+            ) => {
+                assert_eq!(
+                    (rig, topic, body),
+                    (chat.rig.clone(), Some(chat.topic.clone()), "same here".into())
+                );
+                assert_eq!((sender, ok.as_str()), (None, "posted"));
+            }
+            other => panic!("{other:?}"),
+        }
+        // `@Name` messages that agent, selection or not.
+        let lead = store.find_agent("orch-lead@docs").unwrap();
+        for selected in [None, Some(Entry::Chat(chat))] {
+            assert_eq!(
+                format!(
+                    "{:?}",
+                    sends(comms(&store, selected.as_ref(), "@orch-lead ship it"))
+                ),
+                format!("{:?}", sends(message_to(lead, "ship it".into())))
+            );
+        }
+        // Nothing selected: what to do.
+        assert!(matches!(
+            comms(&store, None, "hello"),
+            Command::Error(e) if e == "select a message to answer, or start with @Name"
+        ));
     }
 
     #[test]

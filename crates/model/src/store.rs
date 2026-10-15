@@ -681,6 +681,32 @@ impl Store {
         v.sort_by_key(Entry::created);
         v
     }
+
+    /// The replies to message `id`, then the replies to those, depth
+    /// first in the order they came: each with how deep it is (1 for a
+    /// direct reply). What a thread shows under its message.
+    pub fn replies(&self, id: u64) -> Vec<(usize, &Message)> {
+        let mut out = Vec::new();
+        let mut seen = HashSet::from([id]);
+        self.replies_into(id, 1, &mut seen, &mut out);
+        out
+    }
+
+    fn replies_into<'a>(
+        &'a self,
+        id: u64,
+        depth: usize,
+        seen: &mut HashSet<u64>,
+        out: &mut Vec<(usize, &'a Message)>,
+    ) {
+        for m in self.messages.iter().filter(|m| m.reply_to == Some(id)) {
+            // A reply to itself, or round a loop, is shown once.
+            if seen.insert(m.id) {
+                out.push((depth, m));
+                self.replies_into(m.id, depth + 1, seen, out);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1032,6 +1058,51 @@ mod tests {
         let entries = store.entries();
         assert_eq!(entries.len(), store.messages.len() + store.chat.len());
         assert!(entries.windows(2).all(|w| w[0].created() <= w[1].created()));
+    }
+
+    #[test]
+    fn replies_nest_under_their_message() {
+        let mut store = Store::new();
+        let message = |id: u64, reply_to: Option<u64>| Message {
+            id,
+            from: "a".into(),
+            from_label: "a".into(),
+            to: "b".into(),
+            to_label: "b".into(),
+            body: format!("#{id}"),
+            reply_to,
+            thread: 1,
+            created: id as i64,
+            delivered: None,
+            read: None,
+            held: false,
+        };
+        for (id, reply_to) in [
+            (1, None),
+            (2, Some(1)),
+            (3, Some(2)),
+            (4, Some(1)),
+            (5, None),
+            (6, Some(6)),
+        ] {
+            event(
+                &mut store,
+                Event::Message {
+                    message: message(id, reply_to),
+                },
+            );
+        }
+        let replies = |id| {
+            store
+                .replies(id)
+                .into_iter()
+                .map(|(depth, m)| (depth, m.id))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(replies(1), [(1, 2), (2, 3), (1, 4)]);
+        assert_eq!(replies(2), [(1, 3)]);
+        assert!(replies(5).is_empty());
+        assert!(replies(6).is_empty(), "a reply to itself is not its own reply");
     }
 
     #[test]
