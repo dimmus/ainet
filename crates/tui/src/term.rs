@@ -1,67 +1,39 @@
 //! Typing into an agent's terminal from the TUI, and laying terminals out
 //! in a grid.
 
+use ainet_model::terminal::{self, Key, Mods};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
 
-/// The bytes a terminal would send for a key, as xterm encodes them.
+/// The bytes a terminal would send for a key, as xterm encodes them (the
+/// table is `ainet-model`'s, shared with the desktop app).
 pub fn encode_key(key: KeyEvent) -> Option<Vec<u8>> {
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    let alt = key.modifiers.contains(KeyModifiers::ALT);
-    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
-    let mut out: Vec<u8> = match key.code {
-        KeyCode::Char(c) if ctrl => {
-            let b = match c.to_ascii_lowercase() {
-                c @ 'a'..='z' => c as u8 - b'a' + 1,
-                ' ' | '@' | '2' => 0,
-                '[' | '3' => 0x1b,
-                '\\' | '4' => 0x1c,
-                ']' | '5' => 0x1d,
-                '^' | '6' => 0x1e,
-                '_' | '7' | '-' | '/' => 0x1f,
-                '8' | '?' => 0x7f,
-                _ => return None,
-            };
-            vec![b]
-        }
-        KeyCode::Char(c) => c.to_string().into_bytes(),
-        // Claude Code takes Alt+Enter (and Shift+Enter) as a newline.
-        KeyCode::Enter if alt || shift => b"\x1b\r".to_vec(),
-        KeyCode::Enter => b"\r".to_vec(),
-        KeyCode::Tab => b"\t".to_vec(),
-        KeyCode::BackTab => b"\x1b[Z".to_vec(),
-        KeyCode::Backspace => b"\x7f".to_vec(),
-        KeyCode::Esc => b"\x1b".to_vec(),
-        KeyCode::Left => b"\x1b[D".to_vec(),
-        KeyCode::Right => b"\x1b[C".to_vec(),
-        KeyCode::Up => b"\x1b[A".to_vec(),
-        KeyCode::Down => b"\x1b[B".to_vec(),
-        KeyCode::Home => b"\x1b[H".to_vec(),
-        KeyCode::End => b"\x1b[F".to_vec(),
-        KeyCode::PageUp => b"\x1b[5~".to_vec(),
-        KeyCode::PageDown => b"\x1b[6~".to_vec(),
-        KeyCode::Delete => b"\x1b[3~".to_vec(),
-        KeyCode::Insert => b"\x1b[2~".to_vec(),
-        KeyCode::F(n) => match n {
-            1 => b"\x1bOP".to_vec(),
-            2 => b"\x1bOQ".to_vec(),
-            3 => b"\x1bOR".to_vec(),
-            4 => b"\x1bOS".to_vec(),
-            5 => b"\x1b[15~".to_vec(),
-            6 => b"\x1b[17~".to_vec(),
-            7 => b"\x1b[18~".to_vec(),
-            8 => b"\x1b[19~".to_vec(),
-            9 => b"\x1b[20~".to_vec(),
-            10 => b"\x1b[21~".to_vec(),
-            11 => b"\x1b[23~".to_vec(),
-            _ => return None,
-        },
+    let mods = Mods {
+        ctrl: key.modifiers.contains(KeyModifiers::CONTROL),
+        alt: key.modifiers.contains(KeyModifiers::ALT),
+        shift: key.modifiers.contains(KeyModifiers::SHIFT),
+    };
+    let key = match key.code {
+        KeyCode::Char(c) => Key::Char(c),
+        KeyCode::Enter => Key::Enter,
+        KeyCode::Tab => Key::Tab,
+        KeyCode::BackTab => Key::BackTab,
+        KeyCode::Backspace => Key::Backspace,
+        KeyCode::Esc => Key::Esc,
+        KeyCode::Left => Key::Left,
+        KeyCode::Right => Key::Right,
+        KeyCode::Up => Key::Up,
+        KeyCode::Down => Key::Down,
+        KeyCode::Home => Key::Home,
+        KeyCode::End => Key::End,
+        KeyCode::PageUp => Key::PageUp,
+        KeyCode::PageDown => Key::PageDown,
+        KeyCode::Delete => Key::Delete,
+        KeyCode::Insert => Key::Insert,
+        KeyCode::F(n) => Key::F(n),
         _ => return None,
     };
-    if alt && !matches!(key.code, KeyCode::Enter) {
-        out.insert(0, 0x1b);
-    }
-    Some(out)
+    terminal::encode(key, mods)
 }
 
 /// The key that leaves a terminal you are typing into: Ctrl+] (as telnet),
@@ -74,24 +46,12 @@ pub fn is_leave_key(key: &KeyEvent) -> bool {
 /// Columns for `n` tiles in `area`: as given, or the count that keeps tiles
 /// closest to a terminal's usual shape (about 2.4 columns per row).
 pub fn grid_cols(n: usize, area: Rect, fixed: Option<u16>) -> usize {
-    if n == 0 {
-        return 1;
-    }
-    if let Some(c) = fixed {
-        return (c as usize).clamp(1, n);
-    }
-    (1..=n)
-        .max_by(|&a, &b| {
-            let score = |c: usize| {
-                let rows = n.div_ceil(c);
-                let w = f64::from(area.width) / c as f64;
-                let h = f64::from(area.height) / rows as f64;
-                // The smaller of width and height, in comparable units.
-                (w / 2.4).min(h)
-            };
-            score(a).total_cmp(&score(b)).then(b.cmp(&a))
-        })
-        .unwrap_or(1)
+    terminal::grid_cols(
+        n,
+        f64::from(area.width),
+        f64::from(area.height),
+        fixed.map(usize::from),
+    )
 }
 
 /// Splits `area` into `n` tiles in `cols` columns, rows filled left to right;

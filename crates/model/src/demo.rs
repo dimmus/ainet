@@ -791,6 +791,28 @@ impl Demo {
         rows
     }
 
+    /// Up to `lines` rows of a believable scrollback, then the screen's
+    /// conversation, as plain text (what ainetd sends for `history`).
+    pub fn history(&self, agent: &Agent, tick: u64, lines: usize) -> Vec<String> {
+        let task = agent.task.clone().unwrap_or_default();
+        let cwd = agent.cwd.display();
+        let mut older = Vec::new();
+        for step in 1..=12 {
+            older.push(format!("> step {step} of \"{task}\""));
+            older.push(String::new());
+            older.push(format!("⏺ Read({cwd}/src/part{step}.rs)"));
+            older.push(format!("  ⎿  Read {} lines", 40 + step * 7));
+            older.push(String::new());
+            older.push(format!("⏺ Bash(cargo test part{step})"));
+            older.push(format!("  ⎿  test result: ok. {} passed; 0 failed", 3 + step));
+            older.push(String::new());
+        }
+        let skip = older.len().saturating_sub(lines);
+        let mut rows = older.split_off(skip);
+        rows.extend(self.screen(agent, tick));
+        rows
+    }
+
     /// An agent's terminal at `rows`×`cols`, as escape sequences.
     pub fn terminal(&self, agent: &Agent, tick: u64, rows: u16, cols: u16) -> String {
         let (rows, cols) = (rows.max(8) as usize, cols.max(20) as usize);
@@ -856,5 +878,24 @@ impl Demo {
         put(base + 3, dim, &fit(mode, cols));
         out.push_str(&format!("\x1b[{};5H", base + 2));
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn history_reaches_above_the_screen() {
+        let demo = Demo::new();
+        let Response::Snapshot { agents, .. } = demo.snapshot() else {
+            panic!("a snapshot");
+        };
+        let agent = &agents[0];
+        let screen = demo.screen(agent, 0);
+        let rows = demo.history(agent, 0, 10);
+        assert_eq!(rows.len(), 10 + screen.len());
+        assert!(rows.ends_with(&screen));
+        assert!(demo.history(agent, 0, 10_000).len() > 50);
     }
 }

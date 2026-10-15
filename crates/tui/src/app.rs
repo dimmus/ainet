@@ -1,13 +1,12 @@
 //! The TUI's state on top of the shared fleet [`Store`]: tabs, list
 //! cursors, the input line, effects, and key and mouse handling.
 
-use std::collections::{HashMap, HashSet};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use ainet_core::{Agent, Decision, InboxItem, InboxKind, Request};
 pub use ainet_model::{Backend, Entry, Msg, Row};
-use ainet_model::{Change, Command, Link, Store, command};
+use ainet_model::{Change, Command, Link, Pump, Store, command, terminal};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 use ratatui::widgets::ListState;
@@ -105,10 +104,8 @@ pub struct App {
     pub areas: Areas,
     link: Link<mpsc::Sender<Msg>>,
     rx: mpsc::Receiver<Msg>,
-    dirty: HashSet<String>,
-    last_fetch: HashMap<String, Instant>,
-    /// Sizes we asked panes to take, so we ask once per change.
-    sizes: HashMap<String, (u16, u16)>,
+    /// Which terminals to fetch, and the sizes we asked panes to take.
+    pump: Pump,
 }
 
 #[derive(Default, Clone)]
@@ -151,9 +148,7 @@ impl App {
             areas: Areas::default(),
             link,
             rx,
-            dirty: HashSet::new(),
-            last_fetch: HashMap::new(),
-            sizes: HashMap::new(),
+            pump: Pump::new(),
         };
         if let Some(snap) = snapshot {
             app.store.connected = true;
@@ -237,7 +232,7 @@ impl App {
 
     fn apply(&mut self, msg: Msg) {
         match self.store.apply(msg) {
-            Change::None | Change::InboxResolved | Change::Comms | Change::Term(_) => {}
+            Change::None | Change::InboxResolved | Change::Comms | Change::Term(_) | Change::History(_) => {}
             Change::Snapshot => {
                 self.select_waiting();
                 self.after_fleet();
@@ -273,7 +268,7 @@ impl App {
             }
             Change::Output(agent) => {
                 if self.shows_terminal(&agent) {
-                    self.dirty.insert(agent);
+                    self.pump.mark(&agent);
                 }
             }
             Change::Flash(text, err) => self.flash(text, err),
@@ -338,7 +333,7 @@ impl App {
                     let fade = fx::fade_from_fg(c(self.pal.bg), (280, Interpolation::SineOut));
                     self.fx
                         .add_unique_effect("details", fade.with_area(self.areas.details));
-                    self.dirty.insert(id);
+                    self.pump.mark(&id);
                 }
             }
         }
@@ -417,11 +412,11 @@ impl App {
         match self.tab {
             Tab::Terminals => {
                 let ids = self.grid_ids();
-                self.dirty.extend(ids);
+                self.pump.mark_all(ids);
             }
             Tab::Fleet => {
                 if let Some(s) = self.store.selected.clone() {
-                    self.dirty.insert(s);
+                    self.pump.mark(&s);
                 }
             }
             _ => {}
@@ -430,20 +425,7 @@ impl App {
 
     /// Fetches screens that changed, at most ~15 times a second each.
     pub fn pump(&mut self) {
-        let due: Vec<String> = self
-            .dirty
-            .iter()
-            .filter(|id| {
-                self.last_fetch
-                    .get(*id)
-                    .is_none_or(|t| t.elapsed() > Duration::from_millis(66))
-            })
-            .cloned()
-            .collect();
-        for id in due {
-            self.dirty.remove(&id);
-            self.last_fetch.insert(id.clone(), Instant::now());
-            let size = self.sizes.get(&id).copied().unwrap_or((24, 90));
+        for (id, size) in self.pump.due(Instant::now()) {
             if let Some(agent) = self.store.agents.get(&id) {
                 self.link.fetch(agent, self.tick, size);
             }
@@ -457,16 +439,13 @@ impl App {
         }
         let tiles = self.areas.tiles.clone();
         for (_, id, size) in tiles {
-            if size.0 < 2 || size.1 < 10 || self.sizes.get(&id) == Some(&size) {
-                continue;
+            if self.pump.resize(&id, size) {
+                self.link.quiet(Request::Resize {
+                    agent: id,
+                    rows: size.0,
+                    cols: size.1,
+                });
             }
-            self.sizes.insert(id.clone(), size);
-            self.dirty.insert(id.clone());
-            self.link.quiet(Request::Resize {
-                agent: id,
-                rows: size.0,
-                cols: size.1,
-            });
         }
     }
 
@@ -513,7 +492,7 @@ impl App {
         );
         let name = self.store.agents.get(&id).map(|a| a.label()).unwrap_or_default();
         self.flash(format!("typing into {name} · Ctrl+] to leave"), false);
-        self.dirty.insert(id);
+        self.pump.mark(&id);
     }
 
     fn stop_typing(&mut self) {
@@ -530,15 +509,12 @@ impl App {
             agent: id.clone(),
             data,
         });
-        self.dirty.insert(id);
+        self.pump.mark(&id);
     }
 
     pub fn on_paste(&mut self, text: String) {
         if self.grid.typing {
-            let mut bytes = b"\x1b[200~".to_vec();
-            bytes.extend_from_slice(text.as_bytes());
-            bytes.extend_from_slice(b"\x1b[201~");
-            self.type_into(bytes);
+            self.type_into(terminal::paste(&text, true));
         } else {
             let at = self.byte_at(self.cursor);
             self.input.insert_str(at, &text.replace(['\r', '\n'], " "));

@@ -64,6 +64,8 @@ pub enum Change {
     Output(String),
     /// A fresh screen for an agent's terminal arrived.
     Term(String),
+    /// Scrollback for an agent's terminal arrived.
+    History(String),
     /// Messages, chat or the queue changed.
     Comms,
     /// A notice for the user.
@@ -116,6 +118,9 @@ pub struct Store {
     pub screens: HashMap<String, Vec<String>>,
     /// Live terminal state per agent.
     pub terms: HashMap<String, vt100::Parser>,
+    /// The scrollback last fetched per agent: rows above the screen, then
+    /// the screen, as plain text.
+    pub history: HashMap<String, Vec<String>>,
     pub connected: bool,
 }
 
@@ -156,6 +161,10 @@ impl Store {
                 self.terms.insert(id.clone(), parser);
                 self.screens.insert(id.clone(), rows);
                 Change::Term(id)
+            }
+            Msg::History { id, rows } => {
+                self.history.insert(id.clone(), rows);
+                Change::History(id)
             }
             Msg::Flash(text, err) => Change::Flash(text, err),
             Msg::Popup(title, text) => Change::Popup(title, text),
@@ -978,5 +987,12 @@ mod tests {
         assert_eq!(store.terms["a"].screen().size(), (4, 20));
         assert!(store.terms["a"].screen().contents().starts_with("hello"));
         assert_eq!(store.screens["a"], ["hello"]);
+
+        let change = store.apply(Msg::History {
+            id: "a".into(),
+            rows: vec!["older".into(), "hello".into()],
+        });
+        assert_eq!(change, Change::History("a".into()));
+        assert_eq!(store.history["a"], ["older", "hello"]);
     }
 }

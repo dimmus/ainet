@@ -25,6 +25,12 @@ pub enum Msg {
         size: (u16, u16),
         rows: Vec<String>,
     },
+    /// Scrollback: up to the asked number of rows above the screen, then
+    /// the screen, as plain text.
+    History {
+        id: String,
+        rows: Vec<String>,
+    },
     Flash(String, bool),
     Popup(String, String),
     Connected(bool),
@@ -51,8 +57,12 @@ pub enum Backend {
 pub struct Link<S: Sink> {
     backend: Backend,
     sink: S,
-    fetch: Option<mpsc::Sender<String>>,
+    fetch: Option<mpsc::Sender<Want>>,
 }
+
+/// A screen the fetcher is asked for: an agent's id, and how many rows of
+/// scrollback (none: the formatted screen).
+type Want = (String, usize);
 
 impl<S: Sink> Link<S> {
     /// Starts following the daemon (or sets up the demo). With the demo, the
@@ -144,7 +154,25 @@ impl<S: Sink> Link<S> {
             }
             Backend::Daemon(_) => {
                 if let Some(f) = &self.fetch {
-                    let _ = f.send(agent.id.clone());
+                    let _ = f.send((agent.id.clone(), 0));
+                }
+            }
+        }
+    }
+
+    /// Asks for up to `lines` rows of `agent`'s scrollback above its
+    /// screen, as plain text; it comes back as `Msg::History`.
+    pub fn history(&self, agent: &Agent, tick: u64, lines: usize) {
+        match &self.backend {
+            Backend::Demo(demo) => {
+                self.sink.send(Msg::History {
+                    id: agent.id.clone(),
+                    rows: demo.history(agent, tick, lines),
+                });
+            }
+            Backend::Daemon(_) => {
+                if let Some(f) = &self.fetch {
+                    let _ = f.send((agent.id.clone(), lines.max(1)));
                 }
             }
         }
@@ -214,18 +242,19 @@ fn request<S: Sink>(socket: &Path, req: Request, tx: &S, ok: String, timeout: Du
     });
 }
 
-/// A thread that fetches formatted screens for the ids it is sent, one
-/// connection, skipping duplicates that queued up meanwhile.
-fn fetcher<S: Sink>(socket: PathBuf, tx: S) -> mpsc::Sender<String> {
-    let (want_tx, want_rx) = mpsc::channel::<String>();
+/// A thread that fetches the screens it is asked for (formatted, or
+/// scrollback as text), one connection, skipping duplicates that queued up
+/// meanwhile.
+fn fetcher<S: Sink>(socket: PathBuf, tx: S) -> mpsc::Sender<Want> {
+    let (want_tx, want_rx) = mpsc::channel::<Want>();
     thread::spawn(move || {
         let mut client: Option<Client> = None;
         while let Ok(first) = want_rx.recv() {
-            let mut batch: Vec<String> = vec![first];
+            let mut batch: Vec<Want> = vec![first];
             batch.extend(want_rx.try_iter());
             let mut seen = HashSet::new();
-            batch.retain(|id| seen.insert(id.clone()));
-            for id in batch {
+            batch.retain(|want| seen.insert(want.clone()));
+            for (id, history) in batch {
                 if client.is_none() {
                     client = Client::connect(&socket).ok();
                     if let Some(c) = &client {
@@ -235,16 +264,21 @@ fn fetcher<S: Sink>(socket: PathBuf, tx: S) -> mpsc::Sender<String> {
                 let Some(c) = client.as_mut() else { break };
                 match c.call(&Request::Screen {
                     agent: id.clone(),
-                    formatted: true,
-                    history: 0,
+                    formatted: history == 0,
+                    history,
                 }) {
                     Ok(Response::Screen { rows, ansi, size }) => {
-                        if !tx.send(Msg::Term {
-                            id,
-                            ansi: ansi.unwrap_or_default(),
-                            size,
-                            rows,
-                        }) {
+                        let msg = if history == 0 {
+                            Msg::Term {
+                                id,
+                                ansi: ansi.unwrap_or_default(),
+                                size,
+                                rows,
+                            }
+                        } else {
+                            Msg::History { id, rows }
+                        };
+                        if !tx.send(msg) {
                             return;
                         }
                     }
