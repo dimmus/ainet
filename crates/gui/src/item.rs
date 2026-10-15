@@ -1,8 +1,9 @@
 //! What a pane shows as tabs, after Zed's `workspace::item`: an [`Item`] is
 //! a view with a tab (an icon or critter slot, a label, a tooltip) that can
 //! be closed, maybe split into a second pane, and is told when its tab
-//! becomes active or stops being active. Terminals, Comms, the Inbox and
-//! the Map become items in phase 4; until then [`Placeholder`] stands in.
+//! becomes active or stops being active. Terminals, Comms, the Inbox, the
+//! Map and reports are items; [`Placeholder`] stands in for views still to
+//! come (Review) and is the first tab.
 
 use gpui::{
     AnyElement, AnyView, App, Context, Entity, EntityId, EventEmitter, FocusHandle, Focusable, Subscription,
@@ -189,10 +190,6 @@ impl Placeholder {
             focus: cx.focus_handle(),
             activations: 0,
         }
-    }
-
-    pub fn view(&self) -> &View {
-        &self.view
     }
 
     fn icon(&self) -> IconName {

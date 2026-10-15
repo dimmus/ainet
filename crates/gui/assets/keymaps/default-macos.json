@@ -119,6 +119,21 @@
     }
   },
   {
+    // The Map, when it has the keyboard: enter opens the selected
+    // agent's terminal, the list keys move the selection, and the zoom
+    // keys are Zed's font-size ones.
+    "context": "Map",
+    "bindings": {
+      "down": "fleet::SelectNext",
+      "up": "fleet::SelectPrev",
+      "enter": "fleet::OpenTerminal",
+      "cmd-=": "map::ZoomIn",
+      "cmd-+": "map::ZoomIn",
+      "cmd--": "map::ZoomOut",
+      "cmd-0": "map::FitView"
+    }
+  },
+  {
     // The Queue panel (bottom dock): the list keys move through the
     // items, enter shows one in full, shift-f10 opens its menu.
     "context": "QueuePanel",

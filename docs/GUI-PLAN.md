@@ -4,14 +4,15 @@ Plan for adding a native GUI to ainet, built on Zed's UI stack (GPUI and
 Zed's component library) and following Zed's look and interaction model,
 while the console version (CLI + TUI) stays exactly as it is.
 
-Status: **phase 4 steps 1–6 and 8 done** (the Fleet panel with
+Status: **phase 4 done** (the Fleet panel with
 critters and the agent menu, the Agent panel, the live terminal with
 Tile all, the Inbox with approval cards, questions and the glowing
 waiting badge, Comms with threads and a compose box, the bottom dock's
-Queue, Chatroom and Events panels, transcripts, specs and queue items as
+Queue, Chatroom and Events panels, the Map with rig clusters and
+messages in flight, transcripts, specs and queue items as
 report tabs; review fixes applied, with `ctrl-o`, `ctrl-shift-y` and the
-Release and Remove seat entries; see [GUI.md](GUI.md)), step 7 (the Map)
-next; phase 3 done (option A: panes, splits, docks,
+Release and Remove seat entries; see [GUI.md](GUI.md)), phase 5 next;
+phase 3 done (option A: panes, splits, docks,
 modals, toasts, the text input and the picker); phase 2 done (themes,
 fonts, settings and keymaps); phase 1 done (`crates/gui`: the GPUI
 skeleton on Zed v1.24.2); phase 0 done (`crates/model`). Written 2026-10-15 against commit `c0dbb5a`.
@@ -423,6 +424,20 @@ new `command::queue`), a Chatroom per rig and topic with a box posting
 `ainet_model::journal`, capped at 500, newest last). Not yet: creating a
 queue item from the panel (`/queue` in Comms does), editing priority and
 tags, a reason when unclaiming, `@` completion in the handoff form.
+
+Step 7 done: `MapItem`, the TUI's Map as a canvas tab (`ctrl-t`): each
+rig a labelled cluster of its live agents and the loose agents another,
+laid out by the new pure `ainet_model::map::layout` (the TUI's layers by
+depth per cluster, clusters packed to fit the tab, nodes shrinking
+rather than overlapping), critter nodes with name, role and state,
+`delegates_to`/`spawned_by`/parent edges as curves with arrowheads, the
+TUI's work flowing along edges (`map::pulses`, which the TUI now calls),
+and each new message between two agents flying from sender to recipient
+over a second, frame by frame while any is in the air; hover lights a
+node and its edges, a click selects, a double click opens the terminal,
+the wheel and dragging pan and `ctrl`-wheel zooms, fitted at first. Not
+yet: empty and stopped seats on the map, edge kinds other than who
+directs whom, a menu on nodes, keeping the view across sessions.
 
 Step 8 done: `ReportItem`, a read-only, selectable text tab in the buffer
 font for replies that are long text (transcripts, `/spec`, `/export`, a

@@ -272,6 +272,7 @@ mod tests {
                     "Inbox",
                     "Comms",
                     "QueuePanel",
+                    "Map",
                     "Picker",
                     "TextInput",
                     "TextInput && multiline",

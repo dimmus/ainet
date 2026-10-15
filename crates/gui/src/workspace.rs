@@ -38,6 +38,7 @@ use crate::fleet::{FleetModel, ReportWanted};
 use crate::fleet_panel::FleetPanel;
 use crate::inbox::InboxItem;
 use crate::item::{ItemHandle, Placeholder};
+use crate::map::MapItem;
 use crate::message::MessageModal;
 use crate::modal_layer::{ModalLayer, ModalView};
 use crate::pane::{Pane, PaneEvent};
@@ -156,6 +157,7 @@ impl Workspace {
         let first_item: Box<dyn ItemHandle> = match view.unwrap_or(View::Fleet) {
             View::Inbox => Box::new(cx.new(|cx| InboxItem::new(fleet.clone(), window, cx))),
             View::Comms => Box::new(cx.new(|cx| CommsItem::new(fleet.clone(), window, cx))),
+            View::Map => Box::new(cx.new(|cx| MapItem::new(fleet.clone(), cx))),
             view => Box::new(cx.new(|cx| Placeholder::new(view, cx))),
         };
         first.update(cx, |pane, cx| pane.add_item(first_item, true, false, window, cx));
@@ -547,22 +549,30 @@ impl Workspace {
         self.activate_pane(next, window, cx);
     }
 
-    /// Shows a view of phase 4 as a tab of the active pane, or activates
-    /// its tab if one is open there already.
-    pub fn open_placeholder(&mut self, view: View, window: &mut Window, cx: &mut Context<Self>) {
-        let pane = self.active_pane.clone();
-        let existing = pane.read(cx).items().position(|item| {
-            item.to_any()
-                .downcast::<Placeholder>()
-                .is_ok_and(|p| p.read(cx).view() == &view)
-        });
-        match existing {
-            Some(ix) => pane.update(cx, |p, cx| p.activate_item(ix, true, window, cx)),
-            None => {
-                let item = cx.new(|cx| Placeholder::new(view, cx));
-                pane.update(cx, |p, cx| p.add_item(Box::new(item), true, true, window, cx));
+    /// Opens the Map and gives it the keyboard: activates its tab where
+    /// one is open (in any pane), else adds one to the active pane.
+    pub fn open_map(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<MapItem> {
+        for pane in self.panes() {
+            let at = pane
+                .read(cx)
+                .items()
+                .position(|i| i.to_any().downcast::<MapItem>().is_ok());
+            if let Some(ix) = at {
+                self.active_pane = pane.clone();
+                pane.update(cx, |p, cx| p.activate_item(ix, true, window, cx));
+                return pane
+                    .read(cx)
+                    .active_item()
+                    .and_then(|i| i.to_any().downcast::<MapItem>().ok())
+                    .expect("just activated");
             }
         }
+        let map = cx.new(|cx| MapItem::new(self.fleet.clone(), cx));
+        self.active_pane.update(cx, |p, cx| {
+            p.add_item(Box::new(map.clone()), true, true, window, cx)
+        });
+        cx.notify();
+        map
     }
 
     /// Opens the Inbox and gives it the keyboard: activates its tab where
@@ -1083,9 +1093,9 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &Allow, window, cx| this.answer_from_outside(window, cx)))
             .on_action(cx.listener(|this, _: &Always, window, cx| this.answer_from_outside(window, cx)))
             .on_action(cx.listener(|this, _: &Deny, window, cx| this.answer_from_outside(window, cx)))
-            .on_action(
-                cx.listener(|this, _: &OpenMap, window, cx| this.open_placeholder(View::Map, window, cx)),
-            )
+            .on_action(cx.listener(|this, _: &OpenMap, window, cx| {
+                this.open_map(window, cx);
+            }))
             // Pane actions with the keyboard outside the panes.
             .on_action(cx.listener(|this, _: &SplitRight, window, cx| {
                 let pane = this.active_pane.clone();
@@ -1241,7 +1251,7 @@ mod tests {
         // An item can close itself.
         cx.simulate_keystrokes("ctrl-t");
         let item = pane.read_with(cx, |p, _| p.active_item().unwrap().to_any());
-        item.downcast::<Placeholder>().unwrap().update(cx, |_, cx| {
+        item.downcast::<MapItem>().unwrap().update(cx, |_, cx| {
             cx.emit(crate::item::ItemEvent::UpdateTab);
             cx.emit(crate::item::ItemEvent::CloseItem);
         });

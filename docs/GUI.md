@@ -140,7 +140,7 @@ Keys (Linux; macOS has the `cmd` equivalents), in the keymaps:
 | `ctrl-alt-left/right/up/down` | the pane in that direction (Zed's are `ctrl-k` chords, which a terminal needs) |
 | `shift-escape` | zoom the active pane, or put it back |
 | `ctrl-b`, `ctrl-alt-b`, `ctrl-j` | left, right, bottom dock |
-| `ctrl-shift-c`, `ctrl-shift-i`, `ctrl-t` | Comms, Inbox, Map tabs (Map is a placeholder) |
+| `ctrl-shift-c`, `ctrl-shift-i`, `ctrl-t` | Comms, Inbox, Map tabs |
 | `ctrl-y`, `ctrl-a`, `ctrl-n` | allow, always allow, deny (outside the Inbox: open it on the oldest request) |
 | `ctrl-p` | the agent switcher |
 | `ctrl-o` | the operator's terminal, to type into; with no operator running, starts one (`command::operator_up`), as the TUI's |
@@ -514,6 +514,74 @@ TUI now uses), `Store::chat_rooms`/`chat_in`, `Palette::qstate` (the TUI's
 chip colours), the `journal` module, and the demo answers transcripts,
 specs, exports and the queue requests; all with tests.
 
+## The Map (phase 4 step 7)
+
+`MapItem` (`map.rs`) is the TUI's Map (`draw_map`) as a tab, opened by
+`workspace::OpenMap` (`ctrl-t`, the TUI's key), `--view map` or `/view
+map` in Comms. It is one `canvas`: the clusters, edges and dots are
+painted, and the cluster titles and the nodes are ordinary elements laid
+out in the canvas's prepaint where the layout puts them, so they are
+Zed's components (labels, `Indicator`, tooltips) with their own mouse
+handling, clipped to the tab.
+
+- **Layout.** `ainet_model::map::layout(store, width, height)`, pure and
+  UI-agnostic: each rig with live agents is a cluster, the loose agents
+  another, last. Inside a cluster the agents are in layers by depth, each
+  layer spread across the width and the layers spread down, as the TUI
+  lays out its Map; an agent sits under the first agent of its cluster
+  that directs it, children under their director. Clusters are packed in
+  rows, as wide as their widest layer needs and as tall as their layers;
+  every number of columns is tried and the one that lets the clusters
+  grow most is kept, so a wide tab puts the rigs side by side and a tall
+  one stacks them. Nodes are 132 × 88 (a critter, name, role, state) and
+  shrink alike (`Layout::scale`) when the tab is too small: nothing
+  overlaps or leaves the box.
+- **Edges.** Who directs whom: a rig's `delegates_to` (from directs to)
+  and `spawned_by` (to directs from, drawn dashed) between seats with
+  agents in them, then each agent's `parent` (also across clusters), once
+  per pair. Each is a Bézier curve (`map::route`) from under the director
+  to over the one it directs (or side to side when level) with an
+  arrowhead, in the theme's `border` colour.
+- **What moves.** The critters, on the fleet's tick; the TUI's work in
+  flight on the same tick (`map::pulses`, now shared with the TUI): dots
+  running down an edge to an agent at work in its colour, up from one
+  that needs you in the warning colour; and every new message between two
+  agents on the map, a dot in the sender's colour with a fading trail
+  flying from sender to recipient along their edge (backwards for one
+  going up it) or straight across, over a second (`map::FLIGHT`, eased),
+  drawn frame by frame (`on_next_frame`) only while one is in the air.
+  `map::Flights` is that state, pure: it notes the newest message seen,
+  so messages from before the tab opened and edits of old ones (read,
+  delivered) do not fly; at most 64 are in the air.
+- **Mouse.** Hovering a node lights it and its edges (the accent colour;
+  the others fade); a click selects the agent (the Store's selection, so
+  the Fleet and Agent panels follow), a double click opens its terminal.
+  The wheel pans, as does dragging the background; `ctrl`-wheel (`cmd`
+  on macOS) zooms about the pointer (25 % to 400 %). The view starts
+  fitted to the tab; the strip above has the legend, the zoom and Zoom
+  Out, Zoom In and Fit to View buttons. Nobody running: it says so.
+
+Keys (context `Map`, the tab with the keyboard):
+
+| Keys | Action |
+|---|---|
+| `up`, `down` | `fleet::SelectPrev`, `SelectNext` (the selection shows on the map) |
+| `enter` | `fleet::OpenTerminal`, the selected agent's |
+| `ctrl-=`, `ctrl-+`, `ctrl--`, `ctrl-0` | `map::ZoomIn`, `ZoomIn`, `ZoomOut`, `FitView` (Zed's font size keys; `cmd` on macOS) |
+
+Tests: pure ones in `ainet-model` for the layout (the demo's two rigs and
+seven agents, the lead above the three it directs, no overlaps and
+inside the box at sizes from 1600 × 900 down to 90 × 60, side by side
+when wide and stacked when tall, `spawned_by` pointing from the spawner,
+loose agents in their own cluster, edges across clusters, a loop in the
+edges), routes, and the pulses being the TUI's; pure ones in the GUI for
+the flights (taking off once, only between agents on the map, easing,
+landing after a second, at most 64) and the camera (zooming about the
+pointer, mapping back); headless ones for `ctrl-t` drawing every live
+agent inside the map without overlaps, zoom and fit, hover, click and
+double click, dragging to pan, a message sent through the fleet flying
+and landing on the test clock, and the empty fleet.
+
 ## Upgrading Zed
 
 1. Pick the release: the newest `vX.Y.Z` tag (not `-pre`) on
@@ -586,7 +654,7 @@ not parse are listed in the status bar.
 
 Keys: `crates/gui/assets/keymaps/default-{linux,macos}.json`, in Zed's
 format, with the contexts `Workspace`, `FleetPanel`, `Terminal`, `Inbox`,
-`Comms`, `CommsCompose`, `QueuePanel`, `Picker` and `TextInput` (see "The workspace pieces" for the
+`Comms`, `CommsCompose`, `QueuePanel`, `Map`, `Picker` and `TextInput` (see "The workspace pieces" for the
 pane, dock and text keys). `~/.config/ainet/keymap.json` adds to them and
 overrides them (`null` unbinds), and reloads on save; bindings it cannot
 read are listed in the status bar and the rest apply. `ctrl-alt-,` opens

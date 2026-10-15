@@ -156,6 +156,18 @@ actions!(
     ]
 );
 
+actions!(
+    map,
+    [
+        /// Zooms the map in, about its centre.
+        ZoomIn,
+        /// Zooms the map out, about its centre.
+        ZoomOut,
+        /// Fits the whole fleet in the map again.
+        FitView,
+    ]
+);
+
 /// The Queue panel's actions, in a module of their own:
 /// `queue::OpenContextMenu` and `fleet::OpenContextMenu` would otherwise
 /// clash.

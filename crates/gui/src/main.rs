@@ -18,6 +18,7 @@ mod fleet_panel;
 mod inbox;
 mod item;
 mod keymap;
+mod map;
 mod message;
 mod modal_layer;
 mod pane;
