@@ -252,11 +252,21 @@ impl Selection {
     }
 
     /// Its text in `screen`: lines end where rows do, unless the row
-    /// wrapped; trailing blanks are dropped, as terminals copy.
+    /// wrapped; trailing blanks are dropped, as terminals copy. The grid
+    /// drawn can be bigger than the screen (before a resize takes, or a
+    /// pane that keeps its size): what lies outside it is nothing.
     pub fn text(&self, screen: &vt100::Screen) -> String {
-        let (_, cols) = screen.size();
+        let (rows, cols) = screen.size();
         let ((r0, c0), (r1, c1)) = self.ordered();
-        screen.contents_between(r0, c0, r1, (c1 + 1).min(cols))
+        if rows == 0 || r0 >= rows {
+            return String::new();
+        }
+        let (r1, end) = if r1 >= rows {
+            (rows - 1, cols)
+        } else {
+            (r1, (c1 + 1).min(cols))
+        };
+        screen.contents_between(r0, c0.min(cols), r1, end)
     }
 }
 
@@ -408,6 +418,23 @@ mod tests {
         assert_eq!(sel.text(s.screen()), "ello\nworl");
         assert_eq!(Selection::at((2, 0)).text(s.screen()), "e");
         assert_eq!(Selection::at((2, 9)).rows(10), [(2, 9, 1)]);
+    }
+
+    #[test]
+    fn selections_past_the_screen_copy_what_is_on_it() {
+        let s = screen(4, 10, "hello\r\nworld\r\n\r\nlast");
+        let past_the_edge = Selection {
+            anchor: (0, 15),
+            head: (1, 3),
+        };
+        assert_eq!(past_the_edge.text(s.screen()), "\nworl");
+        let past_the_bottom = Selection {
+            anchor: (3, 0),
+            head: (7, 2),
+        };
+        assert_eq!(past_the_bottom.text(s.screen()), "last");
+        assert_eq!(Selection::at((6, 30)).text(s.screen()), "");
+        assert_eq!(Selection::at((0, 12)).text(s.screen()), "");
     }
 
     #[test]

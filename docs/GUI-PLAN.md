@@ -6,8 +6,9 @@ while the console version (CLI + TUI) stays exactly as it is.
 
 Status: **phase 4 steps 1–4 done** (the Fleet panel with critters and
 the agent menu, the Agent panel, the live terminal with Tile all, the
-Inbox with approval cards, questions and the glowing waiting badge; see
-[GUI.md](GUI.md)), step 5 (Comms) next; phase 3 done (option A: panes, splits, docks,
+Inbox with approval cards, questions and the glowing waiting badge;
+review fixes applied, with `ctrl-o`, `ctrl-shift-y` and the Release and
+Remove seat entries; see [GUI.md](GUI.md)), step 5 (Comms) next; phase 3 done (option A: panes, splits, docks,
 modals, toasts, the text input and the picker); phase 2 done (themes,
 fonts, settings and keymaps); phase 1 done (`crates/gui`: the GPUI
 skeleton on Zed v1.24.2); phase 0 done (`crates/model`). Written 2026-10-15 against commit `c0dbb5a`.
@@ -405,7 +406,7 @@ Command palette over all actions with bindings and the free-text command
 language; agent switcher (`ctrl-p`); spec picker + `Up` modal (cwd chooser
 via `cx.prompt_for_paths`, name, fresh seats, `--plan` preview); restore /
 snapshot picker; spawn modal (runtime, cwd, role); grow modal; theme
-selector; operator (`ctrl-o`) as in the TUI.
+selector. (Operator, `ctrl-o`, came early, in phase 4.)
 
 ### Phase 6 — Performance and live terminals · ~1 week
 

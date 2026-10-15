@@ -1,7 +1,8 @@
 //! Writing to one agent (`m` in the Fleet, or its menu): a modal with the
 //! agent's critter and a text field. Enter sends what the TUI's `@Name
-//! text` line sends (`ainet-model`'s `command::message`): delivered into
-//! its terminal, through any typing guard, and kept in its mailbox.
+//! text` line sends (`ainet-model`'s `command::message_to`), always to this
+//! agent: delivered into its terminal, through any typing guard, and kept
+//! in its mailbox.
 //! Shift-enter starts a new line; escape gives up.
 
 use ainet_model::command;
@@ -63,7 +64,12 @@ impl MessageModal {
         }
         let agent = self.agent.clone();
         self.fleet.update(cx, |fleet, cx| {
-            let sent = command::message(&fleet.store, &text, Some(&agent));
+            // To this agent whatever the text says: a leading `@word` is
+            // the command line's address, not the modal's.
+            let sent = match fleet.store.agents.get(&agent) {
+                Some(a) => command::message_to(a, text),
+                None => ainet_model::Command::Error("no such agent".into()),
+            };
             fleet.run(sent, cx);
         });
         cx.emit(DismissEvent);

@@ -110,7 +110,7 @@ GPUI (the pane tree, divider dragging, the text buffer).
 | `dock.rs` | `Dock` (left, right, bottom) holding `Panel`s, opened and closed, resized by dragging its inner edge (double click: default size) | `workspace::dock` |
 | `panels.rs` | the panels' title strip and state colours, and the Activity panel (a placeholder until phase 4 step 6) | — |
 | `modal_layer.rs` | one modal at a time; escape, a click outside or the modal's `DismissEvent` closes it and gives the keyboard back | `workspace::modal_layer` |
-| `toast_layer.rs` | the fleet's notices as toasts, bottom right: flashes for 5 s (the TUI's flash time), requests waiting on you for 10 s (with the agent's critter and a Review button), errors for 15 s, reports (titled) until dismissed; at most 3 | status toasts, notifications |
+| `toast_layer.rs` | the fleet's notices as toasts, bottom right: flashes for 5 s (the TUI's flash time), requests waiting on you for 10 s (with the agent's critter and a Review button), errors for 15 s, reports (titled) until dismissed, their text in the buffer font scrolling under a title row that keeps the close button; at most 3. The empty flash a quiet request (a key, a resize, `Interact`) gets back is dropped by `FleetModel`, which also re-renders only for batches that changed something (output alone does not) | status toasts, notifications |
 | `text_input/` | `TextInput`: one line or several (soft-wrapped, `max_lines`), IME, mouse and key selection, clipboard, word moves, undo/redo, placeholder, masking, read-only; `InputEvent::{Edited, Submitted, Cancelled, Blurred}`; `erased.rs` registers it as `ui_input`'s editor | GPUI's `examples/input.rs`, `ui_input::ErasedEditor` |
 | `picker.rs` | `Picker<D: PickerDelegate>` in the modal layer: query input, fuzzy matches with highlighted characters (Zed's `fuzzy`), `menu::*` keys | `picker` |
 | `switcher.rs` | the agent switcher (`ctrl-p`), the first picker: picking selects the agent | `file_finder` |
@@ -138,6 +138,8 @@ Keys (Linux; macOS has the `cmd` equivalents), in the keymaps:
 | `ctrl-shift-c`, `ctrl-shift-i`, `ctrl-t` | Comms, Inbox, Map tabs (Comms and Map are placeholders) |
 | `ctrl-y`, `ctrl-a`, `ctrl-n` | allow, always allow, deny (outside the Inbox: open it on the oldest request) |
 | `ctrl-p` | the agent switcher |
+| `ctrl-o` | the operator's terminal, to type into; with no operator running, starts one (`command::operator_up`), as the TUI's |
+| `ctrl-shift-y` | select the next agent with a request waiting on you (`Store::next_waiting_agent`, round again) |
 | `escape`, `enter`, `up`, `down`, `home`, `end` | `menu::*`, for menus, pickers and modals |
 
 `workspace::ActivateNextPane`/`ActivatePreviousPane` and
@@ -165,7 +167,7 @@ The first views on top of the workspace pieces. They read the same
 | `agent_panel.rs` | the TUI's details pane: a big moving critter, name, role chip, "you › … › name", task and last tool, model and cwd, state, the context gauge gliding a quarter of the way each tick (`ProgressBar`, warning past 60 %, error past 80 %), the activity sparkline, the facts table, the last messages to or from it and its open queue items; the empty den when nobody is selected | — |
 | `critter.rs` | `Critter`, the avatar element: a sprite as quads, one per run of same-coloured pixels, snapped to whole device pixels at any size; `Critter::agent` hops while working and is a still grey ghost once gone. Colours: the palette's own for Deepharness and Omarchy (exactly the TUI's), else the theme's player colour | — |
 | `terminal_item.rs` | `TerminalItem`, an agent's tab (critter in the tab), opened by `Workspace::open_terminal(id)`: one per agent, reused wherever it is open; the live terminal of the next section | `terminal_view` |
-| `message.rs` | the message modal (`m`): what `command::message` sends for `@Name text`, so delivered through the typing guard and kept in the mailbox | — |
+| `message.rs` | the message modal (`m`): what `command::message` sends for `@Name text` (through `command::message_to`, so always to the modal's agent, a leading `@word` being part of the text), delivered through the typing guard and kept in the mailbox | — |
 
 The agent's menu and keys, all handled by the workspace for the selected
 agent so the menu shows their bindings:
@@ -179,11 +181,14 @@ agent so the menu shows their bindings:
 | Relaunch | | `Launch { fresh: true }` (`/relaunch`) |
 | Continue | | `SeatContinue` (`/continue`) |
 | Typing Guard (checked when on) | | `TypingGuard` (`/guard`) |
+| Release Seat | | `Release` (`ainet release`): the process runs on outside the rig |
+| Remove Seat… | | `RemoveSeat` (`/remove`), after asking |
 | Close Agent… | `delete` | `Close` (`/close`), after asking |
 
 `up`/`down` (or `j`/`k`, and `alt-up`/`alt-down` anywhere) move the
 selection, `left`/`right` fold and unfold the selected agent's rig. Seat
-entries are disabled for agents outside a rig. The requests come from
+entries are disabled for agents outside a rig. `s` (spawn) is not bound
+until phase 5 brings its modal. The requests come from
 `ainet_model::command::for_agent(store, id, AgentCommand)`, which the
 TUI's typed commands share.
 
@@ -250,14 +255,21 @@ What it does:
   through. This replaces the TUI's typing mode and `ctrl-]`. The fleet
   tells ainetd 50 ms after the focus settles (`INTERACT_SETTLE`), so moving
   between two views of one agent says nothing; quitting tells it at once.
+  A (re)connected ainetd has forgotten all this, so on `Connected(true)`
+  it is told again, and a snapshot refetches the screens on show.
+  Opening a terminal whose tab exists (from the Fleet, the Inbox's
+  terminal button, `ctrl-o`) focuses the tab itself, not its pane.
   A terminal that gets the keyboard also becomes the Fleet's selection.
 - **Mouse.** A left drag selects (shift-click extends), `terminal::Copy`
   copies it, `terminal::Clear` drops it. The wheel scrolls back through the
   scrollback: the first step asks for it (`Screen { history: n }`, plain
   text, in chunks of 200 rows), which then shows in place of the screen,
-  without colours, with "N lines back" in the strip; on the alternate
-  screen (full-screen programs) the wheel sends arrow keys instead, as
-  xterm. Right click: Copy, Paste, Clear Selection, Send Ctrl-C,
+  without colours, with "N lines back" in the strip. Scrollback shorter
+  than a screen is believed for 2 s (`SHORT_HISTORY_FOR`), so a trackpad
+  gesture asks once, not per event. A selection reaching past the screen
+  (the grid drawn before a resize takes, or a pane that keeps its size)
+  copies only what is on it. On the alternate screen (full-screen
+  programs) the wheel sends arrow keys instead, as xterm. Right click: Copy, Paste, Clear Selection, Send Ctrl-C,
   Message…, Zoom.
 - **Paste.** `terminal::Paste` sends the clipboard bracketed
   (`ESC [200~ … ESC [201~`) when the screen asked for bracketed paste,
@@ -326,6 +338,9 @@ radio or checkbox by `multi_select`; digits `1`–`9` pick them while the
 Inbox has the keyboard, as the TUI's. A field takes your own words;
 enter (or **Answer**) sends them if typed, else the numbers picked
 (`command::answer_choices`, "1 3"), through `command::answer_question`.
+A click anywhere in the Inbox (its buttons too) gives it the keyboard,
+and a field that goes when its question is answered hands the keyboard
+back to the cards.
 **Leave to Terminal** (`ctrl-n`) denies it as the TUI's `^N` does.
 Permissions and plans go through `Store::answer`, so the request and what
 the toast says (`allowed Lead's permission`) are the TUI's.
@@ -350,8 +365,10 @@ Tests: pure ones for the order, the detail styles, picking and the glow;
 headless ones for the keys opening the Inbox first and then answering
 through the demo link (the card resolves on `InboxResolved` and the
 selection moves on), cards answered by selection and click, questions
-(digits, several or one, your words over picks, escape, deny), the
-history folding, `--view inbox`, and the alert's toast and glow count.
+(digits, several or one, your words over picks, escape, deny, the
+keyboard back on the cards after an answer by text), a click giving the
+Inbox the keys, `ctrl-shift-y`, the history folding, `--view inbox`, and
+the alert's toast and glow count.
 `FleetModel::receive` (tests only) applies link messages directly.
 
 ## Upgrading Zed

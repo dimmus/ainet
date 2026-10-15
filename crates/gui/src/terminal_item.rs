@@ -13,7 +13,7 @@
 //! scrolls back through the agent's scrollback, and a right click opens
 //! the terminal's menu.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ainet_core::AgentState;
 use ainet_model::terminal::{Key, Mode, Mods, encode_in, paste};
@@ -44,6 +44,11 @@ const BLINK_EVERY: Duration = Duration::from_millis(500);
 /// Rows of scrollback asked for at least, and how many more each time the
 /// wheel goes past what came.
 const HISTORY_CHUNK: usize = 200;
+
+/// How long scrollback that came shorter than a screen (nothing to scroll
+/// to) is believed: the wheel asks again only after this, not on every
+/// turn of a trackpad gesture.
+const SHORT_HISTORY_FOR: Duration = Duration::from_secs(2);
 
 /// Scrollback shown in place of the screen, and what it was laid out for.
 struct HistoryView {
@@ -76,6 +81,8 @@ pub struct TerminalItem {
     /// Rows of scrollback last asked for.
     history_asked: usize,
     history: Option<HistoryView>,
+    /// When the scrollback last came with nothing to scroll back to.
+    short_history: Option<Instant>,
     selection: Option<Selection>,
     /// Where a drag with the left button started.
     drag_from: Option<(u16, u16)>,
@@ -135,6 +142,7 @@ impl TerminalItem {
             scroll_rest: Pixels::ZERO,
             history_asked: 0,
             history: None,
+            short_history: None,
             selection: None,
             drag_from: None,
             blink_on: true,
@@ -206,7 +214,11 @@ impl TerminalItem {
         let Some(lines) = fleet.read(cx).store.history.get(&self.agent) else {
             return;
         };
-        self.scroll = self.scroll.min(terminal_layout::max_scroll(lines.len(), g.rows));
+        let max = terminal_layout::max_scroll(lines.len(), g.rows);
+        if max == 0 {
+            self.short_history = Some(cx.background_executor().now());
+        }
+        self.scroll = self.scroll.min(max);
         let key = (self.scroll, g.rows, g.cols, lines.len());
         if self.scroll == 0 {
             self.history = None;
@@ -352,6 +364,15 @@ impl TerminalItem {
             return;
         }
         let was = self.scroll;
+        let now = cx.background_executor().now();
+        if was == 0
+            && lines > 0
+            && self
+                .short_history
+                .is_some_and(|at| now.duration_since(at) < SHORT_HISTORY_FOR)
+        {
+            return;
+        }
         self.scroll = self.scroll.saturating_add_signed(lines as isize);
         if self.scroll == 0 {
             self.scroll_to_bottom(cx);
@@ -689,6 +710,7 @@ impl Render for TerminalItem {
 #[cfg(all(test, not(target_os = "macos")))]
 mod tests {
     use ainet_core::Request;
+    use ainet_model::Msg;
     use gpui::{
         Modifiers, MouseUpEvent, ScrollDelta, TestAppContext, TouchPhase, VisualTestContext, point, size,
     };
@@ -825,6 +847,78 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn opening_a_terminal_from_the_inbox_gives_it_the_keys(cx: &mut TestAppContext) {
+        let (w, item, cx) = terminal(cx);
+        let fleet = fleet(&w, cx);
+        let agent = item.read_with(cx, |t, _| t.agent_id().to_string());
+        // The Inbox opens over the terminal, in the same pane.
+        let inbox = w.update_in(cx, |w, window, cx| w.open_inbox(None, window, cx));
+        settle(cx);
+        let pane = w.read_with(cx, |w, _| w.active_pane().clone());
+        assert!(pane.read_with(cx, |p, _| p.index_of(item.entity_id()).is_some()));
+        take_sent(&fleet, cx);
+
+        // Its "Answer in the agent's terminal" button: the agent's tab
+        // comes back with the keyboard, and ainetd holds its messages.
+        fleet.update(cx, |f, cx| f.select(&agent, cx));
+        let focus = inbox.read_with(cx, |i, cx| i.focus_handle(cx));
+        assert!(cx.update(|window, _| focus.is_focused(window)));
+        cx.dispatch_action(crate::actions::OpenTerminal);
+        settle(cx);
+        assert!(cx.update(|window, cx| item.focus_handle(cx).is_focused(window)));
+        assert_eq!(interacts(&take_sent(&fleet, cx)), [true]);
+        cx.simulate_keystrokes("x");
+        assert_eq!(inputs(&take_sent(&fleet, cx)), ["x"]);
+    }
+
+    #[gpui::test]
+    async fn ctrl_o_talks_to_the_operator_or_starts_one(cx: &mut TestAppContext) {
+        let (w, _, cx) = terminal(cx);
+        let fleet = fleet(&w, cx);
+        cx.update(|window, cx| {
+            let focus = w.read(cx).fleet_panel().focus_handle(cx);
+            window.focus(&focus, cx);
+        });
+        settle(cx);
+        take_sent(&fleet, cx);
+        cx.simulate_keystrokes("ctrl-o");
+        let sent = take_sent(&fleet, cx);
+        assert!(
+            matches!(&sent[..], [Request::Up(spec)] if spec.source == "operator"),
+            "{sent:?}"
+        );
+
+        // Once it runs, ctrl-o opens its terminal to type into.
+        let mut operator = fleet.read_with(cx, |f, _| f.store.selected_agent().unwrap().clone());
+        operator.id = "operator-1".into();
+        operator.rig = Some("operator".into());
+        operator.seat = None;
+        fleet.update(cx, |f, cx| {
+            let event = ainet_core::Event::Agent {
+                agent: operator.clone(),
+            };
+            f.receive(vec![Msg::Event(Box::new(event))], cx)
+        });
+        cx.simulate_keystrokes("ctrl-o");
+        settle(cx);
+        let open = w.read_with(cx, |w, cx| {
+            w.active_pane()
+                .read(cx)
+                .active_item()
+                .and_then(|i| i.to_any().downcast::<TerminalItem>().ok())
+        });
+        let open = open.expect("a terminal tab");
+        assert_eq!(open.read_with(cx, |t, _| t.agent_id().to_string()), "operator-1");
+        assert!(cx.update(|window, cx| open.focus_handle(cx).is_focused(window)));
+        let sent = take_sent(&fleet, cx);
+        assert!(
+            sent.iter()
+                .any(|r| matches!(r, Request::Interact { agent, on: true } if agent == "operator-1")),
+            "{sent:?}"
+        );
+    }
+
+    #[gpui::test]
     async fn keys_go_to_the_agent(cx: &mut TestAppContext) {
         let (w, _, cx) = terminal(cx);
         let fleet = fleet(&w, cx);
@@ -917,6 +1011,54 @@ mod tests {
         cx.simulate_keystrokes("x");
         assert_eq!(item.read_with(cx, |t, _| t.scrolled()), 0);
         assert_eq!(inputs(&take_sent(&fleet, cx)), ["x"]);
+    }
+
+    #[gpui::test]
+    async fn short_scrollback_is_not_asked_for_on_every_wheel(cx: &mut TestAppContext) {
+        let (w, item, cx) = terminal(cx);
+        let fleet = fleet(&w, cx);
+        let agent = item.read_with(cx, |t, _| t.agent_id().to_string());
+        let screen = cx.debug_bounds("TERMINAL-SCREEN").expect("the screen is drawn");
+        let wheel = |cx: &mut VisualTestContext| {
+            cx.simulate_event(ScrollWheelEvent {
+                position: screen.center(),
+                delta: ScrollDelta::Lines(point(0., 1.)),
+                modifiers: Modifiers::none(),
+                touch_phase: TouchPhase::Moved,
+            });
+            cx.run_until_parked();
+        };
+        let asked = |cx: &mut VisualTestContext| {
+            take_sent(&fleet, cx)
+                .iter()
+                .filter(|r| matches!(r, Request::Screen { formatted: false, .. }))
+                .count()
+        };
+        take_sent(&fleet, cx);
+        wheel(cx);
+        assert_eq!(asked(cx), 1);
+        // The agent has less scrollback than a screen: back to the live
+        // screen, and the next turns of the wheel ask nothing.
+        fleet.update(cx, |f, cx| {
+            f.receive(
+                vec![Msg::History {
+                    id: agent.clone(),
+                    rows: vec!["only".into()],
+                }],
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        assert_eq!(item.read_with(cx, |t, _| t.scrolled()), 0);
+        for _ in 0..5 {
+            wheel(cx);
+        }
+        assert_eq!(asked(cx), 0);
+        assert_eq!(item.read_with(cx, |t, _| t.scrolled()), 0);
+        // A while later, it may have grown: asked again.
+        cx.executor().advance_clock(SHORT_HISTORY_FOR);
+        wheel(cx);
+        assert_eq!(asked(cx), 1);
     }
 
     #[gpui::test]

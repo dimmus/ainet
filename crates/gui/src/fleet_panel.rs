@@ -26,7 +26,7 @@ use ui::{
 
 use crate::actions::{
     Capture, CloseAgent, CollapseRig, Continue, ExpandRig, MessageAgent, OpenContextMenu, OpenTerminal,
-    Relaunch, SelectNext, SelectPrev, ShowTranscript, ToggleTypingGuard,
+    Relaunch, ReleaseSeat, RemoveSeat, SelectNext, SelectPrev, ShowTranscript, ToggleTypingGuard,
 };
 use crate::critter::{Animation, Critter};
 use crate::dock::Panel;
@@ -252,6 +252,8 @@ impl FleetPanel {
                     !seated,
                 )
                 .separator()
+                .action_disabled_when(!seated, "Release Seat", ReleaseSeat.boxed_clone())
+                .action_disabled_when(!seated, "Remove Seat…", RemoveSeat.boxed_clone())
                 .action("Close Agent…", CloseAgent.boxed_clone())
         });
         window.focus(&menu.focus_handle(cx), cx);
@@ -878,6 +880,26 @@ mod tests {
             Request::TypingGuard { seat, on: true } if seat == "dev-ui@docs"
         ));
 
+        cx.dispatch_action(ReleaseSeat);
+        assert!(matches!(
+            last_sent(&fleet, cx),
+            (Request::Release { seat }, ok) if seat == "dev-ui@docs" && ok == "dev-ui@docs released"
+        ));
+        // Removing a seat asks first, as /remove's request.
+        let sent = fleet.read_with(cx, |f, _| f.sent.len());
+        cx.dispatch_action(RemoveSeat);
+        assert!(cx.has_pending_prompt());
+        cx.simulate_prompt_answer("Cancel");
+        cx.run_until_parked();
+        assert_eq!(fleet.read_with(cx, |f, _| f.sent.len()), sent);
+        cx.dispatch_action(RemoveSeat);
+        cx.simulate_prompt_answer("Remove");
+        cx.run_until_parked();
+        assert!(matches!(
+            last_sent(&fleet, cx),
+            (Request::RemoveSeat { seat }, ok) if seat == "dev-ui@docs" && ok == "removed dev-ui@docs"
+        ));
+
         // Closing asks first.
         let sent = fleet.read_with(cx, |f, _| f.sent.len());
         cx.simulate_keystrokes("delete");
@@ -906,13 +928,27 @@ mod tests {
         assert!(!open(cx));
         match last_sent(&fleet, cx) {
             (Request::Message { to, body, force, .. }, ok) => {
-                assert_eq!(to, [lead]);
+                assert_eq!(to, std::slice::from_ref(&lead));
                 assert_eq!(body, "ship it");
                 assert!(force);
                 assert_eq!(ok, "sent to orch-lead@docs");
             }
             other => panic!("{other:?}"),
         }
+        // The modal's agent gets it, even when it starts with another's
+        // address.
+        cx.simulate_keystrokes("m");
+        cx.run_until_parked();
+        cx.simulate_input("@dev-ui can you check this");
+        cx.simulate_keystrokes("enter");
+        match last_sent(&fleet, cx) {
+            (Request::Message { to, body, .. }, _) => {
+                assert_eq!(to, std::slice::from_ref(&lead));
+                assert_eq!(body, "@dev-ui can you check this");
+            }
+            other => panic!("{other:?}"),
+        }
+
         // Escape gives up without sending.
         let sent = fleet.read_with(cx, |f, _| f.sent.len());
         cx.simulate_keystrokes("m");

@@ -22,7 +22,7 @@ use ainet_model::command;
 use ainet_model::describe::age;
 use gpui::{
     Action, Animation, AnimationExt, ClickEvent, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
-    Hsla, KeyDownEvent, ScrollHandle, Subscription,
+    Hsla, KeyDownEvent, MouseButton, ScrollHandle, Subscription,
 };
 use ui::{Chip, ChoiceCard, Disclosure, KeyBinding, ListItem, ListItemSpacing, Tooltip, prelude::*};
 
@@ -229,9 +229,10 @@ pub struct InboxItem {
 }
 
 impl InboxItem {
-    pub fn new(fleet: Entity<FleetModel>, cx: &mut Context<Self>) -> Self {
+    pub fn new(fleet: Entity<FleetModel>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let subscriptions = vec![
-            cx.observe(&fleet, |this, _, cx| {
+            cx.observe_in(&fleet, window, |this, _, window, cx| {
+                this.keep_focus(window, cx);
                 this.sync(cx);
                 cx.emit(ItemEvent::UpdateTab);
                 cx.notify();
@@ -311,6 +312,19 @@ impl InboxItem {
             .iter()
             .find(|i| i.id == id)
             .cloned()
+    }
+
+    /// An answer field about to go (its question no longer waits) hands
+    /// the keyboard back to the cards, or it would go nowhere.
+    fn keep_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let store = &self.fleet.read(cx).store;
+        let going = self.answers.iter().any(|(id, field)| {
+            !store.inbox.iter().any(|i| i.id == *id && i.waiting)
+                && field.input.focus_handle(cx).contains_focused(window, cx)
+        });
+        if going {
+            window.focus(&self.focus_handle, cx);
+        }
     }
 
     /// Keeps the selection on a card that shows, moving on to the next
@@ -1045,6 +1059,16 @@ impl Render for InboxItem {
             .id("inbox")
             .key_context("Inbox")
             .track_focus(&self.focus_handle)
+            // A click anywhere in it gives it the keyboard, so its keys
+            // answer the card clicked (a field keeps the focus it took).
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    if !this.focus_handle.contains_focused(window, cx) {
+                        window.focus(&this.focus_handle, cx);
+                    }
+                }),
+            )
             .size_full()
             .bg(background)
             .on_action(cx.listener(|this, _: &menu::SelectNext, _, cx| this.select_relative(1, cx)))
@@ -1483,6 +1507,72 @@ mod tests {
             assert!(i.picked(2001).is_empty());
             assert!(i.answer_input(2001).is_none());
         });
+
+        // Answered from its field, the keyboard goes back to the cards
+        // when the field goes.
+        let field = inbox.read_with(cx, |i, _| i.answer_input(2000)).expect("drawn");
+        cx.update(|window, cx| window.focus(&field.focus_handle(cx), cx));
+        cx.simulate_input("both");
+        cx.simulate_keystrokes("enter");
+        assert_eq!(
+            questions_answered(&take_sent(&fleet, cx)),
+            [(2000, "both".to_string())]
+        );
+        resolved(&fleet, 2000, cx);
+        assert!(inbox.read_with(cx, |i, _| i.answer_input(2000)).is_none());
+        assert!(
+            cx.update(|window, _| focus.is_focused(window)),
+            "the Inbox has the keys"
+        );
+    }
+
+    #[gpui::test]
+    async fn a_click_on_a_card_gives_the_inbox_the_keys(cx: &mut TestAppContext) {
+        let (w, cx) = demo(cx);
+        let fleet = fleet(&w, cx);
+        let lead = seat(&fleet, "orch-lead@docs", cx);
+        arrives(&fleet, asking(901, &lead, InboxKind::Permission, &[], false), cx);
+        arrives(&fleet, asking(902, &lead, InboxKind::Permission, &[], false), cx);
+        let inbox = w.update_in(cx, |w, window, cx| w.open_inbox(Some(901), window, cx));
+        cx.run_until_parked();
+        // The keyboard is elsewhere when the card is clicked.
+        let panel = w.read_with(cx, |w, cx| w.fleet_panel().focus_handle(cx));
+        cx.update(|window, cx| window.focus(&panel, cx));
+        cx.run_until_parked();
+        take_sent(&fleet, cx);
+        let card = cx.debug_bounds("INBOX-CARD-902").expect("the card is drawn");
+        cx.simulate_click(card.center(), Modifiers::none());
+        assert_eq!(inbox.read_with(cx, |i, _| i.selected()), Some(902));
+        let focus = inbox.read_with(cx, |i, cx| i.focus_handle(cx));
+        assert!(cx.update(|window, _| focus.is_focused(window)));
+        cx.simulate_keystrokes("ctrl-y");
+        assert_eq!(answers(&take_sent(&fleet, cx)), [(902, Decision::Allow)]);
+    }
+
+    #[gpui::test]
+    async fn the_next_waiting_key_selects_who_asks(cx: &mut TestAppContext) {
+        let (w, cx) = demo(cx);
+        let fleet = fleet(&w, cx);
+        let lead = seat(&fleet, "orch-lead@docs", cx);
+        let ui = seat(&fleet, "dev-ui@docs", cx);
+        fleet.update(cx, |f, _| {
+            for i in f.store.inbox.iter_mut() {
+                i.waiting = false;
+            }
+        });
+        cx.simulate_keystrokes("ctrl-shift-y");
+        assert_eq!(
+            toasts(&w, cx).last().map(String::as_str),
+            Some("nothing is waiting on you")
+        );
+        arrives(&fleet, asking(901, &lead, InboxKind::Permission, &[], false), cx);
+        arrives(&fleet, asking(902, &ui, InboxKind::Plan, &[], false), cx);
+        fleet.update(cx, |f, cx| f.select(&ui, cx));
+        let selected = |cx: &mut VisualTestContext| fleet.read_with(cx, |f, _| f.store.selected.clone());
+        cx.simulate_keystrokes("ctrl-shift-y");
+        assert_eq!(selected(cx), Some(lead.clone()));
+        cx.simulate_keystrokes("ctrl-shift-y");
+        assert_eq!(selected(cx), Some(ui));
     }
 
     #[gpui::test]

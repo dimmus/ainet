@@ -2,10 +2,10 @@
 //! notices, after Zed's status toasts and notifications: a daemon flash
 //! shows for a few seconds (as long as the TUI's flash line), an error
 //! stays longer, and a report (the reply to an `ainet ps`-like command,
-//! which has a title) stays until dismissed. A request that waits on you
-//! shows its agent's critter and a button that opens it in the Inbox. A
-//! few show at once, the newest at the bottom; the close button or a
-//! middle click dismisses one.
+//! which has a title) stays until dismissed, its text scrolling under its
+//! title when long. A request that waits on you shows its agent's critter
+//! and a button that opens it in the Inbox. A few show at once, the
+//! newest at the bottom; the close button or a middle click dismisses one.
 
 use std::collections::VecDeque;
 use std::time::Duration;
@@ -25,6 +25,9 @@ pub const ATTENTION_FOR: Duration = Duration::from_secs(10);
 pub const ERROR_FOR: Duration = Duration::from_secs(15);
 /// How many toasts show at once; older ones make way.
 pub const MAX_TOASTS: usize = 3;
+/// How wide (in rems) a report is, and how tall before it scrolls.
+const REPORT_WIDTH: f32 = 40.;
+const REPORT_HEIGHT: f32 = 20.;
 
 /// How long a notice stays up; `None` until dismissed.
 pub fn lifetime(notice: &Notice) -> Option<Duration> {
@@ -106,7 +109,7 @@ impl ToastLayer {
         self.toasts.iter().map(|t| t.notice.text.as_str()).collect()
     }
 
-    fn render_toast(&self, toast: &Toast, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_toast(&self, toast: &Toast, cx: &mut Context<Self>) -> AnyElement {
         let id = toast.id;
         let notice = &toast.notice;
         let (icon, color) = if notice.error {
@@ -138,21 +141,72 @@ impl ToastLayer {
                         this.dismiss(id, cx);
                     }))
             });
-        h_flex()
+        let dismiss = IconButton::new(("dismiss", id), IconName::Close)
+            .shape(IconButtonShape::Square)
+            .icon_size(IconSize::Small)
+            .icon_color(Color::Muted)
+            .tooltip(Tooltip::text("Dismiss"))
+            .on_click(cx.listener(move |this, _, _, cx| this.dismiss(id, cx)));
+        let toast = h_flex()
             .id(("toast", id))
+            .debug_selector(move || format!("TOAST-{id}"))
             .occlude()
             .elevation_3(cx)
+            .bg(cx.theme().colors().surface_background)
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(move |this, _, _, cx| this.dismiss(id, cx)),
+            );
+        // A report can be long (a transcript, a screen): its title and the
+        // close button stay put, and the text scrolls.
+        if let Some(title) = notice.title.clone() {
+            return toast
+                .max_w(rems(REPORT_WIDTH))
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .pl_2p5()
+                                .pr_1p5()
+                                .py_1()
+                                .border_b_1()
+                                .border_color(cx.theme().colors().border_variant)
+                                .child(Icon::new(icon).size(IconSize::Small).color(color))
+                                .child(Label::new(title).weight(gpui::FontWeight::SEMIBOLD))
+                                .child(div().flex_1())
+                                .child(
+                                    div()
+                                        .debug_selector(move || format!("TOAST-DISMISS-{id}"))
+                                        .child(dismiss),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .id(("toast-report", id))
+                                .max_h(rems(REPORT_HEIGHT))
+                                .overflow_y_scroll()
+                                .px_2p5()
+                                .py_1p5()
+                                .child(
+                                    Label::new(notice.text.clone())
+                                        .size(LabelSize::Small)
+                                        .color(Color::Muted)
+                                        .buffer_font(cx),
+                                ),
+                        ),
+                )
+                .into_any_element();
+        }
+        toast
             .items_start()
             .gap_2()
             .py_1p5()
             .pl_2p5()
             .pr_1p5()
             .max_w(px(420.))
-            .bg(cx.theme().colors().surface_background)
-            .on_mouse_down(
-                MouseButton::Middle,
-                cx.listener(move |this, _, _, cx| this.dismiss(id, cx)),
-            )
             .child(match critter {
                 Some(critter) => div().child(critter).into_any_element(),
                 None => div()
@@ -160,37 +214,10 @@ impl ToastLayer {
                     .child(Icon::new(icon).size(IconSize::Small).color(color))
                     .into_any_element(),
             })
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .gap_0p5()
-                    .when_some(notice.title.clone(), |el, title| {
-                        el.child(Label::new(title).weight(gpui::FontWeight::SEMIBOLD))
-                    })
-                    .child(
-                        Label::new(notice.text.clone())
-                            .size(if notice.title.is_some() {
-                                LabelSize::Small
-                            } else {
-                                LabelSize::Default
-                            })
-                            .color(if notice.title.is_some() {
-                                Color::Muted
-                            } else {
-                                Color::Default
-                            }),
-                    ),
-            )
+            .child(v_flex().flex_1().min_w_0().child(Label::new(notice.text.clone())))
             .children(review)
-            .child(
-                IconButton::new(("dismiss", id), IconName::Close)
-                    .shape(IconButtonShape::Square)
-                    .icon_size(IconSize::Small)
-                    .icon_color(Color::Muted)
-                    .tooltip(Tooltip::text("Dismiss"))
-                    .on_click(cx.listener(move |this, _, _, cx| this.dismiss(id, cx))),
-            )
+            .child(dismiss)
+            .into_any_element()
     }
 }
 
@@ -199,11 +226,7 @@ impl Render for ToastLayer {
         if self.toasts.is_empty() {
             return div().into_any_element();
         }
-        let toasts: Vec<AnyElement> = self
-            .toasts
-            .iter()
-            .map(|t| self.render_toast(t, cx).into_any_element())
-            .collect();
+        let toasts: Vec<AnyElement> = self.toasts.iter().map(|t| self.render_toast(t, cx)).collect();
         v_flex()
             .id("toast-layer")
             .absolute()
@@ -245,6 +268,37 @@ mod tests {
             ..notice(None, "lead: Bash: ls", false)
         };
         assert_eq!(lifetime(&asks), Some(ATTENTION_FOR));
+    }
+
+    #[gpui::test]
+    async fn a_long_report_stays_in_the_window_and_closes(cx: &mut TestAppContext) {
+        crate::tests::init_test(cx);
+        let (workspace, cx) = cx.add_window_view(|window, cx| {
+            let fleet = cx.new(|_| FleetModel::offline());
+            Workspace::new(fleet, None, window, cx)
+        });
+        let toasts = workspace.read_with(cx, |w, _| w.toast_layer().clone());
+        let text = (0..1000)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        toasts.update(cx, |t, cx| {
+            t.show(notice(Some("transcript of lead"), &text, false), cx)
+        });
+        cx.run_until_parked();
+        let id = toasts.read_with(cx, |t, _| t.toasts[0].id);
+        let window = cx.update(|window, _| window.viewport_size());
+        // Selectors are static; a test can spare the few bytes.
+        let selector = |name: &str| -> &'static str { format!("{name}-{id}").leak() };
+        let toast = cx.debug_bounds(selector("TOAST")).expect("drawn");
+        assert!(
+            toast.top() >= px(0.) && toast.bottom() <= window.height,
+            "{toast:?}"
+        );
+        let close = cx.debug_bounds(selector("TOAST-DISMISS")).expect("drawn");
+        assert!(close.top() >= px(0.));
+        cx.simulate_click(close.center(), gpui::Modifiers::none());
+        toasts.read_with(cx, |t, _| assert!(t.texts().is_empty()));
     }
 
     #[gpui::test]

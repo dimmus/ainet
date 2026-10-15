@@ -19,10 +19,11 @@ use ui::prelude::*;
 use crate::actions::{
     ActivateNextItem, ActivateNextPane, ActivatePaneDown, ActivatePaneLeft, ActivatePaneRight,
     ActivatePaneUp, ActivatePreviousItem, ActivatePreviousPane, Allow, Always, Capture, CloseActiveItem,
-    CloseAgent, CloseAllItems, CloseOtherItems, CloseWindow, Continue, Deny, MessageAgent, OpenComms,
-    OpenInbox, OpenKeymap, OpenMap, OpenSettings, OpenTerminal, Relaunch, SelectNext, SelectPrev,
-    ShowTranscript, SplitDown, SplitRight, TileAll, ToggleBottomDock, ToggleCritterSize, ToggleLeftDock,
-    ToggleRightDock, ToggleSwitcher, ToggleTypingGuard, ToggleZoom, terminal as terminal_actions,
+    CloseAgent, CloseAllItems, CloseOtherItems, CloseWindow, Continue, Deny, MessageAgent, NextWaiting,
+    OpenComms, OpenInbox, OpenKeymap, OpenMap, OpenSettings, OpenTerminal, Operator, Relaunch, ReleaseSeat,
+    RemoveSeat, SelectNext, SelectPrev, ShowTranscript, SplitDown, SplitRight, TileAll, ToggleBottomDock,
+    ToggleCritterSize, ToggleLeftDock, ToggleRightDock, ToggleSwitcher, ToggleTypingGuard, ToggleZoom,
+    terminal as terminal_actions,
 };
 use crate::agent_panel::AgentPanel;
 use crate::args::View;
@@ -137,7 +138,7 @@ impl Workspace {
             }),
         ];
         let first_item: Box<dyn ItemHandle> = match view.unwrap_or(View::Fleet) {
-            View::Inbox => Box::new(cx.new(|cx| InboxItem::new(fleet.clone(), cx))),
+            View::Inbox => Box::new(cx.new(|cx| InboxItem::new(fleet.clone(), window, cx))),
             view => Box::new(cx.new(|cx| Placeholder::new(view, cx))),
         };
         first.update(cx, |pane, cx| pane.add_item(first_item, true, false, window, cx));
@@ -496,7 +497,7 @@ impl Workspace {
         let inbox = match found {
             Some(inbox) => inbox,
             None => {
-                let inbox = cx.new(|cx| InboxItem::new(self.fleet.clone(), cx));
+                let inbox = cx.new(|cx| InboxItem::new(self.fleet.clone(), window, cx));
                 self.active_pane.update(cx, |p, cx| {
                     p.add_item(Box::new(inbox.clone()), true, true, window, cx)
                 });
@@ -542,9 +543,10 @@ impl Workspace {
                     .is_ok_and(|t| t.read(cx).agent_id() == id)
             });
             if let Some(ix) = found {
+                // The tab itself takes the keyboard: focusing the pane
+                // would leave it on the pane when it had it already.
                 self.active_pane = pane.clone();
                 pane.update(cx, |p, cx| p.activate_item(ix, true, window, cx));
-                window.focus(&pane.focus_handle(cx), cx);
                 return;
             }
         }
@@ -630,7 +632,7 @@ impl Workspace {
             }
         }
         self.active_pane = anchor.clone();
-        window.focus(&anchor.focus_handle(cx), cx);
+        anchor.update(cx, |p, cx| p.activate_item(p.active_index(), true, window, cx));
         cx.notify();
     }
 
@@ -666,6 +668,55 @@ impl Workspace {
             let command = command::for_agent(&fleet.store, &id, cmd);
             fleet.run(command, cx);
         });
+    }
+
+    /// `ctrl-o`, as the TUI's: the operator's terminal, to type into; or,
+    /// with no operator running, starts one.
+    fn operator(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let operator = self.fleet.read(cx).store.operator().map(|a| a.id.clone());
+        match operator {
+            Some(id) => self.open_terminal(&id, window, cx),
+            None => self
+                .fleet
+                .update(cx, |fleet, cx| fleet.run(command::operator_up(), cx)),
+        }
+    }
+
+    /// Selects the next agent with a request waiting on you.
+    fn next_waiting(&mut self, cx: &mut Context<Self>) {
+        self.fleet.update(cx, |fleet, cx| {
+            match fleet.store.next_waiting_agent().map(str::to_string) {
+                Some(id) => fleet.select(&id, cx),
+                None => fleet.show("nothing is waiting on you".into(), false, cx),
+            }
+        });
+    }
+
+    /// Takes the selected agent's seat out of its rig once you say so.
+    fn remove_seat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(agent) = self.fleet.read(cx).store.selected_agent().cloned() else {
+            return;
+        };
+        let Some(seat) = agent.seat.clone() else {
+            return self.agent_command(AgentCommand::Remove, cx);
+        };
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &format!("Remove {seat} from its rig?"),
+            Some("Its agent stops and the seat is gone from the rig."),
+            &["Remove", "Cancel"],
+            cx,
+        );
+        let fleet = self.fleet.clone();
+        cx.spawn(async move |_, cx| {
+            if answer.await == Ok(0) {
+                fleet.update(cx, |fleet, cx| {
+                    let remove = command::for_agent(&fleet.store, &agent.id, AgentCommand::Remove);
+                    fleet.run(remove, cx);
+                });
+            }
+        })
+        .detach();
     }
 
     /// Turns the typing guard of the selected agent's seat the other way.
@@ -865,6 +916,12 @@ impl Render for Workspace {
             )
             .on_action(cx.listener(|this, _: &Capture, _, cx| this.agent_command(AgentCommand::Capture, cx)))
             .on_action(cx.listener(|this, _: &ToggleTypingGuard, _, cx| this.toggle_typing_guard(cx)))
+            .on_action(
+                cx.listener(|this, _: &ReleaseSeat, _, cx| this.agent_command(AgentCommand::Release, cx)),
+            )
+            .on_action(cx.listener(|this, _: &RemoveSeat, window, cx| this.remove_seat(window, cx)))
+            .on_action(cx.listener(|this, _: &Operator, window, cx| this.operator(window, cx)))
+            .on_action(cx.listener(|this, _: &NextWaiting, _, cx| this.next_waiting(cx)))
             .on_action(
                 cx.listener(|this, _: &OpenComms, window, cx| this.open_placeholder(View::Comms, window, cx)),
             )

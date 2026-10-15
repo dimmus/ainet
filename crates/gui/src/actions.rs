@@ -99,6 +99,10 @@ actions!(
         ToggleTypingGuard,
         /// Shows the last lines of the selected agent's terminal.
         Capture,
+        /// Lets the selected agent's seat go; its process runs on.
+        ReleaseSeat,
+        /// Takes the selected agent's seat out of its rig, after asking.
+        RemoveSeat,
         /// Folds away the rig of the selected agent.
         CollapseRig,
         /// Unfolds the rig of the selected agent.

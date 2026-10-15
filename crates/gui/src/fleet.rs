@@ -458,10 +458,22 @@ impl FleetModel {
         cx.notify();
     }
 
-    /// Applies messages from the link, then re-renders once.
+    /// Applies messages from the link, then re-renders once if anything
+    /// changed: output alone changes nothing on show (the screens it
+    /// fetches do), and agents print all the time.
     fn apply(&mut self, msgs: Vec<Msg>, cx: &mut Context<Self>) {
+        let mut changed = false;
         for msg in msgs {
-            match self.store.apply(msg) {
+            let change = self.store.apply(msg);
+            changed |= match &change {
+                Change::None | Change::Output(_) => false,
+                Change::Flash(text, _) => !text.is_empty(),
+                _ => true,
+            };
+            match change {
+                // A quiet request (a key, a resize, `Interact`) done: the
+                // link says so with no words, which is no news.
+                Change::Flash(text, _) if text.is_empty() => {}
                 Change::Flash(text, error) => self.notice(None, text, error, cx),
                 Change::Popup(title, text) => self.notice(Some(title), text, false, cx),
                 Change::Connected(up) => {
@@ -478,7 +490,16 @@ impl FleetModel {
                         "lost ainetd; retrying"
                     };
                     self.notice(None, text.into(), !up, cx);
+                    // A daemon (re)started has forgotten which terminals
+                    // you are at: tell it again.
+                    if up {
+                        self.told.clear();
+                        self.tell_interact(cx);
+                    }
                 }
+                // Everything anew (first connect or reconnect): the
+                // terminals on show are fetched again, as the TUI's.
+                Change::Snapshot => self.pump.mark_all(self.shown.values().cloned()),
                 Change::Output(agent) if self.is_shown(&agent) => self.pump.mark(&agent),
                 // A request waiting on you (or a question): a toast and a
                 // glowing badge, as the TUI's flash and glowing Inbox tab.
@@ -502,7 +523,9 @@ impl FleetModel {
             }
         }
         self.pump(cx);
-        cx.notify();
+        if changed {
+            cx.notify();
+        }
     }
 
     /// Applies `msgs` as if the link had sent them, for tests.
@@ -654,6 +677,73 @@ mod tests {
             assert_eq!(f.notices.len(), KEEP_NOTICES);
             assert_eq!(f.notices.back().unwrap().text, format!("n{}", KEEP_NOTICES + 4));
         });
+    }
+
+    #[gpui::test]
+    async fn quiet_requests_done_are_no_news(cx: &mut TestAppContext) {
+        let fleet = cx.new(|_| FleetModel::empty(false));
+        let notified = std::rc::Rc::new(std::cell::Cell::new(0));
+        let _watch = cx.update(|cx| {
+            let notified = notified.clone();
+            cx.observe(&fleet, move |_, _| notified.set(notified.get() + 1))
+        });
+        // What ainetd says to every key, resize and `Interact`.
+        fleet.update(cx, |f, cx| {
+            let done = (0..5).map(|_| Msg::Flash(String::new(), false)).collect();
+            f.apply(done, cx);
+            let output = Msg::Event(Box::new(ainet_core::Event::Output { agent: "a".into() }));
+            f.apply(vec![output], cx);
+        });
+        cx.run_until_parked();
+        fleet.read_with(cx, |f, _| assert_eq!(f.notices().count(), 0));
+        assert_eq!(notified.get(), 0, "nothing to draw anew");
+
+        fleet.update(cx, |f, cx| f.apply(vec![Msg::Flash("saved".into(), false)], cx));
+        cx.run_until_parked();
+        fleet.read_with(cx, |f, _| assert_eq!(f.notices().count(), 1));
+        assert_eq!(notified.get(), 1);
+    }
+
+    #[gpui::test]
+    async fn a_new_daemon_refetches_screens_and_hears_where_you_are(cx: &mut TestAppContext) {
+        let fleet = cx.new(|_| FleetModel::empty(false));
+        let snapshot = || Msg::Snapshot(Box::new(ainet_model::Demo::new().snapshot()));
+        fleet.update(cx, |f, cx| f.apply(vec![Msg::Connected(true), snapshot()], cx));
+        let a = fleet.read_with(cx, |f, _| f.store.agents.keys().next().unwrap().clone());
+        let item = fleet.entity_id();
+        fleet.update(cx, |f, cx| {
+            f.show_terminal(item, &a, cx);
+            f.set_at_terminal(item, &a, true, cx);
+        });
+        cx.executor().advance_clock(INTERACT_SETTLE * 2);
+        cx.run_until_parked();
+        let interacts = |cx: &mut TestAppContext| {
+            fleet.update(cx, |f, _| {
+                std::mem::take(&mut f.sent)
+                    .into_iter()
+                    .filter_map(|(r, _)| match r {
+                        Request::Interact { agent, on } => Some((agent, on)),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            })
+        };
+        assert_eq!(interacts(cx), [(a.clone(), true)]);
+
+        // ainetd goes and comes back: the screen on show is fetched anew,
+        // and the new daemon holds the agent's messages again.
+        cx.executor()
+            .advance_clock(ainet_model::terminal::FETCH_EVERY * 2);
+        cx.run_until_parked();
+        fleet.update(cx, |f, _| f.fetched.clear());
+        fleet.update(cx, |f, cx| {
+            f.apply(vec![Msg::Connected(false)], cx);
+            f.apply(vec![Msg::Connected(true), snapshot()], cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(interacts(cx), [(a.clone(), true)]);
+        let fetched = fleet.update(cx, |f, _| std::mem::take(&mut f.fetched));
+        assert_eq!(fetched.into_iter().map(|(id, _)| id).collect::<Vec<_>>(), [a]);
     }
 
     #[gpui::test]
