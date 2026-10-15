@@ -110,7 +110,7 @@ GPUI (the pane tree, divider dragging, the text buffer).
 | `dock.rs` | `Dock` (left, right, bottom) holding `Panel`s, opened and closed, resized by dragging its inner edge (double click: default size) | `workspace::dock` |
 | `panels.rs` | the panels' title strip and state colours, and the Activity panel (a placeholder until phase 4 step 6) | — |
 | `modal_layer.rs` | one modal at a time; escape, a click outside or the modal's `DismissEvent` closes it and gives the keyboard back | `workspace::modal_layer` |
-| `toast_layer.rs` | the fleet's notices as toasts, bottom right: flashes for 5 s (the TUI's flash time), errors for 15 s, reports (titled) until dismissed; at most 3 | status toasts, notifications |
+| `toast_layer.rs` | the fleet's notices as toasts, bottom right: flashes for 5 s (the TUI's flash time), requests waiting on you for 10 s (with the agent's critter and a Review button), errors for 15 s, reports (titled) until dismissed; at most 3 | status toasts, notifications |
 | `text_input/` | `TextInput`: one line or several (soft-wrapped, `max_lines`), IME, mouse and key selection, clipboard, word moves, undo/redo, placeholder, masking, read-only; `InputEvent::{Edited, Submitted, Cancelled, Blurred}`; `erased.rs` registers it as `ui_input`'s editor | GPUI's `examples/input.rs`, `ui_input::ErasedEditor` |
 | `picker.rs` | `Picker<D: PickerDelegate>` in the modal layer: query input, fuzzy matches with highlighted characters (Zed's `fuzzy`), `menu::*` keys | `picker` |
 | `switcher.rs` | the agent switcher (`ctrl-p`), the first picker: picking selects the agent | `file_finder` |
@@ -135,7 +135,8 @@ Keys (Linux; macOS has the `cmd` equivalents), in the keymaps:
 | `ctrl-alt-left/right/up/down` | the pane in that direction (Zed's are `ctrl-k` chords, which a terminal needs) |
 | `shift-escape` | zoom the active pane, or put it back |
 | `ctrl-b`, `ctrl-alt-b`, `ctrl-j` | left, right, bottom dock |
-| `ctrl-shift-c`, `ctrl-shift-i`, `ctrl-t` | Comms, Inbox, Map tabs (placeholders) |
+| `ctrl-shift-c`, `ctrl-shift-i`, `ctrl-t` | Comms, Inbox, Map tabs (Comms and Map are placeholders) |
+| `ctrl-y`, `ctrl-a`, `ctrl-n` | allow, always allow, deny (outside the Inbox: open it on the oldest request) |
 | `ctrl-p` | the agent switcher |
 | `escape`, `enter`, `up`, `down`, `home`, `end` | `menu::*`, for menus, pickers and modals |
 
@@ -294,6 +295,64 @@ agent), keys reaching the agent past the workspace's bindings, one
 asking for scrollback and typing coming back, selection and copy,
 bracketed paste, `SendCtrlC`, and Tile all. In tests the window must be
 activated (`window.activate_window()`) for focus events to fire.
+
+## The Inbox (phase 4 step 4)
+
+`InboxItem` (`inbox.rs`) is the TUI's Inbox as a tab, opened by
+`workspace::OpenInbox` (`ctrl-shift-i`), `--view inbox`, the waiting
+badge in the title and status bars, a toast's Review button, or the
+answer keys from anywhere else. One card per item of the Store's inbox,
+drawn like the tool-call approval cards of Zed's agent panel
+(`agent_ui`'s `render_tool_call`): a faint header with the agent's
+critter, name (in its colour), the kind's chip (the TUI's `kind_chip`:
+permission, plan, question, finished, failed; faded once answered) and
+age; the summary; the whole detail in a block that scrolls past 18 rem
+(a permission's command or edit in the buffer font, `+`/`-`/`@` lines
+coloured as the TUI's; a plan as light markdown: headings, lists, fenced
+code); and, while it waits on you, **Allow**, **Always** and **Deny**
+with their key hints on the selected card, plus a button to the agent's
+own terminal. Failed items get a dashed border, as Zed's failed tool
+calls.
+
+Order: requests waiting on you first, oldest first (where the keys go);
+then the history (answered requests, finished and failed reports,
+questions sent as messages), newest first, folded under a disclosure
+until opened. A history row opens to its full card (enter, or a click).
+The selection is a card's id; when the selected request is answered it
+moves on to the next one waiting.
+
+Questions (`AskUserQuestion`) show their options as Zed's `ChoiceCard`s,
+radio or checkbox by `multi_select`; digits `1`–`9` pick them while the
+Inbox has the keyboard, as the TUI's. A field takes your own words;
+enter (or **Answer**) sends them if typed, else the numbers picked
+(`command::answer_choices`, "1 3"), through `command::answer_question`.
+**Leave to Terminal** (`ctrl-n`) denies it as the TUI's `^N` does.
+Permissions and plans go through `Store::answer`, so the request and what
+the toast says (`allowed Lead's permission`) are the TUI's.
+
+Keys (the TUI's): `ctrl-y` allow, `ctrl-a` always, `ctrl-n` deny. In the
+Inbox they answer the selected card; anywhere else (but a terminal, which
+takes every ctrl letter) they first open the Inbox on the oldest request
+waiting, the selected agent's first (`Store::next_waiting`), so you read
+before you allow. `up`/`down` (`home`/`end`) move between cards, `enter`
+is `inbox::Answer`, `escape` leaves a question's field. There are no
+single-letter answer keys: a stray key must never allow a command.
+
+Attention: an item that asks for you (`Change::InboxAdded { alert: true
+}`) becomes a toast with the agent's critter and the TUI's flash text
+(`Store::inbox_alert`: "name: summary") and a Review button, and the
+waiting badge in the title bar and status bar glows three times
+(`with_animation`, 1.8 s, keyed by `FleetModel::alerts()` so each new
+request starts it again), like the TUI's glowing Inbox tab. The Inbox's
+tab shows a bell and the waiting count.
+
+Tests: pure ones for the order, the detail styles, picking and the glow;
+headless ones for the keys opening the Inbox first and then answering
+through the demo link (the card resolves on `InboxResolved` and the
+selection moves on), cards answered by selection and click, questions
+(digits, several or one, your words over picks, escape, deny), the
+history folding, `--view inbox`, and the alert's toast and glow count.
+`FleetModel::receive` (tests only) applies link messages directly.
 
 ## Upgrading Zed
 

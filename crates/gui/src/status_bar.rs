@@ -11,6 +11,7 @@ use ui::{Indicator, Tooltip, prelude::*};
 
 use crate::dock::Dock;
 use crate::fleet::{Connection, FleetModel};
+use crate::inbox::waiting_badge;
 use crate::problems;
 use crate::title_bar::connection_badge;
 use crate::workspace::Workspace;
@@ -107,6 +108,7 @@ impl StatusBar {
 impl Render for StatusBar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let status = Status::of(self.fleet.read(cx));
+        let alerts = self.fleet.read(cx).alerts();
         let problems = problems::lines(cx);
         let (dot, _) = connection_badge(&status.connection);
         let connection_color = match status.connection {
@@ -119,12 +121,39 @@ impl Render for StatusBar {
             .into_iter()
             .filter_map(|d| self.dock_button(d, cx))
             .collect();
-        let mut counts = Vec::new();
-        for (i, (text, color)) in status.counts().into_iter().enumerate() {
+        let mut counts: Vec<AnyElement> = Vec::new();
+        let all = status.counts();
+        let last = all.len() - 1;
+        for (i, (text, color)) in all.into_iter().enumerate() {
             if i > 0 {
-                counts.push(Label::new("·").size(LabelSize::Small).color(Color::Disabled));
+                counts.push(
+                    Label::new("·")
+                        .size(LabelSize::Small)
+                        .color(Color::Disabled)
+                        .into_any_element(),
+                );
             }
-            counts.push(Label::new(text).size(LabelSize::Small).color(color));
+            // The inbox's count, last: a badge opening the Inbox while
+            // something waits.
+            if i == last && status.tally.waiting > 0 {
+                let workspace = self.workspace.clone();
+                counts.push(waiting_badge(
+                    "status-waiting",
+                    status.tally.waiting,
+                    alerts,
+                    move |_, window, cx| {
+                        let _ = workspace.update(cx, |w, cx| w.open_inbox(None, window, cx));
+                    },
+                    cx,
+                ));
+            } else {
+                counts.push(
+                    Label::new(text)
+                        .size(LabelSize::Small)
+                        .color(color)
+                        .into_any_element(),
+                );
+            }
         }
 
         h_flex()

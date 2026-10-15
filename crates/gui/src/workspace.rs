@@ -18,11 +18,11 @@ use ui::prelude::*;
 
 use crate::actions::{
     ActivateNextItem, ActivateNextPane, ActivatePaneDown, ActivatePaneLeft, ActivatePaneRight,
-    ActivatePaneUp, ActivatePreviousItem, ActivatePreviousPane, Capture, CloseActiveItem, CloseAgent,
-    CloseAllItems, CloseOtherItems, CloseWindow, Continue, MessageAgent, OpenComms, OpenInbox, OpenKeymap,
-    OpenMap, OpenSettings, OpenTerminal, Relaunch, SelectNext, SelectPrev, ShowTranscript, SplitDown,
-    SplitRight, TileAll, ToggleBottomDock, ToggleCritterSize, ToggleLeftDock, ToggleRightDock,
-    ToggleSwitcher, ToggleTypingGuard, ToggleZoom, terminal as terminal_actions,
+    ActivatePaneUp, ActivatePreviousItem, ActivatePreviousPane, Allow, Always, Capture, CloseActiveItem,
+    CloseAgent, CloseAllItems, CloseOtherItems, CloseWindow, Continue, Deny, MessageAgent, OpenComms,
+    OpenInbox, OpenKeymap, OpenMap, OpenSettings, OpenTerminal, Relaunch, SelectNext, SelectPrev,
+    ShowTranscript, SplitDown, SplitRight, TileAll, ToggleBottomDock, ToggleCritterSize, ToggleLeftDock,
+    ToggleRightDock, ToggleSwitcher, ToggleTypingGuard, ToggleZoom, terminal as terminal_actions,
 };
 use crate::agent_panel::AgentPanel;
 use crate::args::View;
@@ -30,6 +30,7 @@ use crate::decorations::client_side_decorations;
 use crate::dock::{Dock, DockPosition, DraggedDock, Panel, RESIZE_HANDLE_SIZE};
 use crate::fleet::FleetModel;
 use crate::fleet_panel::FleetPanel;
+use crate::inbox::InboxItem;
 use crate::item::{ItemHandle, Placeholder};
 use crate::message::MessageModal;
 use crate::modal_layer::{ModalLayer, ModalView};
@@ -100,9 +101,10 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Self {
         cx.observe(&fleet, |_, _, cx| cx.notify()).detach();
-        let title_bar = cx.new(|cx| TitleBar::new(fleet.clone(), cx));
+        let this = cx.entity().downgrade();
+        let title_bar = cx.new(|cx| TitleBar::new(fleet.clone(), this.clone(), cx));
         let modal_layer = cx.new(|_| ModalLayer::new());
-        let toast_layer = cx.new(|cx| ToastLayer::new(&fleet, cx));
+        let toast_layer = cx.new(|cx| ToastLayer::new(&fleet, cx).with_workspace(this.clone()));
 
         let fleet_panel = cx.new(|cx| FleetPanel::new(fleet.clone(), cx));
         let agent_panel = cx.new(|cx| AgentPanel::new(fleet.clone(), cx));
@@ -124,7 +126,6 @@ impl Workspace {
         for dock in [&left_dock, &right_dock, &bottom_dock] {
             dock.update(cx, |d, cx| d.set_open(true, window, cx));
         }
-        let this = cx.entity().downgrade();
         let docks = [left_dock.clone(), bottom_dock.clone(), right_dock.clone()];
         let status_bar = cx.new(|cx| StatusBar::new(fleet.clone(), this, docks, cx));
 
@@ -135,10 +136,11 @@ impl Workspace {
                 this.follow_settings(window, cx)
             }),
         ];
-        let placeholder = cx.new(|cx| Placeholder::new(view.unwrap_or(View::Fleet), cx));
-        first.update(cx, |pane, cx| {
-            pane.add_item(Box::new(placeholder), true, false, window, cx)
-        });
+        let first_item: Box<dyn ItemHandle> = match view.unwrap_or(View::Fleet) {
+            View::Inbox => Box::new(cx.new(|cx| InboxItem::new(fleet.clone(), cx))),
+            view => Box::new(cx.new(|cx| Placeholder::new(view, cx))),
+        };
+        first.update(cx, |pane, cx| pane.add_item(first_item, true, false, window, cx));
         subscriptions.push(cx.observe(&first, |_, _, cx| cx.notify()));
 
         // The Fleet has the keyboard until a terminal or tab takes it.
@@ -462,6 +464,67 @@ impl Workspace {
                 let item = cx.new(|cx| Placeholder::new(view, cx));
                 pane.update(cx, |p, cx| p.add_item(Box::new(item), true, true, window, cx));
             }
+        }
+    }
+
+    /// Opens the Inbox and gives it the keyboard: activates its tab where
+    /// one is open (in any pane), else adds one to the active pane. With
+    /// `item`, that card is selected.
+    pub fn open_inbox(
+        &mut self,
+        item: Option<u64>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<InboxItem> {
+        let mut found = None;
+        for pane in self.panes() {
+            let at = pane
+                .read(cx)
+                .items()
+                .position(|i| i.to_any().downcast::<InboxItem>().is_ok());
+            if let Some(ix) = at {
+                pane.update(cx, |p, cx| p.activate_item(ix, true, window, cx));
+                let inbox = pane
+                    .read(cx)
+                    .active_item()
+                    .and_then(|i| i.to_any().downcast::<InboxItem>().ok());
+                self.active_pane = pane.clone();
+                found = inbox;
+                break;
+            }
+        }
+        let inbox = match found {
+            Some(inbox) => inbox,
+            None => {
+                let inbox = cx.new(|cx| InboxItem::new(self.fleet.clone(), cx));
+                self.active_pane.update(cx, |p, cx| {
+                    p.add_item(Box::new(inbox.clone()), true, true, window, cx)
+                });
+                inbox
+            }
+        };
+        if let Some(item) = item {
+            inbox.update(cx, |inbox, cx| inbox.select(item, cx));
+        }
+        let focus = inbox.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        cx.notify();
+        inbox
+    }
+
+    /// `ctrl-y`, `ctrl-a` or `ctrl-n` outside the Inbox: as the TUI's, it
+    /// opens the Inbox on the oldest request waiting (the selected
+    /// agent's first), so you read before you answer; the Inbox's own
+    /// keys then answer it.
+    fn answer_from_outside(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let store = &self.fleet.read(cx).store;
+        match store.next_waiting().map(|ix| store.inbox[ix].id) {
+            Some(id) => {
+                self.open_inbox(Some(id), window, cx);
+            }
+            None => self.fleet.update(cx, |fleet, cx| {
+                fleet.show("nothing is waiting on you".into(), false, cx)
+            }),
         }
     }
 
@@ -805,9 +868,12 @@ impl Render for Workspace {
             .on_action(
                 cx.listener(|this, _: &OpenComms, window, cx| this.open_placeholder(View::Comms, window, cx)),
             )
-            .on_action(
-                cx.listener(|this, _: &OpenInbox, window, cx| this.open_placeholder(View::Inbox, window, cx)),
-            )
+            .on_action(cx.listener(|this, _: &OpenInbox, window, cx| {
+                this.open_inbox(None, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &Allow, window, cx| this.answer_from_outside(window, cx)))
+            .on_action(cx.listener(|this, _: &Always, window, cx| this.answer_from_outside(window, cx)))
+            .on_action(cx.listener(|this, _: &Deny, window, cx| this.answer_from_outside(window, cx)))
             .on_action(
                 cx.listener(|this, _: &OpenMap, window, cx| this.open_placeholder(View::Map, window, cx)),
             )

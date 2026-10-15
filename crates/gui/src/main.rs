@@ -12,6 +12,7 @@ mod decorations;
 mod dock;
 mod fleet;
 mod fleet_panel;
+mod inbox;
 mod item;
 mod keymap;
 mod message;

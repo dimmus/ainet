@@ -105,13 +105,13 @@
     }
   },
   {
+    // Answering takes ctrl-y, ctrl-a or ctrl-n (the Workspace's keys, as
+    // the TUI's), never a bare letter: a stray key must not allow a
+    // command. Digits pick a question's options.
     "context": "Inbox",
     "bindings": {
       "down": "menu::SelectNext",
       "up": "menu::SelectPrevious",
-      "y": "inbox::Allow",
-      "a": "inbox::Always",
-      "n": "inbox::Deny",
       "enter": "inbox::Answer"
     }
   },

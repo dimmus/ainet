@@ -61,13 +61,24 @@ pub enum StartProblem {
 }
 
 /// Something the user should hear about: a daemon flash, a report, a change
-/// in the connection.
-#[derive(Clone, Debug)]
+/// in the connection, a request that waits on you.
+#[derive(Clone, Debug, Default)]
 pub struct Notice {
     /// For reports (`ainet ps`-like replies): their title.
     pub title: Option<String>,
     pub text: String,
     pub error: bool,
+    /// For a new inbox item that asks for you: which.
+    pub attention: Option<Attention>,
+}
+
+/// An inbox item asking for you, as a toast points at it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Attention {
+    /// The agent asking (its id).
+    pub agent: String,
+    /// The inbox item's id.
+    pub item: u64,
 }
 
 impl EventEmitter<Notice> for FleetModel {}
@@ -93,6 +104,9 @@ pub struct FleetModel {
     rechecking: bool,
     tick: u64,
     notices: VecDeque<Notice>,
+    /// Inbox items that asked for you so far; the waiting badge glows
+    /// anew for each.
+    alerts: usize,
     /// The terminals on show: the agent each item (by entity) shows.
     shown: HashMap<EntityId, String>,
     /// Which shown screens are stale, and the sizes asked of their panes.
@@ -174,6 +188,7 @@ impl FleetModel {
             rechecking: false,
             tick: 0,
             notices: VecDeque::new(),
+            alerts: 0,
             shown: HashMap::new(),
             pump: Pump::new(),
             pump_task: None,
@@ -221,6 +236,12 @@ impl FleetModel {
 
     pub fn tally(&self) -> Tally {
         self.store.tally()
+    }
+
+    /// How many inbox items have asked for you, for the waiting badge's
+    /// glow.
+    pub fn alerts(&self) -> usize {
+        self.alerts
     }
 
     /// The notices so far, the latest last.
@@ -459,11 +480,35 @@ impl FleetModel {
                     self.notice(None, text.into(), !up, cx);
                 }
                 Change::Output(agent) if self.is_shown(&agent) => self.pump.mark(&agent),
+                // A request waiting on you (or a question): a toast and a
+                // glowing badge, as the TUI's flash and glowing Inbox tab.
+                Change::InboxAdded { index, alert: true } => {
+                    self.alerts += 1;
+                    if let (Some(text), Some(item)) =
+                        (self.store.inbox_alert(index), self.store.inbox.get(index))
+                    {
+                        let notice = Notice {
+                            text,
+                            attention: Some(Attention {
+                                agent: item.agent.clone(),
+                                item: item.id,
+                            }),
+                            ..Notice::default()
+                        };
+                        self.push_notice(notice, cx);
+                    }
+                }
                 _ => {}
             }
         }
         self.pump(cx);
         cx.notify();
+    }
+
+    /// Applies `msgs` as if the link had sent them, for tests.
+    #[cfg(test)]
+    pub fn receive(&mut self, msgs: Vec<Msg>, cx: &mut Context<Self>) {
+        self.apply(msgs, cx);
     }
 
     /// Says `Hello` to the daemon again, off the UI thread, and forgets
@@ -488,10 +533,19 @@ impl FleetModel {
     }
 
     fn notice(&mut self, title: Option<String>, text: String, error: bool, cx: &mut Context<Self>) {
+        let notice = Notice {
+            title,
+            text,
+            error,
+            attention: None,
+        };
+        self.push_notice(notice, cx);
+    }
+
+    fn push_notice(&mut self, notice: Notice, cx: &mut Context<Self>) {
         if self.notices.len() == KEEP_NOTICES {
             self.notices.pop_front();
         }
-        let notice = Notice { title, text, error };
         cx.emit(notice.clone());
         self.notices.push_back(notice);
     }

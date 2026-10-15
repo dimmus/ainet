@@ -4,9 +4,10 @@ Plan for adding a native GUI to ainet, built on Zed's UI stack (GPUI and
 Zed's component library) and following Zed's look and interaction model,
 while the console version (CLI + TUI) stays exactly as it is.
 
-Status: **phase 4 steps 1–3 done** (the Fleet panel with critters and
-the agent menu, the Agent panel, the live terminal with Tile all; see
-[GUI.md](GUI.md)), step 4 (the Inbox) next; phase 3 done (option A: panes, splits, docks,
+Status: **phase 4 steps 1–4 done** (the Fleet panel with critters and
+the agent menu, the Agent panel, the live terminal with Tile all, the
+Inbox with approval cards, questions and the glowing waiting badge; see
+[GUI.md](GUI.md)), step 5 (Comms) next; phase 3 done (option A: panes, splits, docks,
 modals, toasts, the text input and the picker); phase 2 done (themes,
 fonts, settings and keymaps); phase 1 done (`crates/gui`: the GPUI
 skeleton on Zed v1.24.2); phase 0 done (`crates/model`). Written 2026-10-15 against commit `c0dbb5a`.
@@ -382,6 +383,21 @@ hover, IME composition in terminals (no input handler; keys come from
 key-down events), forwarding the mouse to programs that ask for it,
 colours in scrollback (ainetd sends history as plain text), `--view
 terminals`/`rig:` tiling at start.
+
+Step 4 done: `InboxItem`, cards after Zed's tool-call approval cards
+(critter, name, kind chip, summary, scrolling detail: command and edit
+coloured as the TUI's, plans as light markdown), waiting first and the
+history folded; Allow/Always/Deny with key hints through `Store::answer`;
+questions as `ChoiceCard`s plus a free-text field, sent by
+`command::answer_question` (new `command::answer_choices` for picks);
+`ctrl-y`/`ctrl-a`/`ctrl-n` outside the Inbox open it on
+`Store::next_waiting` first, as the TUI's; alerts as toasts with the
+agent's critter and a Review button (text from the new
+`Store::inbox_alert`, which the TUI's flash now uses) and a waiting badge
+in the title and status bars that glows three times per alert. The
+Inbox's single-letter keys (`y`, `a`, `n`) were dropped. Not yet: the
+agent's role in the card, markdown beyond headings, lists and code
+fences, keyboard focus on individual buttons.
 
 ### Phase 5 — Command palette, pickers, modals · ~1 week
 

@@ -1,27 +1,34 @@
 //! The title bar, after Zed's `platform_title_bar`: drags and double-click
 //! zooms the window, carries the window controls when decorations are
 //! client-side, and shows the app name, the rig switcher (a placeholder
-//! until phase 5) and the connection.
+//! until phase 5), the requests waiting on you (a badge that glows when
+//! one arrives and opens the Inbox) and the connection.
 
-use gpui::{Decorations, Entity, MouseButton, WindowButton, WindowButtonLayout, WindowControlArea, svg};
+use gpui::{
+    Decorations, Entity, MouseButton, WeakEntity, WindowButton, WindowButtonLayout, WindowControlArea, svg,
+};
 use theme::{CLIENT_SIDE_DECORATION_BORDER, CLIENT_SIDE_DECORATION_ROUNDING};
 use ui::utils::platform_title_bar_height;
 use ui::{Indicator, Tooltip, prelude::*};
 
 use crate::fleet::{Connection, FleetModel};
+use crate::inbox::waiting_badge;
 use crate::quit;
+use crate::workspace::Workspace;
 
 pub struct TitleBar {
     fleet: Entity<FleetModel>,
+    workspace: WeakEntity<Workspace>,
     /// Set on mouse down; the first move after it starts a window move.
     should_move: bool,
 }
 
 impl TitleBar {
-    pub fn new(fleet: Entity<FleetModel>, cx: &mut Context<Self>) -> Self {
+    pub fn new(fleet: Entity<FleetModel>, workspace: WeakEntity<Workspace>, cx: &mut Context<Self>) -> Self {
         cx.observe(&fleet, |_, _, cx| cx.notify()).detach();
         TitleBar {
             fleet,
+            workspace,
             should_move: false,
         }
     }
@@ -52,7 +59,7 @@ impl Render for TitleBar {
         };
         let fleet = self.fleet.read(cx);
         let (dot, words) = connection_badge(&fleet.connection());
-        let waiting = fleet.tally().waiting;
+        let (waiting, alerts) = (fleet.tally().waiting, fleet.alerts());
         let layout = client_side.then(|| button_layout(cx)).flatten();
         let controls = |side: &[Option<WindowButton>]| {
             let buttons: Vec<WindowButton> = side.iter().flatten().copied().collect();
@@ -80,19 +87,20 @@ impl Render for TitleBar {
             .gap_3()
             .pr_2()
             .when(waiting > 0, |el| {
+                let workspace = self.workspace.clone();
                 el.child(
-                    h_flex()
-                        .gap_1()
-                        .child(
-                            Icon::new(IconName::Bell)
-                                .size(IconSize::Small)
-                                .color(Color::Warning),
-                        )
-                        .child(
-                            Label::new(format!("{waiting} waiting"))
-                                .size(LabelSize::Small)
-                                .color(Color::Warning),
-                        ),
+                    // Not a window drag: a click here opens the Inbox.
+                    div()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(waiting_badge(
+                            "title-waiting",
+                            waiting,
+                            alerts,
+                            move |_, window, cx| {
+                                let _ = workspace.update(cx, |w, cx| w.open_inbox(None, window, cx));
+                            },
+                            cx,
+                        )),
                 )
             })
             .child(
