@@ -74,6 +74,19 @@ pub enum Change {
     Connected(bool),
 }
 
+/// Headline numbers about the fleet.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Tally {
+    /// Agents whose process is still running.
+    pub live: usize,
+    pub working: usize,
+    pub idle: usize,
+    /// Agents blocked on a permission, plan or question.
+    pub needs_you: usize,
+    /// Inbox items waiting on you.
+    pub waiting: usize,
+}
+
 /// How many messages and chat posts are kept.
 const KEEP: usize = 2000;
 
@@ -443,6 +456,19 @@ impl Store {
             })
     }
 
+    /// The fleet in numbers, as front ends show it in their header or
+    /// status bar.
+    pub fn tally(&self) -> Tally {
+        let count = |s: AgentState| self.agents.values().filter(|a| a.state == s).count();
+        Tally {
+            live: self.agents.values().filter(|a| a.state.is_live()).count(),
+            working: count(AgentState::Working),
+            idle: count(AgentState::Idle),
+            needs_you: count(AgentState::NeedsYou),
+            waiting: self.inbox.iter().filter(|i| i.waiting).count(),
+        }
+    }
+
     /// The running operator agent, if any.
     pub fn operator(&self) -> Option<&Agent> {
         self.agents
@@ -551,6 +577,25 @@ mod tests {
             options: vec![],
             multi_select: false,
         }
+    }
+
+    #[test]
+    fn tally_counts_live_agents_and_waiting_items() {
+        let mut store = demo();
+        let t = store.tally();
+        let live = store.agents.values().filter(|a| a.state.is_live()).count();
+        assert_eq!(t.live, live);
+        assert!(t.working + t.idle + t.needs_you <= t.live);
+        let waiting = store.inbox.iter().filter(|i| i.waiting).count();
+        assert_eq!(t.waiting, waiting);
+        let agent = store.agents.keys().next().unwrap().clone();
+        event(
+            &mut store,
+            Event::Inbox {
+                item: item(9_999, &agent, InboxKind::Permission, true),
+            },
+        );
+        assert_eq!(store.tally().waiting, waiting + 1);
     }
 
     /// The seats of a rig's agent rows, with their tree prefixes.

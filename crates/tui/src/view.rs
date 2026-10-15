@@ -227,24 +227,19 @@ pub(crate) fn meta(a: &Agent) -> String {
 
 fn draw_header(f: &mut Frame, app: &mut App, area: Rect, wide: bool) {
     let pal = &app.pal;
-    let count = |s: AgentState| app.store.agents.values().filter(|a| a.state == s).count();
-    let live = app.store.agents.values().filter(|a| a.state.is_live()).count();
-    let needs = count(AgentState::NeedsYou);
+    let tally = app.store.tally();
+    let (live, needs) = (tally.live, tally.needs_you);
     let mut fleet = vec![Span::styled(format!("{live} agents"), pal.dim())];
     if needs > 0 {
         fleet.push(Span::styled(" · ", pal.muted()));
         fleet.push(Span::styled(format!("{needs} need you"), pal.style(pal.attn)));
     }
     fleet.push(Span::styled(
-        format!(
-            " · {} working · {} idle",
-            count(AgentState::Working),
-            count(AgentState::Idle)
-        ),
+        format!(" · {} working · {} idle", tally.working, tally.idle),
         pal.dim(),
     ));
 
-    let waiting = app.store.inbox.iter().filter(|i| i.waiting).count();
+    let waiting = tally.waiting;
     let mut links = vec![if waiting > 0 {
         Span::styled(format!("inbox {waiting} waiting"), pal.style(pal.attn))
     } else {

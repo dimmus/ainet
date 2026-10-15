@@ -17,4 +17,4 @@ pub mod store;
 pub use command::{Command, Context};
 pub use demo::Demo;
 pub use link::{Backend, Link, Msg, Sink};
-pub use store::{Change, Entry, Row, Store};
+pub use store::{Change, Entry, Row, Store, Tally};

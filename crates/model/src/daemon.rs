@@ -25,6 +25,11 @@ pub fn ensure_daemon(socket: &Path, ainet: &Path) -> Result<()> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(log);
+    // A socket other than the default (`ainet-gui --socket`) must reach the
+    // daemon too; the console always passes the default and is unaffected.
+    if socket != paths::socket() {
+        cmd.env("AINET_SOCKET", socket);
+    }
     // Its own process group, so Ctrl+C in the front end does not reach it.
     std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
     cmd.spawn().context("start ainetd")?;
