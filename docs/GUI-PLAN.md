@@ -4,8 +4,9 @@ Plan for adding a native GUI to ainet, built on Zed's UI stack (GPUI and
 Zed's component library) and following Zed's look and interaction model,
 while the console version (CLI + TUI) stays exactly as it is.
 
-Status: **phase 1 done** (`crates/gui`: the GPUI skeleton on Zed v1.24.2,
-see [GUI.md](GUI.md)); phase 0 done (`crates/model`); phase 2 next. Written
+Status: **phase 2 done** (themes, fonts, settings and keymaps, see
+[GUI.md](GUI.md)); phase 1 done (`crates/gui`: the GPUI skeleton on Zed
+v1.24.2); phase 0 done (`crates/model`); phase 3 next. Written
 2026-10-15 against commit `c0dbb5a`.
 
 **Decided (2026-10-15): option A.** The GUI uses Zed's real `ui` and `theme`

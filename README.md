@@ -54,7 +54,10 @@ ainet up path/to/openrig/rig.yaml           # any OpenRig RigSpec
 
 `ainet-gui` is a desktop front end in Zed's style (GPUI and Zed's own UI
 components), in early development: so far a window with Zed's title bar,
-docks and status bar over the same fleet state as the TUI. The plan is
+docks and status bar over the same fleet state as the TUI, with Zed's
+themes plus Deepharness and Omarchy, Zed's fonts, and Zed-style settings
+(`~/.config/ainet/settings.json`) and keymaps
+(`~/.config/ainet/keymap.json`) that apply as you save. The plan is
 [docs/GUI-PLAN.md](docs/GUI-PLAN.md); the Zed pin and how to upgrade it,
 [docs/GUI.md](docs/GUI.md).
 

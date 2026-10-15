@@ -11,11 +11,12 @@ note records the pin and how to move it. The plan and the reasons are in
 |---|---|
 | Zed release | **v1.24.2** (latest stable on 2026-10-15) |
 | Commit | `fb69067729cb16a7f6135e2c1600c26a28c59659` (see `Cargo.lock`) |
-| Crates used directly | `gpui`, `gpui_platform` (features `font-kit`, `wayland`, `x11`), `theme`, `ui`; `gpui` with `test-support` as a dev-dependency |
+| Crates used directly | `gpui`, `gpui_platform` (features `font-kit`, `wayland`, `x11`), `theme`, `ui`, `settings_content` (the theme JSON schema only); `gpui` with `test-support` as a dev-dependency |
 | Zed's toolchain | Rust 1.98.1 (`rust-toolchain.toml` at the tag); `crates/gui` declares `rust-version = "1.98"`, the console crates keep 1.88 |
-| Licences | `gpui*` and its support crates Apache-2.0; `ui`, `ui_macros`, `theme`, `syntax_theme`, `icons`, `component`, `menu` GPL-3.0-or-later, so `ainet-gui` is GPL-3.0-or-later (THIRD_PARTY_NOTICES.md) |
+| Licences | `gpui*` and its support crates Apache-2.0; `ui`, `ui_macros`, `theme`, `syntax_theme`, `icons`, `component`, `menu`, `settings_content` (with `settings_json`, `settings_macros`, `language_model_core`) GPL-3.0-or-later, so `ainet-gui` is GPL-3.0-or-later (THIRD_PARTY_NOTICES.md) |
+| Assets | Zed's `assets/themes` (One, Ayu, Gruvbox), `assets/icons` (top level), `assets/fonts` (IBM Plex Sans, Lilex) at the tag, copied into `crates/gui/assets` |
 
-All four dependencies in `crates/gui/Cargo.toml` (and the dev-dependency)
+All Zed dependencies in `crates/gui/Cargo.toml` (and the dev-dependency)
 name the same `tag`; never mix tags or revisions.
 
 ## Patches copied from Zed
@@ -48,8 +49,20 @@ crates use none of them, so `cargo build` of `ainet` is unchanged.
 - Client-side decorations and the title bar: ported from
   `workspace::client_side_decorations` and `platform_title_bar` (both pull
   in Zed's whole workspace, so they cannot be dependencies).
-- Assets: `crates/gui/src/assets.rs` embeds the icons the views draw, copied
-  from Zed's `assets/icons` (Lucide, ISC; `crates/gui/assets/icons/LICENSES`).
+- Assets: `crates/gui/src/assets.rs` embeds `crates/gui/assets` with
+  `rust-embed` (also in debug builds, so the binary never reads the source
+  tree; Zed's own `assets` crate reads its checkout in debug builds).
+- Loading themes: Zed does it in `theme_settings`, which needs Zed's
+  `settings` crate and with it Zed's fs, git and wasmtime. The few hundred
+  lines that turn theme JSON into `theme::Theme` (`refine_theme_family` and
+  the colour fallbacks of `schema.rs`) are copied into
+  `crates/gui/src/zed_theme.rs`; the JSON types come from
+  `settings_content`, which is light.
+- Settings: `crates/gui/src/settings.rs` reads ainet's own
+  `settings.json` (below) instead of Zed's settings store.
+- Keymaps: `crates/gui/src/keymap.rs` reads Zed's keymap format the way
+  `settings::keymap_file` does (sections, `null` to unbind, partial loads
+  of a broken file), without the settings crate.
 
 ## Upgrading Zed
 
@@ -69,7 +82,12 @@ crates use none of them, so `cargo build` of `ainet` is unchanged.
    particular `crates/theme/src/theme_settings_provider.rs`,
    `crates/workspace/src/workspace.rs` (`client_side_decorations`),
    `crates/platform_title_bar` and `crates/ui/src/components`.
-6. Re-copy any icons that changed (`assets/icons/<name>.svg`) and check
+6. Re-copy Zed's assets: `assets/icons/*.svg` and `LICENSES`,
+   `assets/themes` (with `LICENSES`) and `assets/fonts` into
+   `crates/gui/assets` (the `serves_every_icon_ui_can_name` test fails if
+   `ui::IconName` gained an icon). Diff Zed's
+   `crates/theme_settings/src/{schema.rs,theme_settings.rs}` between the
+   two tags and carry the changes into `crates/gui/src/zed_theme.rs`. Check
    `script/linux` for new system packages (README, "Desktop app").
 7. Run the GUI gate: `cargo fmt --all --check`,
    `cargo clippy -p ainet-gui --all-targets -- -D warnings`,
@@ -77,6 +95,42 @@ crates use none of them, so `cargo build` of `ainet` is unchanged.
    `cargo clippy --workspace --exclude ainet-gui --all-targets -- -D warnings`,
    `cargo test --workspace --exclude ainet-gui`.
 8. Update the table at the top of this file and commit the bump on its own.
+
+## Settings, themes and keys
+
+`~/.config/ainet/settings.json` (`$XDG_CONFIG_HOME` respected) is JSON with
+comments and trailing commas, every field optional; saved changes apply at
+once (the file is checked every 750 ms). If it does not parse, the last good
+settings stay and the status bar says what is wrong. `ctrl-,` opens it
+(creating it with every field commented out).
+
+| Field | Default | |
+|---|---|---|
+| `theme` | `"Omarchy"` if installed, else `"Deepharness"` | a name, or `{ "mode": "system" \| "light" \| "dark", "light": "…", "dark": "…" }` as in Zed |
+| `ui_font_family`, `ui_font_size` | `".ZedSans"` (IBM Plex Sans), 16 | sizes are kept within 6–100 |
+| `ui_density` | `"default"` | `"compact"`, `"comfortable"` |
+| `terminal.font_family`, `.font_size`, `.line_height` | `".ZedMono"` (Lilex), 15, `"standard"` | `"comfortable"`, `"standard"` or `{ "custom": 1.4 }`, as in Zed |
+| `fleet_panel.dock`, `.width` | `"left"`, 260 | the Agent panel takes the other side |
+| `critters.size` | `"large"` | `"small"`; `ctrl-e` toggles it |
+| `confirm_quit` | `false` | ask before quitting |
+
+Themes: Zed's One, Ayu and Gruvbox families, **Deepharness** (the TUI's
+palette, `crates/gui/assets/themes/deepharness/deepharness.json`), and
+**Omarchy**, made at start-up from Omarchy's current `colors.toml` the way
+the TUI reads it. Both come from `themes::family_json` and the palette in
+`ainet-model`; after changing the palette, regenerate the bundled file with
+`AINET_WRITE_THEME=1 cargo test -p ainet-gui bundled_deepharness`. Their
+player colours are the TUI's agent hues, so `themes::agent_color` gives an
+agent the same colour as in the TUI (other themes give their own player
+colours).
+
+Keys: `crates/gui/assets/keymaps/default-{linux,macos}.json`, in Zed's
+format, with the contexts `Workspace`, `FleetPanel`, `Terminal`, `Inbox`,
+`Comms` and `Picker`. `~/.config/ainet/keymap.json` adds to them and
+overrides them (`null` unbinds), and reloads on save; bindings it cannot
+read are listed in the status bar and the rest apply. The actions are in
+`crates/gui/src/actions.rs`; `ui::KeyBinding::for_action` shows any of
+them as a hint.
 
 ## Build notes
 
