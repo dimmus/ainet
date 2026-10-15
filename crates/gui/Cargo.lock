@@ -159,8 +159,10 @@ dependencies = [
  "anyhow",
  "clap",
  "futures",
+ "fuzzy",
  "gpui",
  "gpui_platform",
+ "menu",
  "rust-embed",
  "serde",
  "serde_json",
@@ -169,6 +171,8 @@ dependencies = [
  "strum",
  "theme",
  "ui",
+ "ui_input",
+ "unicode-segmentation",
 ]
 
 [[package]]
@@ -2116,6 +2120,17 @@ dependencies = [
  "memchr",
  "pin-project-lite",
  "slab",
+]
+
+[[package]]
+name = "fuzzy"
+version = "0.1.0"
+source = "git+https://github.com/zed-industries/zed?tag=v1.24.2#fb69067729cb16a7f6135e2c1600c26a28c59659"
+dependencies = [
+ "gpui",
+ "gpui_util",
+ "log",
+ "path",
 ]
 
 [[package]]
@@ -6036,6 +6051,16 @@ dependencies = [
  "theme",
  "ui_macros",
  "web-time",
+]
+
+[[package]]
+name = "ui_input"
+version = "0.1.0"
+source = "git+https://github.com/zed-industries/zed?tag=v1.24.2#fb69067729cb16a7f6135e2c1600c26a28c59659"
+dependencies = [
+ "component",
+ "gpui",
+ "ui",
 ]
 
 [[package]]

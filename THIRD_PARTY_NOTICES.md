@@ -42,7 +42,7 @@ taken from its git repository at tag v1.24.2 (docs/GUI.md):
 | Crates | Licence |
 |---|---|
 | `gpui`, `gpui_platform`, `gpui_linux`, `gpui_wgpu`, `gpui_macros`, `gpui_util`, `gpui_shared_string`, `refineable`, `derive_refineable`, `collections`, `sum_tree`, `scheduler`, `http_client`, `ztracing`, `ztracing_macro`, `util`, `path`, `cloud_llm_client` | Apache-2.0 |
-| `ui`, `ui_macros`, `theme`, `syntax_theme`, `icons`, `component`, `menu`, `settings_content`, `settings_json`, `settings_macros`, `language_model_core` | GPL-3.0-or-later |
+| `ui`, `ui_macros`, `ui_input`, `theme`, `syntax_theme`, `icons`, `component`, `menu`, `fuzzy`, `settings_content`, `settings_json`, `settings_macros`, `language_model_core` | GPL-3.0-or-later |
 
 (`cargo tree --manifest-path crates/gui/Cargo.toml -e normal` lists them;
 the set changes when Zed is upgraded.)
@@ -56,7 +56,11 @@ licensed GPL-3.0-or-later; the licence's text is in
 adapted from Zed's `workspace` (`client_side_decorations`) and
 `platform_title_bar` crates; `crates/gui/src/zed_theme.rs` is copied from
 Zed's `theme_settings` crate, and `crates/gui/src/keymap.rs` follows its
-`settings::keymap_file` (all GPL-3.0-or-later).
+`settings::keymap_file` (all GPL-3.0-or-later). The workspace pieces
+`item.rs`, `pane.rs`, `pane_group.rs` (with its divider element),
+`dock.rs`, `modal_layer.rs` and `toast_layer.rs` are ported from Zed's
+`workspace` crate, and `picker.rs` from its `picker` crate (GPL-3.0-or-later);
+`text_input/` follows GPUI's `examples/input.rs` (Apache-2.0).
 
 Copied from Zed's `assets/` at the same tag into `crates/gui/assets`:
 

@@ -1,24 +1,25 @@
 //! The status bar: the connection to ainetd on the left (or why there is
-//! none), what is wrong with the user's settings or keymap, the latest
-//! flash, and the fleet in numbers on the right: the TUI header's agents,
-//! working, need-you and waiting counts.
+//! none) and what is wrong with the user's settings or keymap, and the
+//! fleet in numbers on the right: the TUI header's agents, working,
+//! need-you and waiting counts. At its ends, as in Zed, a button per dock
+//! that opens and closes it. Flashes show as toasts (`toast_layer`).
 
 use ainet_model::Tally;
-use gpui::{Decorations, Entity};
+use gpui::{Decorations, Entity, WeakEntity};
 use theme::CLIENT_SIDE_DECORATION_ROUNDING;
 use ui::{Indicator, Tooltip, prelude::*};
 
+use crate::dock::Dock;
 use crate::fleet::{Connection, FleetModel};
 use crate::problems;
 use crate::title_bar::connection_badge;
+use crate::workspace::Workspace;
 
 /// What the status bar says, apart from how it looks.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Status {
     pub connection: Connection,
     pub tally: Tally,
-    /// The latest flash, and whether it is an error.
-    pub flash: Option<(String, bool)>,
 }
 
 impl Status {
@@ -26,7 +27,6 @@ impl Status {
         Status {
             connection: fleet.connection(),
             tally: fleet.tally(),
-            flash: fleet.flash().map(|n| (n.text.clone(), n.error)),
         }
     }
 
@@ -60,12 +60,47 @@ impl Status {
 
 pub struct StatusBar {
     fleet: Entity<FleetModel>,
+    workspace: WeakEntity<Workspace>,
+    /// The left, bottom and right docks.
+    docks: [Entity<Dock>; 3],
 }
 
 impl StatusBar {
-    pub fn new(fleet: Entity<FleetModel>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        fleet: Entity<FleetModel>,
+        workspace: WeakEntity<Workspace>,
+        docks: [Entity<Dock>; 3],
+        cx: &mut Context<Self>,
+    ) -> Self {
         cx.observe(&fleet, |_, _, cx| cx.notify()).detach();
-        StatusBar { fleet }
+        for dock in &docks {
+            cx.observe(dock, |_, _, cx| cx.notify()).detach();
+        }
+        StatusBar {
+            fleet,
+            workspace,
+            docks,
+        }
+    }
+
+    /// The button for a dock's panel, lit while the dock is open.
+    fn dock_button(&self, dock: &Entity<Dock>, cx: &App) -> Option<AnyElement> {
+        let dock = dock.read(cx);
+        let panel = dock.active_panel()?;
+        let position = dock.position();
+        let action = dock.toggle_action();
+        let tooltip = panel.icon_tooltip(cx);
+        let workspace = self.workspace.clone();
+        Some(
+            IconButton::new(SharedString::from(format!("dock-{position:?}")), panel.icon(cx))
+                .icon_size(IconSize::Small)
+                .toggle_state(dock.is_open())
+                .tooltip(move |_, cx| Tooltip::for_action(tooltip, action.as_ref(), cx))
+                .on_click(move |_, window, cx| {
+                    let _ = workspace.update(cx, |w, cx| w.toggle_dock(position, window, cx));
+                })
+                .into_any_element(),
+        )
     }
 }
 
@@ -78,6 +113,12 @@ impl Render for StatusBar {
             Connection::Failed(_) | Connection::Incompatible(_) => Color::Error,
             _ => Color::Muted,
         };
+        let [left_dock, bottom_dock, right_dock] = &self.docks;
+        let left = self.dock_button(left_dock, cx);
+        let right: Vec<AnyElement> = [bottom_dock, right_dock]
+            .into_iter()
+            .filter_map(|d| self.dock_button(d, cx))
+            .collect();
         let mut counts = Vec::new();
         for (i, (text, color)) in status.counts().into_iter().enumerate() {
             if i > 0 {
@@ -111,6 +152,7 @@ impl Render for StatusBar {
                     .gap_2()
                     .min_w_0()
                     .overflow_x_hidden()
+                    .children(left)
                     .child(
                         Icon::new(IconName::Server)
                             .size(IconSize::Small)
@@ -144,15 +186,6 @@ impl Render for StatusBar {
                                     )
                                     .tooltip(Tooltip::text(all)),
                             )
-                    })
-                    .when_some(status.flash.clone(), |el, (text, error)| {
-                        el.child(Label::new("·").size(LabelSize::Small).color(Color::Disabled))
-                            .child(
-                                Label::new(text)
-                                    .size(LabelSize::Small)
-                                    .color(if error { Color::Error } else { Color::Success })
-                                    .truncate(),
-                            )
                     }),
             )
             .child(
@@ -164,7 +197,8 @@ impl Render for StatusBar {
                             .size(IconSize::Small)
                             .color(Color::Muted),
                     )
-                    .children(counts),
+                    .children(counts)
+                    .children(right),
             )
     }
 }
@@ -177,7 +211,6 @@ mod tests {
         Status {
             connection: Connection::Connected,
             tally,
-            flash: None,
         }
     }
 
@@ -209,7 +242,6 @@ mod tests {
         let s = Status {
             connection: Connection::Failed("cannot start ainetd: no ainet".into()),
             tally: Tally::default(),
-            flash: None,
         };
         assert_eq!(s.connection_text(), "cannot start ainetd: no ainet");
     }

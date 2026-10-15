@@ -7,16 +7,25 @@ mod actions;
 mod args;
 mod assets;
 mod decorations;
-mod docks;
+mod dock;
 mod fleet;
+mod item;
 mod keymap;
+mod modal_layer;
+mod pane;
+mod pane_group;
+mod panels;
+mod picker;
 mod problems;
 mod quit;
 mod settings;
 mod sink;
 mod status_bar;
+mod switcher;
+mod text_input;
 mod themes;
 mod title_bar;
+mod toast_layer;
 mod watch;
 mod workspace;
 mod zed_theme;
@@ -109,6 +118,7 @@ fn init(files: ConfigFiles, cx: &mut App) {
     }
     settings::init(files.settings, cx);
     keymap::init(files.keymap, cx);
+    text_input::erased::init();
 
     cx.on_action(quit::quit);
     cx.on_window_closed(|cx, _| {
@@ -178,7 +188,8 @@ mod tests {
     use super::*;
     use crate::status_bar::Status;
 
-    fn init_test(cx: &mut TestAppContext) {
+    /// The app as `main` sets it up, without the user's config.
+    pub(crate) fn init_test(cx: &mut TestAppContext) {
         cx.update(|cx| init(ConfigFiles::default(), cx));
     }
 
@@ -324,7 +335,7 @@ mod tests {
             Workspace::new(fleet, None, window, cx)
         });
         cx.run_until_parked();
-        let docks = |cx: &mut gpui::VisualTestContext| workspace.read_with(cx, |w, _| w.docks());
+        let docks = |cx: &mut gpui::VisualTestContext| workspace.read_with(cx, |w, cx| w.docks(cx));
         assert_eq!(docks(cx), workspace::Docks::default());
         cx.simulate_keystrokes("ctrl-b");
         assert!(!docks(cx).fleet && docks(cx).agent);

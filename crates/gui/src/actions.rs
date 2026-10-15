@@ -39,6 +39,20 @@ actions!(
         OpenInbox,
         /// Opens the fleet map as a tab.
         OpenMap,
+        /// Makes the active pane fill the window, or puts it back.
+        ToggleZoom,
+        /// Moves the keyboard to the next pane.
+        ActivateNextPane,
+        /// Moves the keyboard to the previous pane.
+        ActivatePreviousPane,
+        /// Moves the keyboard to the pane on the left.
+        ActivatePaneLeft,
+        /// Moves the keyboard to the pane on the right.
+        ActivatePaneRight,
+        /// Moves the keyboard to the pane above.
+        ActivatePaneUp,
+        /// Moves the keyboard to the pane below.
+        ActivatePaneDown,
     ]
 );
 
@@ -55,6 +69,10 @@ actions!(
         ActivateNextItem,
         /// Activates the previous tab.
         ActivatePreviousItem,
+        /// Closes every tab but the active one.
+        CloseOtherItems,
+        /// Closes every tab.
+        CloseAllItems,
     ]
 );
 
@@ -116,25 +134,31 @@ actions!(
     ]
 );
 
-actions!(
-    terminal,
-    [
-        /// Copies the selection.
-        Copy,
-        /// Pastes into the terminal.
-        Paste,
-        /// Clears the selection.
-        Clear,
-        /// Sends ctrl-c to the agent.
-        SendCtrlC,
-        /// Scrolls back through history.
-        ScrollUp,
-        /// Scrolls forward through history.
-        ScrollDown,
-        /// Makes the terminal fill the window, or not.
-        ToggleZoom,
-    ]
-);
+/// A terminal's actions, in a module of their own: `terminal::ToggleZoom`
+/// and `workspace::ToggleZoom` would otherwise clash.
+pub mod terminal {
+    use gpui::actions;
+
+    actions!(
+        terminal,
+        [
+            /// Copies the selection.
+            Copy,
+            /// Pastes into the terminal.
+            Paste,
+            /// Clears the selection.
+            Clear,
+            /// Sends ctrl-c to the agent.
+            SendCtrlC,
+            /// Scrolls back through history.
+            ScrollUp,
+            /// Scrolls forward through history.
+            ScrollDown,
+            /// Makes the terminal fill the window, or not.
+            ToggleZoom,
+        ]
+    );
+}
 
 actions!(
     command_palette,

@@ -1,6 +1,6 @@
 //! Key bindings in Zed's keymap format: a JSON array of sections, each with
 //! an optional `context` (`Workspace`, `FleetPanel`, `Terminal`, `Inbox`,
-//! `Comms`, `Picker`) and `bindings` from keystrokes to an action name,
+//! `Comms`, `Picker`, `TextInput`) and `bindings` from keystrokes to an action name,
 //! `[name, input]`, or `null` to unbind. The platform's default keymap is
 //! bundled; `~/.config/ainet/keymap.json` adds to it and overrides it, and
 //! is followed for changes. Because the bindings live in GPUI's keymap,
@@ -272,6 +272,8 @@ mod tests {
                     "Inbox",
                     "Comms",
                     "Picker",
+                    "TextInput",
+                    "TextInput && multiline",
                 ];
                 for section in &sections {
                     assert!(

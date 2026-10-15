@@ -1,24 +1,22 @@
 //! The fleet as a GPUI entity: `ainet-model`'s [`Store`], kept current by a
 //! [`Link`] to ainetd (or the demo), plus the notices a front end shows as
-//! toasts. Views read it and re-render when it notifies.
+//! toasts (each one is also emitted as an event). Views read it and
+//! re-render when it notifies.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use ainet_core::client::Client;
 use ainet_model::{Backend, Change, Link, Msg, Store, Tally, daemon};
 use futures::StreamExt;
 use futures::channel::mpsc::UnboundedReceiver;
-use gpui::{AppContext as _, AsyncApp, Context, Task, WeakEntity};
+use gpui::{AppContext as _, AsyncApp, Context, EventEmitter, Task, WeakEntity};
 
 use crate::sink::{self, ChannelSink};
 
 /// How often the demo fleet moves on, as in the TUI.
 pub const TICK: Duration = Duration::from_millis(120);
-
-/// How long a flash stays in the status bar.
-const FLASH_FOR: Duration = Duration::from_secs(5);
 
 /// How many notices are kept for later toasts and a log.
 const KEEP_NOTICES: usize = 64;
@@ -58,8 +56,9 @@ pub struct Notice {
     pub title: Option<String>,
     pub text: String,
     pub error: bool,
-    pub at: Instant,
 }
+
+impl EventEmitter<Notice> for FleetModel {}
 
 pub struct FleetModel {
     pub store: Store,
@@ -111,6 +110,12 @@ impl FleetModel {
         model
     }
 
+    /// Not connected to anything, for tests.
+    #[cfg(test)]
+    pub fn offline() -> Self {
+        FleetModel::empty(false)
+    }
+
     fn empty(demo: bool) -> Self {
         FleetModel {
             store: Store::new(),
@@ -159,11 +164,10 @@ impl FleetModel {
         self.store.tally()
     }
 
-    /// The latest flash, while it is fresh.
-    pub fn flash(&self) -> Option<&Notice> {
-        self.notices
-            .back()
-            .filter(|n| n.title.is_none() && n.at.elapsed() < FLASH_FOR)
+    /// The notices so far, the latest last.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn notices(&self) -> impl Iterator<Item = &Notice> {
+        self.notices.iter()
     }
 
     /// Selects an agent in the Fleet.
@@ -239,21 +243,9 @@ impl FleetModel {
         if self.notices.len() == KEEP_NOTICES {
             self.notices.pop_front();
         }
-        let flash = title.is_none();
-        self.notices.push_back(Notice {
-            title,
-            text,
-            error,
-            at: Instant::now(),
-        });
-        // Re-render once the flash has gone stale, so it leaves the status bar.
-        if flash {
-            cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(FLASH_FOR).await;
-                let _ = this.update(cx, |_, cx| cx.notify());
-            })
-            .detach();
-        }
+        let notice = Notice { title, text, error };
+        cx.emit(notice.clone());
+        self.notices.push_back(notice);
     }
 
     fn on_tick(&mut self) {
@@ -337,8 +329,8 @@ mod tests {
             let texts: Vec<_> = f.notices.iter().map(|n| n.text.as_str()).collect();
             assert_eq!(texts, ["connected to ainetd", "2 rigs", "bad seat"]);
             assert_eq!(f.notices[1].title.as_deref(), Some("ps"));
-            let flash = f.flash().expect("a fresh flash");
-            assert!(flash.error && flash.text == "bad seat");
+            let last = f.notices().last().expect("a notice");
+            assert!(last.error && last.text == "bad seat");
             assert_eq!(f.connection(), Connection::Connected);
         });
 

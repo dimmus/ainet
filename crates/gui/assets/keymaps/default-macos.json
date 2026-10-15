@@ -7,7 +7,14 @@
       "cmd-q": "ainet::Quit",
       "cmd-,": "workspace::OpenSettings",
       "cmd-k cmd-s": "workspace::OpenKeymap",
-      "cmd-shift-p": "command_palette::Toggle"
+      "cmd-shift-p": "command_palette::Toggle",
+      // Lists, menus, pickers and modals (Zed's `menu` actions).
+      "escape": "menu::Cancel",
+      "enter": "menu::Confirm",
+      "up": "menu::SelectPrevious",
+      "down": "menu::SelectNext",
+      "home": "menu::SelectFirst",
+      "end": "menu::SelectLast"
     }
   },
   {
@@ -33,9 +40,16 @@
       "ctrl-e": "ainet::ToggleCritterSize",
       "ctrl-tab": "pane::ActivateNextItem",
       "ctrl-shift-tab": "pane::ActivatePreviousItem",
+      "cmd-alt-right": "pane::ActivateNextItem",
+      "cmd-alt-left": "pane::ActivatePreviousItem",
       "cmd-w": "pane::CloseActiveItem",
       "cmd-k right": "pane::SplitRight",
-      "cmd-k down": "pane::SplitDown"
+      "cmd-k down": "pane::SplitDown",
+      "shift-escape": "workspace::ToggleZoom",
+      "cmd-k cmd-left": "workspace::ActivatePaneLeft",
+      "cmd-k cmd-right": "workspace::ActivatePaneRight",
+      "cmd-k cmd-up": "workspace::ActivatePaneUp",
+      "cmd-k cmd-down": "workspace::ActivatePaneDown"
     }
   },
   {
@@ -90,6 +104,56 @@
       "up": "menu::SelectPrevious",
       "c": "comms::Compose",
       "r": "comms::Reply"
+    }
+  },
+  {
+    // Text fields: forms, pickers and (later) the compose box.
+    "context": "TextInput",
+    "bindings": {
+      "backspace": "text_input::Backspace",
+      "shift-backspace": "text_input::Backspace",
+      "delete": "text_input::Delete",
+      "alt-backspace": "text_input::DeleteWordLeft",
+      "alt-delete": "text_input::DeleteWordRight",
+      "left": "text_input::Left",
+      "right": "text_input::Right",
+      "shift-left": "text_input::SelectLeft",
+      "shift-right": "text_input::SelectRight",
+      "alt-left": "text_input::WordLeft",
+      "alt-right": "text_input::WordRight",
+      "alt-shift-left": "text_input::SelectWordLeft",
+      "alt-shift-right": "text_input::SelectWordRight",
+      "cmd-left": "text_input::Home",
+      "cmd-right": "text_input::End",
+      "home": "text_input::Home",
+      "end": "text_input::End",
+      "cmd-shift-left": "text_input::SelectToHome",
+      "cmd-shift-right": "text_input::SelectToEnd",
+      "shift-home": "text_input::SelectToHome",
+      "shift-end": "text_input::SelectToEnd",
+      "cmd-up": "text_input::MoveToStart",
+      "cmd-down": "text_input::MoveToEnd",
+      "cmd-a": "text_input::SelectAll",
+      "cmd-c": "text_input::Copy",
+      "cmd-x": "text_input::Cut",
+      "cmd-v": "text_input::Paste",
+      "cmd-z": "text_input::Undo",
+      "cmd-shift-z": "text_input::Redo",
+      "ctrl-cmd-space": "text_input::ShowCharacterPalette",
+      "enter": "text_input::Confirm",
+      "escape": "text_input::Cancel"
+    }
+  },
+  {
+    // Several lines: enter still submits (as Zed's agent panel);
+    // shift-enter starts a new line.
+    "context": "TextInput && multiline",
+    "bindings": {
+      "up": "text_input::Up",
+      "down": "text_input::Down",
+      "shift-up": "text_input::SelectUp",
+      "shift-down": "text_input::SelectDown",
+      "shift-enter": "text_input::Newline"
     }
   },
   {
