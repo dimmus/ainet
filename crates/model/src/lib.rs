@@ -21,7 +21,7 @@ pub mod terminal;
 
 pub use command::{AgentCommand, Command, Context, QueueCommand};
 pub use demo::Demo;
-pub use link::{Backend, Link, Msg, Sink};
+pub use link::{Backend, Link, Listing, Msg, Sink};
 pub use palette::Palette;
 pub use store::{Change, Entry, RigCounts, Row, Store, Tally};
 pub use terminal::Pump;

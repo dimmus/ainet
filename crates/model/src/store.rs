@@ -9,7 +9,7 @@ use ainet_core::{
     Response, Rig, Seat, SeatStatus,
 };
 
-use crate::link::Msg;
+use crate::link::{Listing, Msg};
 
 /// A row of the Fleet list.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -76,6 +76,11 @@ pub enum Change {
     Reply {
         token: u64,
         reply: Result<String, String>,
+    },
+    /// The items of a request sent with `Link::list`, for whoever asked.
+    Listing {
+        token: u64,
+        listing: Result<Listing, String>,
     },
     /// The connection to ainetd came up or went down.
     Connected(bool),
@@ -177,6 +182,7 @@ impl Store {
             Msg::Flash(text, err) => Change::Flash(text, err),
             Msg::Popup(title, text) => Change::Popup(title, text),
             Msg::Reply { token, reply } => Change::Reply { token, reply },
+            Msg::Listing { token, listing } => Change::Listing { token, listing },
             Msg::Connected(up) => {
                 let was = std::mem::replace(&mut self.connected, up);
                 if was == up {
@@ -768,7 +774,7 @@ mod tests {
 
     use super::{Change, Row, Store};
     use crate::demo::Demo;
-    use crate::link::Msg;
+    use crate::link::{Listing, Msg};
 
     fn demo() -> Store {
         let mut store = Store::new();
@@ -1212,6 +1218,16 @@ mod tests {
             Change::Reply {
                 token: 3,
                 reply: Ok("text".into())
+            }
+        );
+        assert_eq!(
+            store.apply(Msg::Listing {
+                token: 4,
+                listing: Ok(Listing::Specs(vec![]))
+            }),
+            Change::Listing {
+                token: 4,
+                listing: Ok(Listing::Specs(vec![]))
             }
         );
     }

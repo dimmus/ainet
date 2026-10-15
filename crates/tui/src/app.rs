@@ -238,7 +238,8 @@ impl App {
             | Change::Term(_)
             | Change::History(_)
             // The TUI never asks for a reply of its own.
-            | Change::Reply { .. } => {}
+            | Change::Reply { .. }
+            | Change::Listing { .. } => {}
             Change::Snapshot => {
                 self.select_waiting();
                 self.after_fleet();

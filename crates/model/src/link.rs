@@ -11,7 +11,8 @@ use std::thread;
 use std::time::Duration;
 
 use ainet_core::client::Client;
-use ainet_core::{Agent, Event, Request, Response};
+use ainet_core::protocol::SpecEntry;
+use ainet_core::{Agent, Event, Request, Response, SnapshotInfo};
 
 use crate::demo::Demo;
 
@@ -40,7 +41,35 @@ pub enum Msg {
         token: u64,
         reply: Result<String, String>,
     },
+    /// The reply to a request sent with [`Link::list`]: its token, and
+    /// the items listed, or the error.
+    Listing {
+        token: u64,
+        listing: Result<Listing, String>,
+    },
     Connected(bool),
+}
+
+/// What a listing request ([`Link::list`]) brings back, item by item, for
+/// a front end to pick from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Listing {
+    /// The spec library (`Request::Specs`).
+    Specs(Vec<SpecEntry>),
+    /// A rig's snapshots, oldest first (`Request::SnapshotList`).
+    Snapshots(Vec<SnapshotInfo>),
+}
+
+impl Listing {
+    /// The listing in a daemon reply, or what went wrong.
+    pub fn from_response(resp: Response) -> Result<Listing, String> {
+        match resp {
+            Response::Specs { specs } => Ok(Listing::Specs(specs)),
+            Response::Snapshots { snapshots } => Ok(Listing::Snapshots(snapshots)),
+            Response::Error { message } => Err(message),
+            _ => Err("ainetd answered with something else".into()),
+        }
+    }
 }
 
 /// Where messages for the UI go: a channel the UI drains. `send` returns
@@ -161,6 +190,30 @@ impl<S: Sink> Link<S> {
                         Err(e) => Err(format!("ainetd: {e}")),
                     };
                     tx.send(Msg::Reply { token, reply });
+                });
+            }
+        }
+    }
+
+    /// Sends a request that lists things to pick from (the spec library, a
+    /// rig's snapshots): the items come back as [`Msg::Listing`] with
+    /// `token`, never as a flash or popup.
+    pub fn list(&mut self, req: Request, token: u64) {
+        match &mut self.backend {
+            Backend::Demo(demo) => {
+                self.sink.send(Msg::Listing {
+                    token,
+                    listing: demo.list(&req),
+                });
+            }
+            Backend::Daemon(socket) => {
+                let (socket, tx) = (socket.clone(), self.sink.clone());
+                thread::spawn(move || {
+                    let listing = match call(&socket, &req, Duration::from_secs(10)) {
+                        Ok(resp) => Listing::from_response(resp),
+                        Err(e) => Err(format!("ainetd: {e}")),
+                    };
+                    tx.send(Msg::Listing { token, listing });
                 });
             }
         }

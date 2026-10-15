@@ -73,19 +73,7 @@ pub fn parse(cx: &Context, cmd: &str) -> Command {
             let runtime = arg(1)
                 .and_then(|r| r.parse::<Runtime>().ok())
                 .unwrap_or(Runtime::ClaudeCode);
-            let cwd = arg(2)
-                .map(expand)
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-            let role = rest(3);
-            let spec = SpawnSpec {
-                runtime,
-                cwd,
-                role: (!role.is_empty()).then(|| role.to_uppercase()),
-                task: None,
-                parent: None,
-                args: vec![],
-            };
-            req(Request::Spawn(spec), "spawned".into())
+            spawn(runtime, arg(2), &rest(3))
         }
         "close" | "kill" => {
             let target = arg(1)
@@ -101,49 +89,14 @@ pub fn parse(cx: &Context, cmd: &str) -> Command {
             let Some(source) = arg(1) else {
                 return Command::error("/up <spec file | library name | rig>");
             };
-            let cwd = arg(2).map(expand).or_else(|| std::env::current_dir().ok());
-            let plan = arg(0) == Some("plan");
-            let looks_like_path = std::path::Path::new(source).exists();
-            let spec = UpSpec {
-                source: if looks_like_path {
-                    expand(source).display().to_string()
-                } else {
-                    source.to_string()
-                },
-                cwd: if looks_like_path { arg(2).map(expand) } else { cwd },
-                fresh: vec![],
-                name: None,
-                plan,
-            };
-            req(
-                Request::Up(spec),
-                if plan {
-                    format!("plan for {source}")
-                } else {
-                    format!("launching {source}")
-                },
-            )
+            up(source, arg(2), None, vec![], arg(0) == Some("plan"))
         }
         "down" => match rig_arg(arg(1)) {
-            Some(rig) => req(
-                Request::Down {
-                    rig: rig.clone(),
-                    snapshot: true,
-                    delete: false,
-                },
-                format!("{rig} is down (snapshot taken)"),
-            ),
+            Some(rig) => down(&rig, true),
             None => Command::error("/down <rig>"),
         },
         "restore" => match rig_arg(arg(1)) {
-            Some(rig) => req(
-                Request::Restore {
-                    rig: rig.clone(),
-                    snapshot: None,
-                    fresh: vec![],
-                },
-                format!("restoring {rig}"),
-            ),
+            Some(rig) => restore(&rig, None, vec![]),
             None => Command::error("/restore <rig>"),
         },
         "snapshot" => match rig_arg(arg(1)) {
@@ -183,21 +136,7 @@ pub fn parse(cx: &Context, cmd: &str) -> Command {
             };
             let runtime = arg(3).and_then(|r| r.parse::<Runtime>().ok());
             let role = rest(if runtime.is_some() { 4 } else { 3 });
-            let seat = SeatSpec {
-                pod: pod.into(),
-                member: member.into(),
-                runtime,
-                role: (!role.is_empty()).then_some(role),
-                ..Default::default()
-            };
-            req(
-                Request::Grow {
-                    rig: rig.clone(),
-                    seats: vec![seat],
-                    edges: vec![],
-                },
-                format!("growing {rig}"),
-            )
+            grow(&rig, pod, member, runtime, &role)
         }
         "shrink" => match (rig_arg(None), arg(1)) {
             (Some(rig), Some(pod)) => req(
@@ -308,6 +247,106 @@ pub fn parse(cx: &Context, cmd: &str) -> Command {
         },
         other => Command::Error(format!("no command /{other}; /help lists them")),
     }
+}
+
+/// Spawns a loose agent (`/spawn`): `runtime` in `cwd` (here when not
+/// given; `~/` is home), its role in capitals.
+pub fn spawn(runtime: Runtime, cwd: Option<&str>, role: &str) -> Command {
+    let cwd = cwd
+        .map(expand)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let role = role.trim();
+    let spec = SpawnSpec {
+        runtime,
+        cwd,
+        role: (!role.is_empty()).then(|| role.to_uppercase()),
+        task: None,
+        parent: None,
+        args: vec![],
+    };
+    request(Request::Spawn(spec), "spawned".into())
+}
+
+/// Brings a rig up (`/up`), or with `plan` only describes what would
+/// launch (`/plan`). `source` is a spec file, a library name or a rig
+/// ainet knows. A file's seats keep their own directories unless `cwd`
+/// says otherwise; a library spec runs in `cwd`, else here. `name`
+/// renames the rig; `fresh` seats (logical ids) start anew.
+pub fn up(source: &str, cwd: Option<&str>, name: Option<&str>, fresh: Vec<String>, plan: bool) -> Command {
+    let looks_like_path = std::path::Path::new(source).exists();
+    let cwd = if looks_like_path {
+        cwd.map(expand)
+    } else {
+        cwd.map(expand).or_else(|| std::env::current_dir().ok())
+    };
+    let spec = UpSpec {
+        source: if looks_like_path {
+            expand(source).display().to_string()
+        } else {
+            source.to_string()
+        },
+        cwd,
+        fresh,
+        name: name.map(str::trim).filter(|n| !n.is_empty()).map(Into::into),
+        plan,
+    };
+    let ok = if plan {
+        format!("plan for {source}")
+    } else {
+        format!("launching {source}")
+    };
+    request(Request::Up(spec), ok)
+}
+
+/// Takes a rig down (`/down` takes a snapshot first).
+pub fn down(rig: &str, snapshot: bool) -> Command {
+    let ok = if snapshot {
+        format!("{rig} is down (snapshot taken)")
+    } else {
+        format!("{rig} is down")
+    };
+    request(
+        Request::Down {
+            rig: rig.into(),
+            snapshot,
+            delete: false,
+        },
+        ok,
+    )
+}
+
+/// Brings a rig back (`/restore`): from `snapshot`, else its latest;
+/// `fresh` seats (logical ids) start anew instead of resuming.
+pub fn restore(rig: &str, snapshot: Option<String>, fresh: Vec<String>) -> Command {
+    request(
+        Request::Restore {
+            rig: rig.into(),
+            snapshot,
+            fresh,
+        },
+        format!("restoring {rig}"),
+    )
+}
+
+/// Adds a seat to a running rig (`/grow`): `pod-member@rig`, its runtime
+/// (the rig's default when none) and role.
+pub fn grow(rig: &str, pod: &str, member: &str, runtime: Option<Runtime>, role: &str) -> Command {
+    let role = role.trim();
+    let seat = SeatSpec {
+        pod: pod.trim().into(),
+        member: member.trim().into(),
+        runtime,
+        role: (!role.is_empty()).then(|| role.to_string()),
+        ..Default::default()
+    };
+    request(
+        Request::Grow {
+            rig: rig.into(),
+            seats: vec![seat],
+            edges: vec![],
+        },
+        format!("growing {rig}"),
+    )
 }
 
 /// Closes an agent: its process ends.
@@ -704,11 +743,11 @@ mod tests {
     use ainet_core::QState;
 
     use super::{
-        AgentCommand, Command, Context, QueueCommand, answer_choices, chat, comms, complete, for_agent,
-        message, message_to, parse, queue,
+        AgentCommand, Command, Context, QueueCommand, answer_choices, chat, comms, complete, down, for_agent,
+        grow, message, message_to, parse, queue, restore, spawn, up,
     };
     use crate::demo::Demo;
-    use crate::link::{Backend, Link, Msg};
+    use crate::link::{Backend, Link, Listing, Msg};
     use crate::store::{Entry, Store};
 
     fn demo() -> Store {
@@ -810,6 +849,125 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn rig_forms_send_what_the_typed_commands_send() {
+        let store = demo();
+        let same = |typed: &str, built: Command| {
+            assert_eq!(
+                format!("{:?}", sends(run(&store, None, typed))),
+                format!("{:?}", sends(built)),
+                "{typed}"
+            );
+        };
+        same(
+            "up starter /tmp",
+            up("starter", Some("/tmp"), None, vec![], false),
+        );
+        same("plan starter", up("starter", None, None, vec![], true));
+        same("down docs", down("docs", true));
+        same("restore infra", restore("infra", None, vec![]));
+        same(
+            "grow dev perf codex PERF",
+            grow("docs", "dev", "perf", Some(Runtime::Codex), "PERF"),
+        );
+        same(
+            "spawn codex /tmp code reviewer",
+            spawn(Runtime::Codex, Some("/tmp"), "code reviewer"),
+        );
+
+        // What only a form says: a new name, fresh seats, no snapshot.
+        match sends(up(
+            "starter",
+            Some("/tmp"),
+            Some(" team "),
+            vec!["dev.impl".into()],
+            false,
+        )) {
+            (Request::Up(spec), ok) => {
+                assert_eq!(spec.name.as_deref(), Some("team"));
+                assert_eq!(spec.fresh, ["dev.impl"]);
+                assert_eq!(spec.cwd.as_deref(), Some(std::path::Path::new("/tmp")));
+                assert_eq!(ok, "launching starter");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(
+            sends(up("starter", None, Some(""), vec![], false)),
+            (Request::Up(spec), _) if spec.name.is_none() && spec.cwd.is_some()
+        ));
+        assert!(matches!(
+            sends(down("docs", false)),
+            (Request::Down { snapshot: false, delete: false, .. }, ok) if ok == "docs is down"
+        ));
+        assert!(matches!(
+            sends(restore("docs", Some("docs@1".into()), vec!["dev.ui".into()])),
+            (Request::Restore { snapshot: Some(s), fresh, .. }, ok)
+                if s == "docs@1" && fresh == ["dev.ui"] && ok == "restoring docs"
+        ));
+        assert!(matches!(
+            sends(spawn(Runtime::Shell, None, " ")),
+            (Request::Spawn(spec), ok) if spec.role.is_none() && spec.runtime == Runtime::Shell && ok == "spawned"
+        ));
+    }
+
+    #[test]
+    fn listings_come_back_item_by_item_by_their_token() {
+        let (tx, rx) = mpsc::channel();
+        let (mut link, _) = Link::new(Backend::Demo(Box::default()), tx);
+        let listing = |rx: &mpsc::Receiver<Msg>| {
+            rx.try_iter()
+                .find_map(|m| match m {
+                    Msg::Listing { token, listing } => Some((token, listing)),
+                    _ => None,
+                })
+                .expect("a listing")
+        };
+        link.list(Request::Specs, 1);
+        let (token, specs) = listing(&rx);
+        assert_eq!(token, 1);
+        let Ok(Listing::Specs(specs)) = specs else {
+            panic!("{specs:?}")
+        };
+        let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["docs", "infra"]);
+
+        link.list(Request::SnapshotList { rig: "docs".into() }, 2);
+        let (_, snapshots) = listing(&rx);
+        let Ok(Listing::Snapshots(snapshots)) = snapshots else {
+            panic!("{snapshots:?}")
+        };
+        assert_eq!(snapshots.len(), 2);
+        assert!(
+            snapshots
+                .iter()
+                .all(|s| s.rig == "docs" && s.id.starts_with("docs@"))
+        );
+        assert!(snapshots[0].created < snapshots[1].created, "oldest first");
+        link.list(Request::SnapshotList { rig: "nope".into() }, 3);
+        assert_eq!(listing(&rx), (3, Err("no rig nope".into())));
+
+        // A daemon's reply read as a listing.
+        assert_eq!(
+            Listing::from_response(ainet_core::Response::Error { message: "no".into() }),
+            Err("no".into())
+        );
+
+        // The plan of a spec the demo has, asked whole.
+        link.ask(sends(up("docs", None, None, vec![], true)).0, 4);
+        let plan = rx
+            .try_iter()
+            .find_map(|m| match m {
+                Msg::Reply { token: 4, reply } => Some(reply),
+                _ => None,
+            })
+            .expect("a reply")
+            .unwrap();
+        assert!(
+            plan.starts_with("rig docs") && plan.contains("orch-lead@docs"),
+            "{plan}"
+        );
     }
 
     #[test]

@@ -7,10 +7,14 @@
 
 use std::path::PathBuf;
 
+use ainet_core::protocol::SpecEntry;
 use ainet_core::{
     Agent, AgentState, ChatMessage, Decision, Edge, EdgeKind, Event, InboxItem, InboxKind, Message, QBlock,
-    QItem, QNote, QState, Request, Response, Rig, RigStatus, Runtime, Seat, SeatStatus, Transport, now_ms,
+    QItem, QNote, QState, Request, Response, Rig, RigStatus, Runtime, Seat, SeatStatus, SnapshotInfo,
+    Transport, now_ms,
 };
+
+use crate::link::Listing;
 
 const MIN: i64 = 60_000;
 
@@ -736,6 +740,20 @@ impl Demo {
                     rigs: self.rigs.clone(),
                 }))),
             ),
+            Request::Specs | Request::SnapshotList { .. } => {
+                let text = self.list(req).map(|listing| {
+                    crate::popup::render(&match listing {
+                        Listing::Specs(specs) => Response::Specs { specs },
+                        Listing::Snapshots(snapshots) => Response::Snapshots { snapshots },
+                    })
+                });
+                (vec![], text.map(Some))
+            }
+            // Only a plan: the demo launches nothing.
+            Request::Up(spec) if spec.plan => match self.rigs.iter().find(|r| r.name == spec.source) {
+                Some(r) => (vec![], Ok(Some(rig_plan(r, spec.cwd.as_deref())))),
+                None => (vec![], Err(format!("no spec named {} in the demo", spec.source))),
+            },
             Request::Interact { .. }
             | Request::Input { .. }
             | Request::Resize { .. }
@@ -744,6 +762,43 @@ impl Demo {
                 vec![],
                 Err("the demo cannot do that; run ainet without --demo".into()),
             ),
+        }
+    }
+
+    /// The answer to a listing request: its rigs as the spec library, and
+    /// two snapshots of each.
+    pub fn list(&self, req: &Request) -> Result<Listing, String> {
+        match req {
+            Request::Specs => Ok(Listing::Specs(
+                self.rigs
+                    .iter()
+                    .map(|r| SpecEntry {
+                        name: r.name.clone(),
+                        summary: r.summary.clone(),
+                        seats: r.seats.len(),
+                        source: "demo".into(),
+                    })
+                    .collect(),
+            )),
+            Request::SnapshotList { rig } => match self.rigs.iter().find(|r| r.name == *rig) {
+                Some(r) => Ok(Listing::Snapshots(
+                    [(26 * 60, Some("before the docs push")), (90, None)]
+                        .into_iter()
+                        .map(|(minutes, label)| {
+                            let created = now_ms() - minutes * MIN;
+                            SnapshotInfo {
+                                id: format!("{}@{created}", r.name),
+                                rig: r.name.clone(),
+                                label: label.map(Into::into),
+                                created,
+                                seats: r.seats.len(),
+                            }
+                        })
+                        .collect(),
+                )),
+                None => Err(format!("no rig {rig}")),
+            },
+            _ => Err("that is not a listing".into()),
         }
     }
 
@@ -1004,6 +1059,37 @@ impl Demo {
         out.push_str(&format!("\x1b[{};5H", base + 2));
         out
     }
+}
+
+/// What `ainet up --plan` says about a rig: its seats in launch order
+/// (in `cwd` when given) and its edges.
+fn rig_plan(rig: &Rig, cwd: Option<&std::path::Path>) -> String {
+    let mut out = format!(
+        "rig {}  ({} seats, root {})\n",
+        rig.name,
+        rig.seats.len(),
+        rig.root.display()
+    );
+    if let Some(s) = &rig.summary {
+        out.push_str(&format!("{}\n", s.trim()));
+    }
+    out.push_str("\nseats, in launch order:\n");
+    for s in &rig.seats {
+        out.push_str(&format!(
+            "  {:<28} {:<12} {:<14} {}\n",
+            s.address,
+            s.runtime.spec_name(),
+            s.model.as_deref().unwrap_or("default model"),
+            cwd.unwrap_or(&s.cwd).display(),
+        ));
+    }
+    if !rig.edges.is_empty() {
+        out.push_str("\nedges:\n");
+        for e in &rig.edges {
+            out.push_str(&format!("  {} {} {}\n", e.from, e.kind.label(), e.to));
+        }
+    }
+    out
 }
 
 /// A rig as the YAML of a RigSpec, as `ainet export` writes one: its

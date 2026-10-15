@@ -387,7 +387,7 @@ fn yes() -> bool {
 }
 
 /// A library entry.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpecEntry {
     pub name: String,
     pub summary: Option<String>,
