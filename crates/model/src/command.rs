@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 
 use ainet_core::protocol::{QSpec, SeatSpec, SpawnSpec, UpSpec};
-use ainet_core::{Decision, InboxItem, Request, Runtime};
+use ainet_core::{Agent, Decision, InboxItem, Request, Runtime};
 
 use crate::store::{Entry, Store};
 
@@ -92,10 +92,7 @@ pub fn parse(cx: &Context, cmd: &str) -> Command {
                 .and_then(|k| store.find_agent(k))
                 .or(store.selected_agent());
             match target {
-                Some(a) => req(
-                    Request::Close { agent: a.id.clone() },
-                    format!("closing {}", a.label()),
-                ),
+                Some(a) => close(a),
                 None => Command::Nothing,
             }
         }
@@ -220,23 +217,14 @@ pub fn parse(cx: &Context, cmd: &str) -> Command {
             .map(str::to_string)
             .or_else(|| store.selected_agent().and_then(|a| a.seat.clone()))
         {
-            Some(seat) => req(
-                Request::Launch {
-                    seat: seat.clone(),
-                    fresh: arg(0) == Some("relaunch"),
-                },
-                format!("launching {seat}"),
-            ),
+            Some(seat) => launch(&seat, arg(0) == Some("relaunch")),
             None => Command::error("/launch <seat>"),
         },
         "continue" => match arg(1)
             .map(str::to_string)
             .or_else(|| store.selected_agent().and_then(|a| a.seat.clone()))
         {
-            Some(seat) => req(
-                Request::SeatContinue { seat: seat.clone() },
-                format!("nudged {seat}"),
-            ),
+            Some(seat) => nudge(&seat),
             None => Command::error("/continue <seat>"),
         },
         "guard" => match (arg(1), arg(2)) {
@@ -322,15 +310,7 @@ pub fn parse(cx: &Context, cmd: &str) -> Command {
             _ => Command::error("/watchdog <seat> <minutes>"),
         },
         "capture" => match arg(1).map(str::to_string).or_else(|| store.selected.clone()) {
-            Some(t) => req(
-                Request::Capture {
-                    targets: vec![t],
-                    rig: None,
-                    pod: None,
-                    lines: 80,
-                },
-                "terminal".into(),
-            ),
+            Some(t) => capture(t),
             None => Command::error("/capture <agent>"),
         },
         "whoami" => match store.selected.clone() {
@@ -339,6 +319,114 @@ pub fn parse(cx: &Context, cmd: &str) -> Command {
         },
         other => Command::Error(format!("no command /{other}; /help lists them")),
     }
+}
+
+/// Closes an agent: its process ends.
+pub fn close(a: &Agent) -> Command {
+    request(
+        Request::Close { agent: a.id.clone() },
+        format!("closing {}", a.label()),
+    )
+}
+
+/// Starts the agent of a seat; `fresh` starts a new session instead of
+/// resuming the last one (`/relaunch`).
+pub fn launch(seat: &str, fresh: bool) -> Command {
+    request(
+        Request::Launch {
+            seat: seat.into(),
+            fresh,
+        },
+        format!("launching {seat}"),
+    )
+}
+
+/// Nudges a seat's agent to carry on (`/continue`).
+pub fn nudge(seat: &str) -> Command {
+    request(
+        Request::SeatContinue { seat: seat.into() },
+        format!("nudged {seat}"),
+    )
+}
+
+/// Turns a seat's typing guard on or off: messages wait while someone
+/// types into its terminal.
+pub fn guard(seat: &str, on: bool) -> Command {
+    let word = if on { "on" } else { "off" };
+    request(
+        Request::TypingGuard {
+            seat: seat.into(),
+            on,
+        },
+        format!("typing guard {word} for {seat}"),
+    )
+}
+
+/// The last lines of a terminal, as a report (`/capture`).
+pub fn capture(target: String) -> Command {
+    request(
+        Request::Capture {
+            targets: vec![target],
+            rig: None,
+            pod: None,
+            lines: 80,
+        },
+        "terminal".into(),
+    )
+}
+
+/// The conversation from an agent's Claude Code transcript, as a report.
+pub fn transcript(a: &Agent) -> Command {
+    request(
+        Request::Transcript {
+            agent: a.id.clone(),
+            tail: 0,
+            grep: None,
+        },
+        format!("transcript of {}", a.label()),
+    )
+}
+
+/// What a front end's per-agent menu can ask of an agent. Messages are
+/// [`message`]; opening its terminal is the front end's own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentCommand {
+    Transcript,
+    /// A new session in its seat.
+    Relaunch,
+    /// Nudge it to carry on.
+    Continue,
+    Close,
+    /// Turn its seat's typing guard on or off.
+    Guard(bool),
+    /// Its terminal's last lines.
+    Capture,
+}
+
+/// The request for `cmd` on agent `id`: what the TUI's command for it
+/// sends. Seat commands need an agent in a seat.
+pub fn for_agent(store: &Store, id: &str, cmd: AgentCommand) -> Command {
+    let Some(a) = store.agents.get(id) else {
+        return Command::error("no such agent");
+    };
+    let seat = || {
+        a.seat
+            .as_deref()
+            .ok_or_else(|| Command::Error(format!("{} is not in a rig seat", a.label())))
+    };
+    let seated = |f: &dyn Fn(&str) -> Command| seat().map_or_else(|e| e, f);
+    match cmd {
+        AgentCommand::Transcript => transcript(a),
+        AgentCommand::Relaunch => seated(&|s| launch(s, true)),
+        AgentCommand::Continue => seated(&nudge),
+        AgentCommand::Close => close(a),
+        AgentCommand::Guard(on) => seated(&|s| guard(s, on)),
+        AgentCommand::Capture => capture(a.id.clone()),
+    }
+}
+
+fn request(req: Request, ok: String) -> Command {
+    Command::Request(Box::new(req), ok)
 }
 
 /// Answers a waiting question with an option's number(s) or your words.
@@ -447,7 +535,7 @@ mod tests {
 
     use ainet_core::{Decision, InboxKind, Request, Runtime};
 
-    use super::{Command, Context, complete, message, parse};
+    use super::{AgentCommand, Command, Context, complete, for_agent, message, parse};
     use crate::demo::Demo;
     use crate::link::{Backend, Link, Msg};
     use crate::store::Store;
@@ -567,6 +655,58 @@ mod tests {
         assert!(matches!(message(&store, "@orch-lead", None), Command::Error(e) if e == "nothing to send"));
         assert!(matches!(message(&store, "@nobody hi", None), Command::Error(e) if e == "no such agent"));
         assert!(matches!(message(&store, "hi", None), Command::Error(e) if e == "no such agent"));
+    }
+
+    #[test]
+    fn agent_commands_send_what_the_typed_commands_send() {
+        let mut store = demo();
+        let lead = store.find_agent("orch-lead@docs").unwrap().clone();
+        let seat = lead.seat.clone().unwrap();
+        store.selected = Some(lead.id.clone());
+        // The menu and the command line agree.
+        for (cmd, line) in [
+            (AgentCommand::Relaunch, format!("relaunch {seat}")),
+            (AgentCommand::Continue, format!("continue {seat}")),
+            (AgentCommand::Close, "close".to_string()),
+            (AgentCommand::Capture, "capture".to_string()),
+            (AgentCommand::Guard(true), format!("guard {seat} on")),
+            (AgentCommand::Guard(false), format!("guard {seat} off")),
+        ] {
+            let (menu, menu_ok) = sends(for_agent(&store, &lead.id, cmd));
+            let (typed, typed_ok) = sends(run(&store, None, &line));
+            assert_eq!(format!("{menu:?}"), format!("{typed:?}"), "{cmd:?}");
+            assert_eq!(menu_ok, typed_ok, "{cmd:?}");
+        }
+        match sends(for_agent(&store, &lead.id, AgentCommand::Relaunch)) {
+            (Request::Launch { fresh, .. }, ok) => {
+                assert!(fresh);
+                assert_eq!(ok, format!("launching {seat}"));
+            }
+            other => panic!("{other:?}"),
+        }
+        match sends(for_agent(&store, &lead.id, AgentCommand::Transcript)) {
+            (Request::Transcript { agent, tail, grep }, ok) => {
+                assert_eq!(agent, lead.id);
+                assert_eq!((tail, grep), (0, None));
+                assert_eq!(ok, format!("transcript of {seat}"));
+            }
+            other => panic!("{other:?}"),
+        }
+
+        // Seat commands need a seat.
+        let loose = store.agents.values().find(|a| a.seat.is_none()).unwrap().clone();
+        assert!(matches!(
+            for_agent(&store, &loose.id, AgentCommand::Continue),
+            Command::Error(e) if e.contains("not in a rig seat")
+        ));
+        assert!(matches!(
+            for_agent(&store, &loose.id, AgentCommand::Close),
+            Command::Request(..)
+        ));
+        assert!(matches!(
+            for_agent(&store, "nobody", AgentCommand::Close),
+            Command::Error(e) if e == "no such agent"
+        ));
     }
 
     #[test]

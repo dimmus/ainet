@@ -1,7 +1,8 @@
 //! Drawing. Den's layout: a wordmark header with the fleet's counts, view
 //! tabs, the view, an always-open command line and a key-hint footer.
 
-use ainet_core::{Agent, AgentState, InboxItem, InboxKind, now_ms};
+use ainet_core::{Agent, AgentState, InboxItem, InboxKind};
+pub(crate) use ainet_model::describe::{age, meta, short_path};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Margin, Rect};
 use ratatui::style::{Modifier, Style};
@@ -95,23 +96,15 @@ fn rig_item(app: &App, name: &str, index: usize) -> ListItem<'static> {
     let Some(rig) = app.store.rigs.get(name) else {
         return ListItem::new("");
     };
-    let running = rig
-        .seats
-        .iter()
-        .filter(|s| s.status == ainet_core::SeatStatus::Running)
-        .count();
+    let counts = app.store.rig_counts(name);
+    let running = counts.running;
     let color = match rig.status {
         ainet_core::RigStatus::Running => pal.ok,
         ainet_core::RigStatus::Launching => pal.info,
         ainet_core::RigStatus::Partial => pal.attn,
         ainet_core::RigStatus::Stopped => pal.muted,
     };
-    let open = app
-        .store
-        .queue
-        .values()
-        .filter(|q| q.rig.as_deref() == Some(name) && q.state.is_open())
-        .count();
+    let open = counts.open;
     let mut lines = Vec::new();
     if index > 0 {
         lines.push(Line::raw(""));
@@ -139,24 +132,6 @@ fn rig_item(app: &App, name: &str, index: usize) -> ListItem<'static> {
         ));
     }
     ListItem::new(lines)
-}
-
-pub(crate) fn age(since_ms: i64) -> String {
-    let s = ((now_ms() - since_ms) / 1000).max(0);
-    match s {
-        0..60 => format!("{s}s"),
-        60..3600 => format!("{}m", s / 60),
-        3600..86_400 => format!("{}h {}m", s / 3600, s / 60 % 60),
-        _ => format!("{}d", s / 86_400),
-    }
-}
-
-pub(crate) fn short_path(p: &std::path::Path) -> String {
-    let s = p.display().to_string();
-    match std::env::var("HOME") {
-        Ok(home) if !home.is_empty() && s.starts_with(&home) => format!("~{}", &s[home.len()..]),
-        _ => s,
-    }
 }
 
 /// The state glyph: a spinner while working, a pulsing half moon when it
@@ -210,17 +185,6 @@ pub(crate) fn role_badge(pal: &Palette, a: &Agent) -> Span<'static> {
         Some(role) => chip(role, pal.hue(&a.id), pal.bg),
         None => Span::raw(""),
     }
-}
-
-pub(crate) fn meta(a: &Agent) -> String {
-    let mut parts = vec![age(a.state_since), a.runtime.label().to_string()];
-    if let Some(m) = &a.model {
-        parts.push(m.clone());
-    }
-    if let Some(ctx) = a.context {
-        parts.push(format!("ctx {:.0}%", ctx * 100.0));
-    }
-    parts.join(" · ")
 }
 
 // ---- header ----------------------------------------------------------------
@@ -476,12 +440,7 @@ fn agent_item(app: &App, a: &Agent, prefix: &str) -> ListItem<'static> {
         pal.text()
     };
     let role = a.role.clone().unwrap_or_default();
-    let kids = app
-        .store
-        .agents
-        .values()
-        .filter(|k| k.parent.as_deref() == Some(a.id.as_str()) && k.state.is_live())
-        .count();
+    let kids = app.store.directs(&a.id);
 
     let mut first = vec![
         Span::styled(prefix.to_string(), pal.muted()),
@@ -570,15 +529,9 @@ fn draw_details(f: &mut Frame, app: &App, area: Rect) {
 
     // Name, role and chain of command.
     let mut chain = vec![Span::styled("you", pal.dim())];
-    let mut cur = a.parent.clone();
-    let mut up = Vec::new();
-    while let Some(p) = cur.and_then(|p| app.store.agents.get(&p)) {
-        up.push(p.name.clone());
-        cur = p.parent.clone();
-    }
-    for name in up.into_iter().rev() {
+    for p in app.store.chain(&a.id) {
         chain.push(Span::styled(" › ", pal.muted()));
-        chain.push(Span::styled(name, pal.dim()));
+        chain.push(Span::styled(p.name.clone(), pal.dim()));
     }
     chain.push(Span::styled(" › ", pal.muted()));
     chain.push(Span::styled(

@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use ainet_core::{
     Agent, AgentState, ChatMessage, Decision, Event, InboxItem, InboxKind, Message, QItem, Request, Response,
-    Rig,
+    Rig, Seat, SeatStatus,
 };
 
 use crate::link::Msg;
@@ -85,6 +85,16 @@ pub struct Tally {
     pub needs_you: usize,
     /// Inbox items waiting on you.
     pub waiting: usize,
+}
+
+/// A rig's headline numbers, for its row in the Fleet.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RigCounts {
+    /// Seats whose agent is running.
+    pub running: usize,
+    pub seats: usize,
+    /// Queue items of the rig not done or canceled.
+    pub open: usize,
 }
 
 /// How many messages and chat posts are kept.
@@ -245,20 +255,35 @@ impl Store {
     /// (headers and empty seats are skipped). Returns the newly selected
     /// agent, or `None` when the selection did not change.
     pub fn move_selection(&mut self, delta: i32) -> Option<String> {
+        self.move_selection_where(delta, |_| true)
+    }
+
+    /// [`Store::move_selection`] over the rows `shown` keeps, for a front
+    /// end that folds parts of the tree away. From a selected agent that is
+    /// not shown, one step goes to the next shown agent after it (or the
+    /// one before it, going up).
+    pub fn move_selection_where(&mut self, delta: i32, shown: impl Fn(usize) -> bool) -> Option<String> {
         let agents: Vec<usize> = self
             .rows
             .iter()
             .enumerate()
-            .filter(|(_, r)| matches!(r, Row::Agent { .. }))
+            .filter(|(i, r)| matches!(r, Row::Agent { .. }) && shown(*i))
             .map(|(i, _)| i)
             .collect();
         if agents.is_empty() {
             return None;
         }
-        let cur = self
-            .selected_row()
-            .and_then(|s| agents.iter().position(|i| *i == s))
-            .unwrap_or(0) as i32;
+        let cur = match self.selected_row() {
+            Some(s) => match agents.iter().position(|i| *i == s) {
+                Some(at) => at as i32,
+                // Between two shown agents: `before` of them are above it.
+                None => {
+                    let before = agents.iter().filter(|i| **i < s).count() as i32;
+                    if delta > 0 { before - 1 } else { before }
+                }
+            },
+            None => 0,
+        };
         let next = agents[(cur + delta).clamp(0, agents.len() as i32 - 1) as usize];
         match &self.rows[next] {
             Row::Agent { id, .. } if self.selected.as_ref() != Some(id) => {
@@ -469,6 +494,85 @@ impl Store {
         }
     }
 
+    /// How many live agents `id` directs.
+    pub fn directs(&self, id: &str) -> usize {
+        self.agents
+            .values()
+            .filter(|k| k.parent.as_deref() == Some(id) && k.state.is_live())
+            .count()
+    }
+
+    /// Who directs `id`, from the top of the chain of command down to its
+    /// direct parent.
+    pub fn chain(&self, id: &str) -> Vec<&Agent> {
+        let mut up = Vec::new();
+        let mut cur = self.agents.get(id).and_then(|a| a.parent.as_deref());
+        while let Some(p) = cur.and_then(|p| self.agents.get(p)) {
+            // A cycle would loop for ever; the daemon should never make one.
+            if up.iter().any(|a: &&Agent| a.id == p.id) || p.id == id {
+                break;
+            }
+            up.push(p);
+            cur = p.parent.as_deref();
+        }
+        up.reverse();
+        up
+    }
+
+    /// The seat an agent sits in, if it is in a rig.
+    pub fn seat_of(&self, agent: &Agent) -> Option<&Seat> {
+        let rig = self.rigs.get(agent.rig.as_deref()?)?;
+        rig.seat(agent.seat.as_deref()?)
+    }
+
+    /// A rig's headline: seats running, seats, and open queue items.
+    pub fn rig_counts(&self, name: &str) -> RigCounts {
+        let Some(rig) = self.rigs.get(name) else {
+            return RigCounts::default();
+        };
+        RigCounts {
+            running: rig
+                .seats
+                .iter()
+                .filter(|s| s.status == SeatStatus::Running)
+                .count(),
+            seats: rig.seats.len(),
+            open: self
+                .queue
+                .values()
+                .filter(|q| q.rig.as_deref() == Some(name) && q.state.is_open())
+                .count(),
+        }
+    }
+
+    /// Inbox items of `id` waiting on you.
+    pub fn waiting_for(&self, id: &str) -> usize {
+        self.inbox.iter().filter(|i| i.waiting && i.agent == id).count()
+    }
+
+    /// Open queue items that are the agent's: claimed by it, or meant for
+    /// it (by seat or id), as the daemon's `mine` reads; latest first.
+    pub fn queue_for(&self, agent: &Agent) -> Vec<&QItem> {
+        let me = |w: &str| w == agent.id || agent.seat.as_deref() == Some(w);
+        let mut v: Vec<&QItem> = self
+            .queue
+            .values()
+            .filter(|q| q.state.is_open() && (me(&q.destination) || q.owner.as_deref().is_some_and(me)))
+            .collect();
+        v.sort_by_key(|q| std::cmp::Reverse(q.updated));
+        v
+    }
+
+    /// The last `n` messages to or from `id`, oldest first.
+    pub fn messages_for(&self, id: &str, n: usize) -> Vec<&Message> {
+        let mine: Vec<&Message> = self
+            .messages
+            .iter()
+            .filter(|m| m.from == id || m.to == id)
+            .collect();
+        mine[mine.len().saturating_sub(n)..].to_vec()
+    }
+
     /// The running operator agent, if any.
     pub fn operator(&self) -> Option<&Agent> {
         self.agents
@@ -667,6 +771,73 @@ mod tests {
         event(&mut store, Event::AgentRemoved { id: gone.clone() });
         assert!(!store.agents.contains_key(&gone));
         assert_eq!(store.selected.as_deref(), Some(lead.as_str()));
+    }
+
+    #[test]
+    fn folded_rows_are_stepped_over() {
+        let mut store = demo();
+        let row = |store: &Store, seat: &str| store.row_of(&by_seat(store, seat).id).unwrap();
+        // Fold the docs rig's team under its lead: rows 2..=4.
+        let (app, writer) = (row(&store, "dev-app@docs"), row(&store, "dev-writer@docs"));
+        let folded = |i: usize| !(app..=writer).contains(&i);
+        let next = store.move_selection_where(1, folded).unwrap();
+        assert_eq!(store.agents[&next].seat.as_deref(), Some("rev-review@docs"));
+        store.move_selection_where(-1, folded);
+        assert_eq!(store.selected_row(), Some(row(&store, "orch-lead@docs")));
+
+        // From a folded agent, down goes to the next shown one, up to the
+        // one before it.
+        store.selected = Some(by_seat(&store, "dev-ui@docs").id.clone());
+        store.move_selection_where(1, folded);
+        assert_eq!(store.selected_row(), Some(row(&store, "rev-review@docs")));
+        store.selected = Some(by_seat(&store, "dev-ui@docs").id.clone());
+        store.move_selection_where(-1, folded);
+        assert_eq!(store.selected_row(), Some(row(&store, "orch-lead@docs")));
+        // Nothing shown, nothing selected anew.
+        assert_eq!(store.move_selection_where(1, |_| false), None);
+    }
+
+    #[test]
+    fn agents_know_their_chain_seat_rig_work_and_mail() {
+        let store = demo();
+        let lead = by_seat(&store, "orch-lead@docs");
+        let ui = by_seat(&store, "dev-ui@docs");
+        let names = |v: Vec<&Agent>| v.into_iter().map(|a| a.id.clone()).collect::<Vec<_>>();
+        assert_eq!(names(store.chain(&ui.id)), std::slice::from_ref(&lead.id));
+        assert!(store.chain(&lead.id).is_empty());
+        assert_eq!(store.directs(&lead.id), 3);
+        assert_eq!(store.directs(&ui.id), 0);
+        assert_eq!(store.seat_of(ui).map(|s| s.address.as_str()), Some("dev-ui@docs"));
+
+        let docs = store.rig_counts("docs");
+        assert_eq!(docs.seats, store.rigs["docs"].seats.len());
+        assert!(docs.running <= docs.seats);
+        let open = store
+            .queue
+            .values()
+            .filter(|q| q.rig.as_deref() == Some("docs") && q.state.is_open())
+            .count();
+        assert_eq!(docs.open, open);
+        assert_eq!(store.rig_counts("nope"), super::RigCounts::default());
+
+        for a in store.agents.values() {
+            for q in store.queue_for(a) {
+                assert!(q.state.is_open());
+                let mine = [Some(a.id.as_str()), a.seat.as_deref()];
+                assert!(
+                    mine.contains(&Some(q.destination.as_str())) || mine.contains(&q.owner.as_deref()),
+                    "{} is not {}'s",
+                    q.id,
+                    a.name
+                );
+            }
+            let mail = store.messages_for(&a.id, 3);
+            assert!(mail.len() <= 3);
+            assert!(mail.iter().all(|m| m.from == a.id || m.to == a.id));
+        }
+        let waiting = store.inbox.iter().filter(|i| i.waiting).count();
+        let per_agent: usize = store.agents.keys().map(|id| store.waiting_for(id)).sum();
+        assert_eq!(per_agent, waiting);
     }
 
     #[test]
