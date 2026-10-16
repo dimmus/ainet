@@ -689,7 +689,7 @@ impl Demo {
             return (vec![], Err(CANNOT.into()));
         }
         match req {
-            Request::Answer { item, decision } => (self.answer(*item, *decision), Ok(None)),
+            Request::Answer { item, decision, .. } => (self.answer(*item, *decision), Ok(None)),
             Request::AnswerQuestion { item, .. } => (self.answer(*item, Decision::Allow), Ok(None)),
             Request::Message {
                 to,

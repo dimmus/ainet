@@ -85,6 +85,11 @@ pub enum Request {
     Answer {
         item: u64,
         decision: Decision,
+        /// With a deny: why, or what to do instead, for the agent to read.
+        /// Left out of the line when empty, so older daemons and clients
+        /// see the request they always did.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
     },
     /// Answers an agent's question (AskUserQuestion) waiting in the inbox:
     /// an option's number, several numbers ("1 3"), or your own words.
@@ -581,6 +586,25 @@ mod tests {
         );
         let back: Request = serde_json::from_slice(&line).unwrap();
         assert!(matches!(back, Request::Send { .. }));
+    }
+
+    #[test]
+    fn answers_without_a_reason_are_the_old_line() {
+        let plain = Request::Answer {
+            item: 3,
+            decision: Decision::Deny,
+            message: None,
+        };
+        assert_eq!(
+            std::str::from_utf8(&encode(&plain)).unwrap(),
+            "{\"op\":\"answer\",\"item\":3,\"decision\":\"deny\"}\n"
+        );
+        let old: Request = serde_json::from_str(r#"{"op":"answer","item":3,"decision":"allow"}"#).unwrap();
+        assert!(matches!(old, Request::Answer { message: None, .. }));
+        let why: Request =
+            serde_json::from_str(r#"{"op":"answer","item":3,"decision":"deny","message":"use cargo"}"#)
+                .unwrap();
+        assert!(matches!(why, Request::Answer { message: Some(ref m), .. } if m == "use cargo"));
     }
 
     #[test]

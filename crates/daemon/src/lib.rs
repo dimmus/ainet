@@ -335,7 +335,11 @@ async fn handle(req: Request, d: &Shared) -> Response {
         Request::Attach { .. } => err("attach is answered as a stream"),
         Request::Close { agent } => agents::close(d, &agent),
         Request::Interact { agent, on } => comms::interact(d, &agent, on).await,
-        Request::Answer { item, decision } => hooks::answer(d, item, decision),
+        Request::Answer {
+            item,
+            decision,
+            message,
+        } => hooks::answer(d, item, decision, message),
         Request::AnswerQuestion { item, answer } => hooks::answer_question(d, item, &answer),
         Request::Hook {
             agent,

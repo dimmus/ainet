@@ -697,8 +697,34 @@ impl Store {
             Request::Answer {
                 item: item.id,
                 decision,
+                message: None,
             },
             format!("{verb} {name}'s {}", item.kind.label()),
+        ))
+    }
+
+    /// The request that denies `item` saying `why` (what the agent reads
+    /// instead of a bare "denied"), and what to say once it is done.
+    pub fn deny_with(&self, item: &InboxItem, why: &str) -> Result<(Request, String), String> {
+        let why = why.trim();
+        if why.is_empty() {
+            return self.answer(item, Decision::Deny);
+        }
+        if !item.waiting {
+            return Err("that one is not waiting on you".into());
+        }
+        let name = self
+            .agents
+            .get(&item.agent)
+            .map(|a| a.name.clone())
+            .unwrap_or_default();
+        Ok((
+            Request::Answer {
+                item: item.id,
+                decision: Decision::Deny,
+                message: Some(why.to_string()),
+            },
+            format!("denied {name}'s {}: {why}", item.kind.label()),
         ))
     }
 
@@ -1094,7 +1120,8 @@ mod tests {
             req,
             Request::Answer {
                 item: 7,
-                decision: Decision::Always
+                decision: Decision::Always,
+                message: None,
             }
         ));
         assert!(
@@ -1107,6 +1134,24 @@ mod tests {
         let question = item(9, &lead.id, InboxKind::Question, true);
         assert!(store.answer(&question, Decision::Allow).is_err());
         assert!(store.answer(&question, Decision::Deny).is_ok());
+
+        // A deny may say why; an empty reason is a plain deny.
+        let (req, ok) = store.deny_with(&held, "  use cargo nextest  ").unwrap();
+        assert!(matches!(
+            req,
+            Request::Answer { item: 7, decision: Decision::Deny, message: Some(ref m) } if m == "use cargo nextest"
+        ));
+        assert!(ok.ends_with("permission: use cargo nextest"), "{ok}");
+        let (plain, _) = store.deny_with(&held, " ").unwrap();
+        assert!(matches!(
+            plain,
+            Request::Answer {
+                message: None,
+                decision: Decision::Deny,
+                ..
+            }
+        ));
+        assert!(store.deny_with(&old, "too late").is_err());
     }
 
     #[test]

@@ -25,7 +25,8 @@ use crate::{Daemon, PERMISSION_HOLD, Shared, err, lock};
 
 /// What a held hook is sent when you answer.
 pub(crate) enum HookAnswer {
-    Decide(Decision),
+    /// Allow, always or deny; a deny may say why.
+    Decide(Decision, Option<String>),
     Answers(BTreeMap<String, String>),
 }
 
@@ -326,14 +327,14 @@ pub(crate) async fn handle(
         }
     };
     let decision = match answer {
-        HookAnswer::Decide(Decision::Deny) if tool == "ExitPlanMode" => ClaudeDecision::RejectPlan {
-            note: "Your human sent the plan back from ainet: keep planning.".into(),
+        HookAnswer::Decide(Decision::Deny, why) if tool == "ExitPlanMode" => ClaudeDecision::RejectPlan {
+            note: deny_text("Your human sent the plan back from ainet", "keep planning.", why),
         },
-        HookAnswer::Decide(Decision::Deny) => ClaudeDecision::Deny {
-            message: "Denied from ainet by your human.".into(),
+        HookAnswer::Decide(Decision::Deny, why) => ClaudeDecision::Deny {
+            message: deny_text("Denied from ainet by your human", "", why),
         },
-        HookAnswer::Decide(_) if tool == "ExitPlanMode" => ClaudeDecision::ApprovePlan,
-        HookAnswer::Decide(_) => ClaudeDecision::allow(),
+        HookAnswer::Decide(..) if tool == "ExitPlanMode" => ClaudeDecision::ApprovePlan,
+        HookAnswer::Decide(..) => ClaudeDecision::allow(),
         HookAnswer::Answers(a) => ClaudeDecision::Answer(a),
     };
     Response::HookReply {
@@ -341,8 +342,18 @@ pub(crate) async fn handle(
     }
 }
 
-/// ^Y / ^A / ^N on a held request.
-pub(crate) fn answer(d: &Shared, item: u64, decision: Decision) -> Response {
+/// What the agent reads on a deny: `lead`, then your reason if you gave
+/// one, else `otherwise` (`Denied from ainet by your human: use cargo`).
+fn deny_text(lead: &str, otherwise: &str, why: Option<String>) -> String {
+    match why.as_deref().map(str::trim).filter(|w| !w.is_empty()) {
+        Some(why) => format!("{lead}: {why}"),
+        None if otherwise.is_empty() => format!("{lead}."),
+        None => format!("{lead}: {otherwise}"),
+    }
+}
+
+/// ^Y / ^A / ^N on a held request; a deny may carry `message`, why.
+pub(crate) fn answer(d: &Shared, item: u64, decision: Decision, message: Option<String>) -> Response {
     let mut g = lock(d);
     let Some(held) = g.held_req.remove(&item) else {
         return err("that request is no longer waiting");
@@ -359,7 +370,7 @@ pub(crate) fn answer(d: &Shared, item: u64, decision: Decision) -> Response {
         }
     }
     g.resolve(item);
-    let _ = held.tx.send(HookAnswer::Decide(decision));
+    let _ = held.tx.send(HookAnswer::Decide(decision, message));
     g.set_state(
         &held.agent,
         if decision == Decision::Deny {
@@ -420,6 +431,25 @@ impl Daemon {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_deny_says_why_when_you_did() {
+        let lead = "Denied from ainet by your human";
+        assert_eq!(deny_text(lead, "", None), "Denied from ainet by your human.");
+        assert_eq!(
+            deny_text(lead, "", Some("  ".into())),
+            "Denied from ainet by your human."
+        );
+        assert_eq!(
+            deny_text(lead, "", Some(" use cargo nextest ".into())),
+            "Denied from ainet by your human: use cargo nextest"
+        );
+        let plan = "Your human sent the plan back from ainet";
+        assert_eq!(
+            deny_text(plan, "keep planning.", None),
+            "Your human sent the plan back from ainet: keep planning."
+        );
+    }
 
     #[test]
     fn summaries_name_the_target() {
