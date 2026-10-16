@@ -124,17 +124,8 @@ impl Daemon {
         {
             return m.body.trim().to_string();
         }
-        let what = match m.reply_to {
-            Some(r) => format!("reply #{} to your message #{r}", m.id),
-            None => format!("message #{}", m.id),
-        };
-        format!(
-            "[ainet] {what} from {}:\n{}\n(Answer with the ainet tool reply_message id={} — or on the shell: ainet msg reply {} \"…\". Do not answer in this chat; the sender cannot see it.)",
-            m.from_label,
-            m.body.trim(),
-            m.id,
-            m.id
-        )
+        // Made where it is read back, so conversations know it again.
+        ainet_core::conversation::delivery(m.id, m.reply_to, &m.from_label, &m.body)
     }
 }
 
@@ -530,10 +521,7 @@ pub(crate) async fn chat_send(
         (msg, mentions, sender_id)
     };
     for agent in mentions {
-        let text = format!(
-            "[ainet] {} mentioned you in the {} chatroom (#{}, topic {}):\n{}\n(Answer with the ainet tool chat_send, or read more with chat_read.)",
-            msg.sender, msg.rig, msg.id, msg.topic, msg.body
-        );
+        let text = ainet_core::conversation::mention(&msg.sender, &msg.rig, msg.id, &msg.topic, &msg.body);
         let holding = lock(d).holding(&agent);
         if holding {
             let mut g = lock(d);

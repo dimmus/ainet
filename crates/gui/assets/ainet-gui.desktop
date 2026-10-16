@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=ainet
+GenericName=Agent Control Room
+Comment=A control room for teams of coding agents
+Exec=ainet-gui
+Icon=ainet-gui
+Terminal=false
+Categories=Development;
+Keywords=agents;claude;codex;terminal;fleet;
+StartupNotify=true
+StartupWMClass=ainet-gui

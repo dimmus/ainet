@@ -1,0 +1,305 @@
+// ainet's default key bindings on macOS, in Zed's keymap format. Override
+// them in ~/.config/ainet/keymap.json (`null` unbinds). Zed's keys where
+// Zed has the feature; the TUI's keys for ainet's own.
+[
+  {
+    "bindings": {
+      "cmd-q": "ainet::Quit",
+      "cmd-,": "workspace::OpenSettings",
+      "cmd-k cmd-s": "workspace::OpenKeymap",
+      "cmd-shift-p": "command_palette::Toggle",
+      // Lists, menus, pickers and modals (Zed's `menu` actions).
+      "escape": "menu::Cancel",
+      "enter": "menu::Confirm",
+      "up": "menu::SelectPrevious",
+      "down": "menu::SelectNext",
+      "home": "menu::SelectFirst",
+      "end": "menu::SelectLast"
+    }
+  },
+  {
+    "context": "Workspace",
+    "bindings": {
+      "cmd-b": "workspace::ToggleLeftDock",
+      "cmd-alt-b": "workspace::ToggleRightDock",
+      "cmd-j": "workspace::ToggleBottomDock",
+      "cmd-shift-n": "workspace::NewWindow",
+      "cmd-shift-w": "workspace::CloseWindow",
+      "cmd-shift-c": "workspace::OpenComms",
+      "cmd-shift-i": "workspace::OpenInbox",
+      "ctrl-t": "workspace::OpenMap",
+      "cmd-shift-t": "workspace::OpenTopology",
+      "cmd-shift-o": "fleet::OpenConversation",
+      "cmd-p": "fleet::ToggleSwitcher",
+      "ctrl-o": "fleet::Operator",
+      "ctrl-g": "fleet::TileAll",
+      "cmd-;": "command_line::ToggleFocus",
+      "alt-down": "fleet::SelectNext",
+      "alt-up": "fleet::SelectPrev",
+      "ctrl-shift-y": "fleet::NextWaiting",
+      "ctrl-y": "inbox::Allow",
+      "ctrl-a": "inbox::Always",
+      "ctrl-n": "inbox::Deny",
+      "ctrl-e": "ainet::ToggleCritterSize",
+      "ctrl-tab": "tab_switcher::Toggle",
+      "ctrl-shift-tab": "pane::ActivatePreviousItem",
+      "cmd-alt-right": "pane::ActivateNextItem",
+      "cmd-alt-left": "pane::ActivatePreviousItem",
+      "cmd-w": "pane::CloseActiveItem",
+      "cmd-k right": "pane::SplitRight",
+      "cmd-k down": "pane::SplitDown",
+      "shift-escape": "workspace::ToggleZoom",
+      "cmd-k cmd-left": "workspace::ActivatePaneLeft",
+      "cmd-k cmd-right": "workspace::ActivatePaneRight",
+      "cmd-k cmd-up": "workspace::ActivatePaneUp",
+      "cmd-k cmd-down": "workspace::ActivatePaneDown"
+    }
+  },
+  {
+    "context": "FleetPanel",
+    "bindings": {
+      "down": "fleet::SelectNext",
+      "up": "fleet::SelectPrev",
+      "j": "fleet::SelectNext",
+      "k": "fleet::SelectPrev",
+      "enter": "fleet::OpenTerminal",
+      "m": "fleet::MessageAgent",
+      "c": "fleet::OpenConversation",
+      "s": "fleet::Spawn",
+      "delete": "fleet::CloseAgent",
+      "left": "fleet::CollapseRig",
+      "right": "fleet::ExpandRig",
+      "shift-f10": "fleet::OpenContextMenu"
+    }
+  },
+  {
+    // Keys typed into a focused terminal go to the agent, so the
+    // workspace's ctrl keys step aside here (a test checks every
+    // ctrl-letter).
+    "context": "Terminal",
+    "bindings": {
+      "ctrl-a": null,
+      "ctrl-e": null,
+      "ctrl-g": null,
+      "cmd-;": null,
+      "ctrl-n": null,
+      "ctrl-o": null,
+      "ctrl-t": null,
+      "ctrl-y": null,
+      // The list keys (menu::*) are the agent's too.
+      "escape": null,
+      "enter": null,
+      "up": null,
+      "down": null,
+      "home": null,
+      "end": null,
+      "cmd-c": "terminal::Copy",
+      "cmd-v": "terminal::Paste",
+      "cmd-k": "terminal::Clear",
+      "shift-pageup": "terminal::ScrollUp",
+      "shift-pagedown": "terminal::ScrollDown",
+      "shift-escape": "terminal::ToggleZoom"
+    }
+  },
+  {
+    // Answering takes ctrl-y, ctrl-a or ctrl-n (the Workspace's keys, as
+    // the TUI's), never a bare letter: a stray key must not allow a
+    // command. Digits pick a question's options.
+    "context": "Inbox",
+    "bindings": {
+      "down": "menu::SelectNext",
+      "up": "menu::SelectPrevious",
+      "enter": "inbox::Answer"
+    }
+  },
+  {
+    // The table itself, not a field in it: r writes to the selected
+    // item's agent, h shows every item or only what waits.
+    "context": "Inbox && cards",
+    "bindings": {
+      "r": "inbox::ReplyToAgent",
+      "h": "inbox::ToggleHistory"
+    }
+  },
+  {
+    // The stream, when it has the keyboard: the list keys select
+    // entries, enter opens a thread (or answers), c writes a new
+    // message, r answers the selected one.
+    "context": "Comms",
+    "bindings": {
+      "down": "menu::SelectNext",
+      "up": "menu::SelectPrevious",
+      "c": "comms::Compose",
+      "r": "comms::Reply"
+    }
+  },
+  {
+    // The Map, when it has the keyboard: enter opens the selected
+    // agent's terminal, the list keys move the selection, and the zoom
+    // keys are Zed's font-size ones.
+    "context": "Map",
+    "bindings": {
+      "down": "fleet::SelectNext",
+      "up": "fleet::SelectPrev",
+      "enter": "fleet::OpenTerminal",
+      "cmd-=": "map::ZoomIn",
+      "cmd-+": "map::ZoomIn",
+      "cmd--": "map::ZoomOut",
+      "cmd-0": "map::FitView"
+    }
+  },
+  {
+    // The Terminals grid itself, not one of its tiles (whose keys are the
+    // agent's): + - = set the columns and ctrl-r shows the next rig, as
+    // the TUI's; enter types into the tile last used.
+    "context": "Terminals && grid",
+    "bindings": {
+      "+": "terminals::MoreColumns",
+      "shift-=": "terminals::MoreColumns",
+      "-": "terminals::FewerColumns",
+      "=": "terminals::AutoColumns",
+      "ctrl-r": "terminals::CycleRig"
+    }
+  },
+  {
+    // Anywhere in the grid: back from a tile to the grid itself.
+    "context": "Terminals",
+    "bindings": {
+      "cmd-alt-g": "terminals::FocusGrid"
+    }
+  },
+  {
+    // The Topology view itself, not its filter or its graph (whose keys
+    // are their own): / filters the seats, tab and the digits switch its
+    // tabs, ctrl-r shows the next rig; the list keys and enter (the
+    // menu::* ones) move through the table or Recent and open the row.
+    "context": "Topology && view",
+    "bindings": {
+      "/": "topology::FocusFilter",
+      "tab": "topology::NextView",
+      "shift-tab": "topology::PreviousView",
+      "1": "topology::ShowTable",
+      "2": "topology::ShowRecent",
+      "3": "topology::ShowOverview",
+      "4": "topology::ShowGraph",
+      "5": "topology::ShowHealth",
+      "ctrl-r": "topology::CycleRig",
+      "shift-f10": "fleet::OpenContextMenu"
+    }
+  },
+  {
+    // The Queue panel (bottom dock): the list keys move through the
+    // items, enter shows one in full, shift-f10 opens its menu.
+    "context": "QueuePanel",
+    "bindings": {
+      "down": "menu::SelectNext",
+      "up": "menu::SelectPrevious",
+      "enter": "queue::Show",
+      "shift-f10": "queue::OpenContextMenu"
+    }
+  },
+  {
+    // Text fields: forms, pickers and the compose box.
+    "context": "TextInput",
+    "bindings": {
+      "backspace": "text_input::Backspace",
+      "shift-backspace": "text_input::Backspace",
+      "delete": "text_input::Delete",
+      "alt-backspace": "text_input::DeleteWordLeft",
+      "alt-delete": "text_input::DeleteWordRight",
+      "left": "text_input::Left",
+      "right": "text_input::Right",
+      "shift-left": "text_input::SelectLeft",
+      "shift-right": "text_input::SelectRight",
+      "alt-left": "text_input::WordLeft",
+      "alt-right": "text_input::WordRight",
+      "alt-shift-left": "text_input::SelectWordLeft",
+      "alt-shift-right": "text_input::SelectWordRight",
+      "cmd-left": "text_input::Home",
+      "cmd-right": "text_input::End",
+      "home": "text_input::Home",
+      "end": "text_input::End",
+      "cmd-shift-left": "text_input::SelectToHome",
+      "cmd-shift-right": "text_input::SelectToEnd",
+      "shift-home": "text_input::SelectToHome",
+      "shift-end": "text_input::SelectToEnd",
+      "cmd-up": "text_input::MoveToStart",
+      "cmd-down": "text_input::MoveToEnd",
+      "cmd-a": "text_input::SelectAll",
+      "cmd-c": "text_input::Copy",
+      "cmd-x": "text_input::Cut",
+      "cmd-v": "text_input::Paste",
+      "cmd-z": "text_input::Undo",
+      "cmd-shift-z": "text_input::Redo",
+      "ctrl-cmd-space": "text_input::ShowCharacterPalette",
+      "enter": "text_input::Confirm",
+      "escape": "text_input::Cancel"
+    }
+  },
+  {
+    // Several lines: enter still submits (as Zed's agent panel);
+    // shift-enter starts a new line.
+    "context": "TextInput && multiline",
+    "bindings": {
+      "up": "text_input::Up",
+      "down": "text_input::Down",
+      "shift-up": "text_input::SelectUp",
+      "shift-down": "text_input::SelectDown",
+      "shift-enter": "text_input::Newline"
+    }
+  },
+  {
+    // The Comms compose box: tab completes an @name.
+    "context": "CommsCompose > TextInput",
+    "bindings": {
+      "tab": "comms::Complete"
+    }
+  },
+  {
+    // The command line above the status bar: tab completes an @name or
+    // a /command, up and down recall the lines typed before.
+    "context": "CommandLine > TextInput",
+    "bindings": {
+      "tab": "command_line::Complete",
+      "up": "command_line::PreviousLine",
+      "down": "command_line::NextLine"
+    }
+  },
+  {
+    // While it is empty, up and down select entries in the stream.
+    "context": "CommsCompose > TextInput && empty",
+    "bindings": {
+      "up": "menu::SelectPrevious",
+      "down": "menu::SelectNext"
+    }
+  },
+  {
+    "context": "Picker",
+    "bindings": {
+      "down": "menu::SelectNext",
+      "up": "menu::SelectPrevious",
+      "ctrl-n": "menu::SelectNext",
+      "ctrl-p": "menu::SelectPrevious",
+      "enter": "menu::Confirm",
+      "escape": "menu::Cancel",
+      "cmd-enter": "menu::SecondaryConfirm"
+    }
+  },
+  {
+    // The tab switcher: ctrl-tab again moves down (the Workspace's key),
+    // ctrl-shift-tab up; letting go of ctrl switches.
+    "context": "TabSwitcher",
+    "bindings": {
+      "ctrl-shift-tab": "menu::SelectPrevious"
+    }
+  },
+  {
+    // The rig and agent forms: tab and shift-tab go round the fields
+    // (enter moves on too, and sends from the last).
+    "context": "Form",
+    "bindings": {
+      "tab": "form::NextField",
+      "shift-tab": "form::PreviousField"
+    }
+  }
+]

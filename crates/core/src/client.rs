@@ -33,6 +33,18 @@ impl Client {
         self.read()
     }
 
+    /// The next line the daemon sends unasked: what a stream
+    /// (`Request::Attach`) carries after its first reply.
+    pub fn receive(&mut self) -> io::Result<Response> {
+        self.read()
+    }
+
+    /// The connection itself, to close from another thread
+    /// (`shutdown`), which ends a [`Client::receive`] waiting there.
+    pub fn closer(&self) -> io::Result<UnixStream> {
+        self.writer.try_clone()
+    }
+
     fn read(&mut self) -> io::Result<Response> {
         let mut line = String::new();
         if self.reader.read_line(&mut line)? == 0 {

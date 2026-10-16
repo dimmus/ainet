@@ -78,13 +78,7 @@ fn or_dash(s: Option<&str>) -> String {
 
 /// `5s ago`, `3m ago`, `2h ago`, `4d ago`.
 pub fn ago(now_ms: i64, then_ms: i64) -> String {
-    let s = ((now_ms - then_ms) / 1000).max(0);
-    match s {
-        0..60 => format!("{s}s ago"),
-        60..3600 => format!("{}m ago", s / 60),
-        3600..86400 => format!("{}h ago", s / 3600),
-        _ => format!("{}d ago", s / 86400),
-    }
+    ainet_model::popup::ago(now_ms, then_ms)
 }
 
 fn first_line(s: &str, max: usize) -> String {
@@ -130,7 +124,36 @@ pub fn human(resp: &Response) -> String {
         Response::QItems { items } => qitems_table(items),
         Response::QItem { item } => qitem_text(item, now),
         Response::Watchdogs { watchdogs } => watchdogs_table(watchdogs, now),
+        // The console never asks for entries; said plainly all the same.
+        Response::Conversation { conversation } => conversation_text(conversation),
     }
+}
+
+/// A conversation's entries, one "who: words" line each, as `ainet
+/// transcript` prints them.
+fn conversation_text(c: &ainet_core::Conversation) -> String {
+    use ainet_core::conversation::EntryKind;
+    let mut out = String::new();
+    if let Some(notice) = &c.notice {
+        out.push_str(&format!("{notice}\n"));
+    }
+    if let Some(plain) = &c.plain {
+        out.push_str(plain.trim_end());
+        out.push('\n');
+    }
+    for e in &c.entries {
+        let line = match e.kind {
+            EntryKind::You => format!("user: {}", e.text),
+            EntryKind::Reply => format!("assistant: {}", e.text),
+            EntryKind::Tool if e.code.is_empty() => format!("tool: {}", e.tool),
+            EntryKind::Tool => format!("tool: {}: {}", e.tool, first_line(&e.code, 100)),
+            EntryKind::Inbound => format!("message from {}: {}", e.from, e.text),
+            EntryKind::Other => continue,
+        };
+        out.push_str(&line);
+        out.push('\n');
+    }
+    out
 }
 
 pub fn agents_table(agents: &[Agent]) -> String {
@@ -366,41 +389,7 @@ pub fn qitems_table(items: &[QItem]) -> String {
 }
 
 pub fn qitem_text(q: &QItem, now: i64) -> String {
-    let mut out = format!("{}  {}  {}\n", q.id, q.state.label(), q.summary);
-    out.push_str(&format!("from {} to {}", q.source, q.destination));
-    if let Some(o) = &q.owner {
-        out.push_str(&format!(", owned by {o}"));
-    }
-    out.push_str(&format!(", priority {}", q.priority));
-    if let Some(r) = &q.rig {
-        out.push_str(&format!(", rig {r}"));
-    }
-    out.push('\n');
-    if !q.tags.is_empty() {
-        out.push_str(&format!("tags: {}\n", q.tags.join(", ")));
-    }
-    if let Some(r) = &q.reply_to {
-        out.push_str(&format!("reply to: {r}\n"));
-    }
-    if let Some(b) = &q.block {
-        out.push_str(&format!("blocked on {}; then: {}\n", b.on, b.continuation));
-    }
-    if let Some(s) = &q.successor {
-        out.push_str(&format!("handed off as {s}\n"));
-    }
-    if !q.body.is_empty() {
-        out.push('\n');
-        out.push_str(q.body.trim_end());
-        out.push('\n');
-    }
-    if !q.notes.is_empty() {
-        out.push('\n');
-        for n in &q.notes {
-            let st = n.state.map(|s| format!(" [{}]", s.label())).unwrap_or_default();
-            out.push_str(&format!("- {} {}{st}: {}\n", ago(now, n.at), n.by, n.text));
-        }
-    }
-    out
+    ainet_model::popup::qitem_text(q, now)
 }
 
 pub fn watchdogs_table(w: &[Watchdog], now: i64) -> String {

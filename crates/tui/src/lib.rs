@@ -7,9 +7,6 @@
 //! dissolves on quit.
 
 mod app;
-mod backend;
-mod demo;
-mod popup;
 mod sprite;
 mod term;
 mod theme;
@@ -27,9 +24,10 @@ use ratatui::crossterm::event::{
 };
 use ratatui::crossterm::execute;
 
+use ainet_model::Backend;
+pub use ainet_model::Demo;
 pub use app::App;
-use app::{Backend, TICK};
-pub use demo::Demo;
+use app::TICK;
 
 pub struct Options {
     /// Run against the pretend fleet instead of ainetd.

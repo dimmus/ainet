@@ -1376,5 +1376,8 @@ pub fn conversation(path: &Path, tail: usize, grep: Option<&str>) -> Vec<(Role, 
     out
 }
 
+mod thread;
+pub use thread::{Thread, ThreadItem, thread};
+
 #[cfg(test)]
 mod tests;

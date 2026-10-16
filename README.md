@@ -50,6 +50,69 @@ ainet up path/to/openrig/rig.yaml           # any OpenRig RigSpec
 | ![Fleet](docs/images/fleet.png) | ![Comms](docs/images/comms.png) |
 | ![Inbox](docs/images/inbox.png) | ![Map](docs/images/map.png) |
 
+## Desktop app
+
+`ainet-gui` is a desktop front end in Zed's style (GPUI and Zed's own UI
+components), in development: Zed's title bar, panes, docks and status bar
+over the same fleet state as the TUI (the Fleet and Agent panels, live
+terminals streamed from ainetd, the Inbox, Comms, the Queue, Chatroom
+and Events, the Map, the command palette), with Zed's themes plus
+Deepharness and Omarchy, Zed's fonts, and Zed-style settings
+(`~/.config/ainet/settings.json`) and keymaps
+(`~/.config/ainet/keymap.json`) that apply as you save. It opens as you
+left it: the window, docks, splits and tabs (an agent's terminal while
+the agent lives), per daemon socket, from
+`~/.local/state/ainet/gui.json`. The plan is
+[docs/GUI-PLAN.md](docs/GUI-PLAN.md); the guide (the Zed pin and how to
+upgrade it, every part of the app and its keys, the tests, and the
+known gaps) is [docs/GUI.md](docs/GUI.md).
+
+```bash
+just demo gui                 # the pretend fleet (cargo run --manifest-path crates/gui/Cargo.toml -- --demo)
+just run gui                  # against ainetd, started through the console binary
+ainet gui [--demo]            # runs ainet-gui installed next to ainet or on PATH
+ainet-gui --socket PATH --view rig:docs
+```
+
+It is a separate binary and never built by plain `cargo build`; it starts
+ainetd with `ainet daemon` (next to it, on `PATH` or `$AINET_BIN`), so build
+or install `ainet` too. If that fails, the window still opens and says why
+in the status bar.
+
+To install it for your desktop:
+
+```bash
+just install-gui   # ainet and ainet-gui into ~/.cargo/bin, plus the desktop entry,
+                   # icon and settings schema under ~/.local/share
+```
+
+On Arch, [packaging/arch/PKGBUILD](packaging/arch/PKGBUILD) builds both
+binaries from git as split packages, `ainet` (MIT) and `ainet-gui`
+(GPL-3.0-or-later). It is **untested**: written without running a
+`makepkg` build. macOS may build (GPUI has a Metal backend, and the
+`cmd` keymap is there) but is neither tried nor supported; see
+[docs/GUI.md](docs/GUI.md).
+
+Arch Linux packages GPUI needs: the part of Zed's `script/linux` (at
+v1.24.2) that GPUI uses, plus a Vulkan driver, since GPUI renders with
+Vulkan:
+
+```bash
+sudo pacman -S --needed gcc pkgconf fontconfig wayland libxcb libxkbcommon-x11 \
+  vulkan-icd-loader xdg-desktop-portal
+sudo pacman -S --needed vulkan-radeon   # or vulkan-intel, or nvidia-utils
+```
+
+It needs Rust 1.98 or newer (Zed's toolchain); the console crates still
+build with 1.88. The first build compiles GPUI and takes a while.
+
+**Licence:** `ainet-gui` links Zed's GPL-3.0-or-later crates, so the
+`ainet-gui` crate and binary are **GPL-3.0-or-later**
+([crates/gui/LICENSE-GPL](crates/gui/LICENSE-GPL)). Everything else in
+this repository, including the `ainet` console binary, stays MIT and never
+depends on it. `crates/gui` is its own Cargo workspace, so building the
+console never fetches Zed.
+
 ## Teams
 
 ```bash
@@ -105,8 +168,10 @@ check their queue.
 | `crates/daemon` | ainetd: panes, rigs, delivery, mailbox, chat, queue, watchdogs, hooks, discovery |
 | `crates/spec` | OpenRig RigSpec/AgentSpec parsing, validation, launch order, the built-in library |
 | `crates/claude` | Claude Code integration ported from Den: sessions, inbox socket, hook answers, `/always`, questions, transcripts, cost, agent-badge, hook install |
-| `crates/pty` | panes: spawn, write, resize, screen and scrollback |
-| `crates/tui` | ratatui + tachyonfx + tui-term: Fleet, Terminals, Comms, Inbox, Map, the demo |
+| `crates/pty` | panes: spawn, write, resize, screen and scrollback, attachments that hear the output |
+| `crates/model` | what a front end knows: the fleet store fed by ainetd's snapshot and events, the Fleet tree, the `/command` language, the demo fleet |
+| `crates/tui` | ratatui + tachyonfx + tui-term: Fleet, Terminals, Comms, Inbox, Map |
+| `crates/gui` | `ainet-gui`, the desktop app (GPL-3.0-or-later): GPUI and Zed's `ui`/`theme` |
 | `crates/core` | agents, rigs, messages, queue, the wire protocol, a blocking client |
 | `crates/critter` | the seeded 16×16 critters and names |
 
@@ -142,10 +207,20 @@ check their queue.
 | cargo-deny | license and advisory checks | `cargo install cargo-deny --locked` |
 | sqlite3 | peek at the event log | already there |
 
+The repository holds two Cargo workspaces: the root one is the console
+(`ainet`, ainetd and their crates, MIT, Rust 1.88), and `crates/gui` is
+`ainet-gui` on its own (GPL-3.0-or-later because it links Zed's crates,
+Rust 1.98), so building or checking the console never fetches Zed. CI
+(`.github/workflows/ci.yml`) runs one job for each, the same commands as
+`just check` and `just check-gui`.
+
 Then:
 
 ```bash
-just check     # fmt, clippy -D warnings, tests
+just check          # the console: fmt, clippy -D warnings, tests
+just check-gui      # the desktop app: the same, with --manifest-path crates/gui/Cargo.toml
+just check-all      # both
+just screenshot-gui # pictures of the demo workspace in target/screenshots/ (needs a GPU)
 just demo
 ```
 
@@ -157,5 +232,8 @@ team, rig bundles, missions and slices, permission policies, remote hosts.
 
 ## License
 
-MIT. Critter code and design are ported from Den and agent-badge (MIT); see
+MIT, except `crates/gui` (`ainet-gui`), which is GPL-3.0-or-later because
+it links Zed's GPL crates; the GPL's text is in
+[crates/gui/LICENSE-GPL](crates/gui/LICENSE-GPL). Critter code and design are ported from Den and
+agent-badge (MIT); the desktop app uses Zed's crates and icons; see
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

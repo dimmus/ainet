@@ -9,6 +9,7 @@ license.workspace = true
 [dependencies]
 ainet-core.workspace = true
 ainet-critter.workspace = true
+ainet-model.workspace = true
 anyhow.workspace = true
 ratatui.workspace = true
 tachyonfx.workspace = true

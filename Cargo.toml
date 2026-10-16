@@ -1,6 +1,9 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+# The desktop app is its own workspace (crates/gui/Cargo.toml): it pulls in
+# Zed's GPL crates from git, which building the MIT console must never need.
+exclude = ["crates/gui"]
 default-members = ["crates/ainet"]
 
 [workspace.package]
@@ -14,6 +17,7 @@ repository = "https://github.com/dimmus/ainet"
 ainet-core = { path = "crates/core" }
 ainet-critter = { path = "crates/critter" }
 ainet-daemon = { path = "crates/daemon" }
+ainet-model = { path = "crates/model" }
 ainet-pty = { path = "crates/pty" }
 ainet-tui = { path = "crates/tui" }
 

@@ -17,6 +17,7 @@ mod launch;
 mod queue;
 mod rigs;
 mod store;
+mod stream;
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::os::unix::fs::PermissionsExt;
@@ -280,6 +281,19 @@ async fn serve(stream: UnixStream, d: Shared, shutdown: Arc<Notify>) {
                 }
             }
         }
+        if let Request::Attach { agent } = &req {
+            match stream::attach(&d, agent) {
+                Ok((id, snapshot, attachment)) => {
+                    return stream::follow(id, snapshot, attachment, &mut lines, &mut write).await;
+                }
+                Err(why) => {
+                    if write.write_all(&protocol::encode(&err(why))).await.is_err() {
+                        return;
+                    }
+                    continue;
+                }
+            }
+        }
         let stop = matches!(req, Request::Shutdown);
         let resp = handle(req, &d).await;
         if write.write_all(&protocol::encode(&resp)).await.is_err() {
@@ -317,9 +331,15 @@ async fn handle(req: Request, d: &Shared) -> Response {
             formatted,
             history,
         } => agents::screen(d, &agent, formatted, history),
+        // A stream of its own, served by `serve` before it comes here.
+        Request::Attach { .. } => err("attach is answered as a stream"),
         Request::Close { agent } => agents::close(d, &agent),
         Request::Interact { agent, on } => comms::interact(d, &agent, on).await,
-        Request::Answer { item, decision } => hooks::answer(d, item, decision),
+        Request::Answer {
+            item,
+            decision,
+            message,
+        } => hooks::answer(d, item, decision, message),
         Request::AnswerQuestion { item, answer } => hooks::answer_question(d, item, &answer),
         Request::Hook {
             agent,
@@ -334,6 +354,7 @@ async fn handle(req: Request, d: &Shared) -> Response {
             lines,
         } => agents::capture(d, &targets, rig.as_deref(), pod.as_deref(), lines),
         Request::Transcript { agent, tail, grep } => agents::transcript(d, &agent, tail, grep.as_deref()),
+        Request::Conversation { agent, tail, after } => agents::conversation(d, &agent, tail, after),
 
         Request::Up(spec) => rigs::up(d, spec),
         Request::Down {

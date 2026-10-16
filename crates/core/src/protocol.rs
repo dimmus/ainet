@@ -1,6 +1,7 @@
 //! The wire protocol: one JSON object per line over the daemon's Unix socket.
 //! Every request gets exactly one response, except `Subscribe`, after which
-//! the connection carries `Response::Event` lines until it closes.
+//! the connection carries `Response::Event` lines until it closes, and
+//! `Attach`, after which it carries one terminal's screens and output.
 //!
 //! Requests made on behalf of an agent (the MCP server, `ainet msg …` run in
 //! an agent's shell) carry that agent's id from `AINET_AGENT_ID` in their
@@ -13,6 +14,7 @@ use serde_json::Value;
 
 use crate::agent::{Agent, Decision, InboxItem, Runtime};
 use crate::comms::{ChatMessage, Message, QItem, QState, Watchdog};
+use crate::conversation::Conversation;
 use crate::rig::{Discovered, Edge, Rig, SnapshotInfo, Whoami};
 
 /// Bumped on any incompatible change.
@@ -49,13 +51,28 @@ pub enum Request {
     },
     /// The screen of an agent's terminal: plain rows, and with `formatted`
     /// the whole state as escape sequences for a local `vt100` parser.
-    /// `history` adds up to that many scrollback rows above the screen.
+    /// `history` adds up to that many scrollback rows above the screen;
+    /// with `formatted` too, a daemon that can also sends each of those rows
+    /// with its colours (`Response::Screen::styled_rows`).
     Screen {
         agent: String,
         #[serde(default)]
         formatted: bool,
         #[serde(default)]
         history: usize,
+    },
+    /// Streams an agent's terminal on this connection, which carries
+    /// nothing else from then on: first its screen (`Response::Screen`,
+    /// formatted), then everything the program prints, in order, as
+    /// `Response::Event { event: Event::Bytes }`, and the whole screen again
+    /// after a resize, when the client fell behind, and once the output
+    /// settles, until either side closes the connection (the daemon does
+    /// when the program ends). An agent without a pane of ainetd's gets an
+    /// error and the connection stays an ordinary one. Daemons from before
+    /// it answer with an error too (`bad request: unknown variant`);
+    /// clients then fetch `Screen` on `Event::Output`, as before.
+    Attach {
+        agent: String,
     },
     Close {
         agent: String,
@@ -69,6 +86,11 @@ pub enum Request {
     Answer {
         item: u64,
         decision: Decision,
+        /// With a deny: why, or what to do instead, for the agent to read.
+        /// Left out of the line when empty, so older daemons and clients
+        /// see the request they always did.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
     },
     /// Answers an agent's question (AskUserQuestion) waiting in the inbox:
     /// an option's number, several numbers ("1 3"), or your own words.
@@ -103,6 +125,18 @@ pub enum Request {
         #[serde(default)]
         tail: usize,
         grep: Option<String>,
+    },
+    /// The conversation in an agent's transcript as entries
+    /// (`Response::Conversation`): the last `tail` (0: the daemon's
+    /// choice), or with `after` only those further on than that entry
+    /// id. Daemons from before it answer `bad request: unknown variant`;
+    /// clients then ask for `Transcript` and show its text.
+    Conversation {
+        agent: String,
+        #[serde(default)]
+        tail: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after: Option<u64>,
     },
 
     // ---- rigs ------------------------------------------------------------
@@ -387,7 +421,7 @@ fn yes() -> bool {
 }
 
 /// A library entry.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpecEntry {
     pub name: String,
     pub summary: Option<String>,
@@ -436,6 +470,13 @@ pub enum Response {
         ansi: Option<String>,
         #[serde(default)]
         size: (u16, u16),
+        /// With `formatted` and `history`: each of `rows` with its colours
+        /// and attributes, as text with SGR sequences that starts from the
+        /// default attributes and ends reset, to print at the start of a
+        /// row. Absent from daemons that cannot (and for adopted tmux
+        /// panes), which leaves the plain rows.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        styled_rows: Option<Vec<String>>,
     },
     /// What `ainet hook` prints for Claude Code, if anything.
     HookReply {
@@ -484,6 +525,10 @@ pub enum Response {
     Watchdogs {
         watchdogs: Vec<Watchdog>,
     },
+    /// An agent's conversation (`Request::Conversation`).
+    Conversation {
+        conversation: Conversation,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -504,6 +549,16 @@ pub enum Event {
     /// New output in a pane; the TUI refetches the screen if it shows it.
     Output {
         agent: String,
+    },
+    /// What an attached terminal's program printed (`Request::Attach`), in
+    /// order, as text: a character split between two reads is sent whole
+    /// with the second, and bytes that are not UTF-8 become U+FFFD (the
+    /// screen sent once the output settles mends what they spoilt). Sent
+    /// only on the attaching connection, never to subscribers, whose
+    /// clients may not know it.
+    Bytes {
+        agent: String,
+        data: String,
     },
     Rig {
         rig: Rig,
@@ -551,6 +606,25 @@ mod tests {
     }
 
     #[test]
+    fn answers_without_a_reason_are_the_old_line() {
+        let plain = Request::Answer {
+            item: 3,
+            decision: Decision::Deny,
+            message: None,
+        };
+        assert_eq!(
+            std::str::from_utf8(&encode(&plain)).unwrap(),
+            "{\"op\":\"answer\",\"item\":3,\"decision\":\"deny\"}\n"
+        );
+        let old: Request = serde_json::from_str(r#"{"op":"answer","item":3,"decision":"allow"}"#).unwrap();
+        assert!(matches!(old, Request::Answer { message: None, .. }));
+        let why: Request =
+            serde_json::from_str(r#"{"op":"answer","item":3,"decision":"deny","message":"use cargo"}"#)
+                .unwrap();
+        assert!(matches!(why, Request::Answer { message: Some(ref m), .. } if m == "use cargo"));
+    }
+
+    #[test]
     fn old_screen_requests_still_parse() {
         let r: Request = serde_json::from_str(r#"{"op":"screen","agent":"a"}"#).unwrap();
         assert!(matches!(
@@ -561,6 +635,75 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn attaching_is_an_addition_old_peers_can_ignore() {
+        let line = encode(&Request::Attach { agent: "a".into() });
+        assert_eq!(
+            std::str::from_utf8(&line).unwrap(),
+            "{\"op\":\"attach\",\"agent\":\"a\"}\n"
+        );
+        // A screen without colours in its scrollback is the screen old
+        // daemons send, and new ones send it unchanged to old clients.
+        let old = r#"{"type":"screen","rows":["hi"],"ansi":null,"size":[2,10]}"#;
+        let screen: Response = serde_json::from_str(old).unwrap();
+        assert!(matches!(
+            screen,
+            Response::Screen {
+                styled_rows: None,
+                ..
+            }
+        ));
+        assert_eq!(serde_json::to_string(&screen).unwrap(), old);
+        let bytes = encode(&Response::Event {
+            event: Event::Bytes {
+                agent: "a".into(),
+                data: "\u{1b}[1mhi".into(),
+            },
+        });
+        assert_eq!(
+            std::str::from_utf8(&bytes).unwrap(),
+            "{\"type\":\"event\",\"event\":{\"kind\":\"bytes\",\"agent\":\"a\",\"data\":\"\\u001b[1mhi\"}}\n"
+        );
+    }
+
+    #[test]
+    fn conversations_are_an_addition_old_peers_can_ignore() {
+        let ask = Request::Conversation {
+            agent: "a".into(),
+            tail: 50,
+            after: None,
+        };
+        assert_eq!(
+            std::str::from_utf8(&encode(&ask)).unwrap(),
+            "{\"op\":\"conversation\",\"agent\":\"a\",\"tail\":50}\n"
+        );
+        let more: Request = serde_json::from_str(r#"{"op":"conversation","agent":"a","after":9}"#).unwrap();
+        assert!(matches!(
+            more,
+            Request::Conversation {
+                tail: 0,
+                after: Some(9),
+                ..
+            }
+        ));
+        let mut entry = crate::ConversationEntry::new(4, crate::conversation::EntryKind::You, "hi");
+        entry.at = Some(1);
+        let reply = Response::Conversation {
+            conversation: Conversation {
+                entries: vec![entry],
+                model: Some("Opus 5.5".into()),
+                ..Conversation::default()
+            },
+        };
+        let line = encode(&reply);
+        assert_eq!(
+            std::str::from_utf8(&line).unwrap(),
+            "{\"type\":\"conversation\",\"conversation\":{\"entries\":[{\"id\":4,\"kind\":\"you\",\"at\":1,\"text\":\"hi\"}],\"model\":\"Opus 5.5\"}}\n"
+        );
+        let back: Response = serde_json::from_slice(&line).unwrap();
+        assert!(matches!(back, Response::Conversation { conversation } if conversation.entries[0].id == 4));
     }
 
     #[test]

@@ -152,7 +152,7 @@ impl Rig {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SnapshotInfo {
     pub id: String,
     pub rig: String,

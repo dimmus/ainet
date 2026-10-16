@@ -1,12 +1,10 @@
 //! Talking to ainetd: start it when needed, and one call per connection.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use ainet_core::client::Client;
-use ainet_core::protocol;
-use ainet_core::{Request, Response, paths};
+use ainet_core::{Request, Response};
 use anyhow::{Context, Result, bail};
 
 /// How long an ordinary call may take.
@@ -72,43 +70,10 @@ pub fn unexpected(resp: Response) -> anyhow::Error {
     }
 }
 
-/// Starts ainetd in the background unless it is already running.
+/// Starts ainetd in the background unless it is already running: this very
+/// binary, as `ainet daemon`.
 pub fn ensure_daemon(socket: &Path) -> Result<()> {
-    let conn = Conn::new(socket.to_path_buf());
-    if Client::connect(socket).is_ok() {
-        return check_version(&conn);
-    }
-    let log_dir = paths::state_dir();
-    std::fs::create_dir_all(&log_dir)?;
-    let log = std::fs::File::create(log_dir.join("ainetd.log"))?;
-    let mut cmd = Command::new(std::env::current_exe()?);
-    cmd.arg("daemon")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(log);
-    // Its own process group, so Ctrl+C in the TUI does not reach it.
-    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
-    cmd.spawn().context("start ainetd")?;
-    let start = Instant::now();
-    while start.elapsed() < Duration::from_secs(3) {
-        if Client::connect(socket).is_ok() {
-            return Ok(());
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    bail!(
-        "ainetd did not start; see {}",
-        log_dir.join("ainetd.log").display()
-    )
-}
-
-fn check_version(conn: &Conn) -> Result<()> {
-    match conn.call(&Request::Hello {
-        version: protocol::VERSION,
-    })? {
-        Response::Hello { .. } => Ok(()),
-        other => Err(unexpected(other)),
-    }
+    ainet_model::daemon::ensure_daemon(socket, &std::env::current_exe()?)
 }
 
 /// The agent this process acts for: `$AINET_AGENT_ID`, if set.

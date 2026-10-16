@@ -1,0 +1,256 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Settings",
+  "description": "Everything `settings.json` can say.",
+  "type": "object",
+  "properties": {
+    "theme": {
+      "description": "The theme: a name (\"Deepharness\", \"Omarchy\", \"One Dark\", …), or one\nper system appearance. Unset means Omarchy when installed, else\nDeepharness.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ThemeSelection"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "ui_font_family": {
+      "description": "The font of everything but terminals and code (\".ZedSans\" is IBM\nPlex Sans, bundled).",
+      "type": "string",
+      "default": ".ZedSans"
+    },
+    "ui_font_size": {
+      "description": "In pixels, 6 to 100.",
+      "type": "number",
+      "format": "float",
+      "default": 16.0
+    },
+    "ui_density": {
+      "description": "How tightly the UI is spaced.",
+      "$ref": "#/$defs/UiDensity",
+      "default": "default"
+    },
+    "terminal": {
+      "description": "Agents' terminals.",
+      "$ref": "#/$defs/TerminalSettings",
+      "default": {
+        "font_family": ".ZedMono",
+        "font_size": 15.0,
+        "line_height": "standard",
+        "cursor_shape": "block",
+        "blinking": "on"
+      }
+    },
+    "fleet_panel": {
+      "description": "The Fleet panel.",
+      "$ref": "#/$defs/FleetPanelSettings",
+      "default": {
+        "dock": "left",
+        "width": 260.0
+      }
+    },
+    "critters": {
+      "description": "The agents' pixel critters.",
+      "$ref": "#/$defs/CritterSettings",
+      "default": {
+        "size": "large"
+      }
+    },
+    "command_line": {
+      "description": "The command line above the status bar, always there. Off, it shows\nonly while it has the keyboard (`ctrl-;`).",
+      "type": "boolean",
+      "default": true
+    },
+    "confirm_quit": {
+      "description": "Ask before quitting.",
+      "type": "boolean",
+      "default": false
+    }
+  },
+  "$defs": {
+    "ThemeSelection": {
+      "description": "A theme by name, or one for light and one for dark, as in Zed.",
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "$ref": "#/$defs/ThemeMode",
+              "default": "system"
+            },
+            "light": {
+              "type": "string"
+            },
+            "dark": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "light",
+            "dark"
+          ]
+        }
+      ]
+    },
+    "ThemeMode": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "light",
+            "dark"
+          ]
+        },
+        {
+          "description": "Follow the system's light or dark appearance.",
+          "type": "string",
+          "const": "system"
+        }
+      ]
+    },
+    "UiDensity": {
+      "description": "Specifies the density of the UI.\nNote: This setting is still experimental. See [this tracking issue](https://github.com/zed-industries/zed/issues/18078)",
+      "oneOf": [
+        {
+          "description": "A denser UI with tighter spacing and smaller elements.",
+          "type": "string",
+          "const": "compact"
+        },
+        {
+          "description": "The default UI density.",
+          "type": "string",
+          "const": "default"
+        },
+        {
+          "description": "A looser UI with more spacing and larger elements.",
+          "type": "string",
+          "const": "comfortable"
+        }
+      ]
+    },
+    "TerminalSettings": {
+      "type": "object",
+      "properties": {
+        "font_family": {
+          "description": "\".ZedMono\" is Lilex, bundled.",
+          "type": "string",
+          "default": ".ZedMono"
+        },
+        "font_size": {
+          "description": "In pixels, 6 to 100.",
+          "type": "number",
+          "format": "float",
+          "default": 15.0
+        },
+        "line_height": {
+          "description": "The height of a line, as a ratio to the font size.",
+          "$ref": "#/$defs/LineHeight",
+          "default": "standard"
+        },
+        "cursor_shape": {
+          "description": "The cursor of a focused terminal.",
+          "$ref": "#/$defs/CursorShape",
+          "default": "block"
+        },
+        "blinking": {
+          "description": "Whether that cursor blinks.",
+          "$ref": "#/$defs/Blinking",
+          "default": "on"
+        }
+      }
+    },
+    "LineHeight": {
+      "description": "A terminal's line height, written as in Zed's settings.",
+      "oneOf": [
+        {
+          "description": "1.618: easy reading.",
+          "type": "string",
+          "const": "comfortable"
+        },
+        {
+          "description": "1.3: box-drawing characters join up, which agents' TUIs rely on;\nso it is ainet's default, unlike Zed's.",
+          "type": "string",
+          "const": "standard"
+        },
+        {
+          "description": "Any ratio of at least 1.",
+          "type": "object",
+          "properties": {
+            "custom": {
+              "type": "number",
+              "format": "float"
+            }
+          },
+          "required": [
+            "custom"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "CursorShape": {
+      "description": "The cursor of a focused terminal, with Zed's names.",
+      "type": "string",
+      "enum": [
+        "block",
+        "bar",
+        "underline",
+        "hollow"
+      ]
+    },
+    "Blinking": {
+      "description": "Whether a focused terminal's cursor blinks, with Zed's names. ainetd\ndoes not pass on a program's own blink request, so\n`terminal_controlled` keeps the cursor still.",
+      "type": "string",
+      "enum": [
+        "off",
+        "on",
+        "terminal_controlled"
+      ]
+    },
+    "FleetPanelSettings": {
+      "type": "object",
+      "properties": {
+        "dock": {
+          "description": "Its side of the window; the Agent panel takes the other.",
+          "$ref": "#/$defs/DockSide",
+          "default": "left"
+        },
+        "width": {
+          "description": "In pixels; Zed's default side-dock width.",
+          "type": "number",
+          "format": "float",
+          "default": 260.0
+        }
+      }
+    },
+    "DockSide": {
+      "type": "string",
+      "enum": [
+        "left",
+        "right"
+      ]
+    },
+    "CritterSettings": {
+      "type": "object",
+      "properties": {
+        "size": {
+          "description": "Their size in the Fleet (`ctrl-e` toggles it).",
+          "$ref": "#/$defs/CritterSize",
+          "default": "large"
+        }
+      }
+    },
+    "CritterSize": {
+      "type": "string",
+      "enum": [
+        "small",
+        "large"
+      ]
+    }
+  }
+}

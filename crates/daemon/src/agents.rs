@@ -3,8 +3,11 @@
 
 use std::path::Path;
 
+use ainet_core::conversation::{self, EntryKind};
 use ainet_core::protocol::{Capture, SpawnSpec};
-use ainet_core::{Agent, AgentState, Event, InboxItem, Response, Runtime, now_ms};
+use ainet_core::{
+    Agent, AgentState, Conversation, ConversationEntry, Event, InboxItem, Response, Runtime, now_ms,
+};
 use ainet_pty::{Launch, Pane};
 use anyhow::{Result, bail};
 
@@ -277,18 +280,36 @@ pub(crate) fn screen(d: &Shared, key: &str, formatted: bool, history: usize) -> 
         return err(format!("no agent {key}"));
     };
     if let Some(p) = d.panes.get(&id) {
-        let rows = if history > 0 { p.history(history) } else { p.rows() };
+        // Scrollback with colours when asked for formatted.
+        let (rows, styled_rows) = match (history, formatted) {
+            (0, _) => (p.rows(), None),
+            (_, false) => (p.history(history), None),
+            (_, true) => {
+                let (rows, styled) = p.history_styled(history);
+                (rows, Some(styled))
+            }
+        };
         let (ansi, size) = if formatted {
             let (a, s) = p.formatted();
             (Some(a), s)
         } else {
             (None, p.size())
         };
-        return Response::Screen { rows, ansi, size };
+        return Response::Screen {
+            rows,
+            ansi,
+            size,
+            styled_rows,
+        };
     }
     if let Some(target) = d.tmux.get(&id) {
         return match crate::discover::tmux_capture(target, history, formatted) {
-            Ok((rows, ansi, size)) => Response::Screen { rows, ansi, size },
+            Ok((rows, ansi, size)) => Response::Screen {
+                rows,
+                ansi,
+                size,
+                styled_rows: None,
+            },
             Err(e) => err(e),
         };
     }
@@ -402,4 +423,107 @@ fn transcript_lines(path: &Path, tail: usize, grep: Option<&str>) -> Vec<String>
         .into_iter()
         .map(|(role, text)| format!("{}: {text}", format!("{role:?}").to_lowercase()))
         .collect()
+}
+
+/// An agent's conversation as entries (`Request::Conversation`): from its
+/// Claude Code transcript, or a notice for a runtime ainet cannot read and
+/// a session that has not named its transcript yet.
+pub(crate) fn conversation(d: &Shared, key: &str, tail: usize, after: Option<u64>) -> Response {
+    let (runtime, path) = {
+        let d = lock(d);
+        let Some(id) = d.find_agent(key, None) else {
+            return err(format!("no agent {key}"));
+        };
+        let Some(agent) = d.agents.get(&id) else {
+            return err(format!("no agent {key}"));
+        };
+        (agent.runtime, agent.transcript.clone())
+    };
+    let notice = |text: &str| Response::Conversation {
+        conversation: Conversation {
+            notice: Some(text.to_string()),
+            ..Conversation::default()
+        },
+    };
+    if let Some(why) = conversation::unreadable(runtime) {
+        return notice(why);
+    }
+    let Some(path) = path else {
+        return notice(conversation::NO_TRANSCRIPT);
+    };
+    let tail = if tail == 0 { CONVERSATION_TAIL } else { tail };
+    Response::Conversation {
+        conversation: conversation_of(ainet_claude::transcript::thread(&path, after, tail)),
+    }
+}
+
+/// How many entries a conversation brings when the client leaves it to us.
+const CONVERSATION_TAIL: usize = 200;
+
+/// A transcript's thread as the wire's entries: a prompt ainetd typed in
+/// for a message becomes that message.
+fn conversation_of(thread: ainet_claude::transcript::Thread) -> Conversation {
+    use ainet_claude::transcript::EntryKind as Kind;
+    let entries = thread
+        .items
+        .into_iter()
+        .map(|item| match item.kind {
+            Kind::You => ConversationEntry::prompt(item.pos, item.at_ms, &item.text),
+            Kind::Text => ConversationEntry {
+                at: item.at_ms,
+                ..ConversationEntry::new(item.pos, EntryKind::Reply, item.text)
+            },
+            Kind::Tool => ConversationEntry {
+                at: item.at_ms,
+                tool: item.tool,
+                code: item.code,
+                output: item.output,
+                done: item.done,
+                failed: item.failed,
+                ..ConversationEntry::new(item.pos, EntryKind::Tool, item.text)
+            },
+        })
+        .collect();
+    Conversation {
+        entries,
+        model: thread.model,
+        cwd: thread.cwd,
+        permission_mode: thread.permission_mode,
+        notice: None,
+        plain: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_transcript_becomes_entries_with_its_messages_known() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../claude/tests/fixtures/transcript-2.1.289/session.jsonl");
+        let c = conversation_of(ainet_claude::transcript::thread(&fixture, None, 0));
+        let kinds: Vec<EntryKind> = c.entries.iter().map(|e| e.kind).collect();
+        use EntryKind::*;
+        assert_eq!(kinds, [You, Reply, Tool, Tool, Tool, Inbound, Tool, Reply, Tool]);
+        let inbound = &c.entries[5];
+        assert_eq!(inbound.from, "orch-lead@docs");
+        assert_eq!(inbound.message, Some(4));
+        assert_eq!(
+            inbound.text,
+            "OK to raise the reconnect timeout to 5s for now; file a queue item for the real cause."
+        );
+        let reply = &c.entries[8];
+        assert_eq!(
+            reply.code,
+            "ainet msg reply 4 \"Done: timeout is 5s; follow-up filed.\""
+        );
+        assert!(reply.is_running());
+        assert!(c.entries[3].failed && c.entries[3].done);
+        assert_eq!(c.model.as_deref(), Some("Opus 5.5"));
+        assert_eq!(c.permission_mode.as_deref(), Some("acceptEdits"));
+        // Asking again from the call still running brings it and nothing older.
+        let again = conversation_of(ainet_claude::transcript::thread(&fixture, Some(reply.id - 1), 0));
+        assert_eq!(again.entries, vec![reply.clone()]);
+    }
 }
