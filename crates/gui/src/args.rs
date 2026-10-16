@@ -18,7 +18,7 @@ pub struct Args {
     #[arg(long, value_name = "PATH")]
     pub socket: Option<PathBuf>,
     /// The view to open first: fleet, terminals, rig:NAME, pod:RIG/POD,
-    /// comms, inbox, map, review, or a rig's name.
+    /// comms, inbox, map, topology, topology:RIG, review, or a rig's name.
     #[arg(long, value_name = "VIEW", value_parser = View::parse)]
     pub view: Option<View>,
 }
@@ -43,6 +43,10 @@ pub enum View {
     Comms,
     Inbox,
     Map,
+    /// The Topology view, of one rig or of the default one.
+    Topology {
+        rig: Option<String>,
+    },
     Review,
     /// A rig by name; it shows that rig's terminals if such a rig exists.
     Named(String),
@@ -66,6 +70,7 @@ impl View {
             "comms" | "chat" | "queue" => View::Comms,
             "inbox" | "attention" | "feed" => View::Inbox,
             "map" | "graph" => View::Map,
+            "topology" | "topo" => View::Topology { rig: rig(arg) },
             "review" => View::Review,
             _ => View::Named(s.to_string()),
         })
@@ -80,6 +85,8 @@ impl View {
             View::Comms => "Comms".into(),
             View::Inbox => "Inbox".into(),
             View::Map => "Map".into(),
+            View::Topology { rig: None } => "Topology".into(),
+            View::Topology { rig: Some(r) } => format!("Topology · {r}"),
             View::Review => "Review".into(),
         }
     }
@@ -140,6 +147,13 @@ mod tests {
         assert_eq!(v("chat"), View::Comms);
         assert_eq!(v("attention"), View::Inbox);
         assert_eq!(v("graph"), View::Map);
+        assert_eq!(v("topology"), View::Topology { rig: None });
+        assert_eq!(
+            v("topology:docs"),
+            View::Topology {
+                rig: Some("docs".into())
+            }
+        );
         assert_eq!(v("docs"), View::Named("docs".into()));
         assert!(View::parse("  ").is_err());
         assert!(Args::try_parse_from(["ainet-gui", "--view", ""]).is_err());

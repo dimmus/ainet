@@ -276,6 +276,7 @@ mod tests {
                     "Map",
                     "Terminals",
                     "Terminals && grid",
+                    "Topology && view",
                     "Picker",
                     "TabSwitcher",
                     "Form",

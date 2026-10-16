@@ -160,6 +160,7 @@ dependencies = [
  "clap",
  "futures",
  "fuzzy",
+ "gethostname",
  "gpui",
  "gpui_platform",
  "gpui_wgpu",

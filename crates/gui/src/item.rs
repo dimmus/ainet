@@ -208,6 +208,7 @@ impl Placeholder {
             View::Comms => IconName::Chat,
             View::Inbox => IconName::Bell,
             View::Map => IconName::Blocks,
+            View::Topology { .. } => IconName::GitGraph,
             View::Review => IconName::Diff,
             View::Fleet | View::Terminals { .. } | View::Named(_) => IconName::Terminal,
         }
@@ -218,6 +219,7 @@ impl Placeholder {
             View::Comms => "Messages and chat between agents will stream here",
             View::Inbox => "Requests waiting for you will be answered here",
             View::Map => "The fleet's map will be drawn here",
+            View::Topology { .. } => "The rigs and their seats will be shown here",
             View::Review => "Changes to review will be listed here",
             View::Fleet | View::Terminals { .. } | View::Named(_) => {
                 "Terminals, Comms and the Inbox open here as tabs"

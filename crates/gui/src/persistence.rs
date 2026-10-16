@@ -142,6 +142,18 @@ pub enum SavedItem {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cols: Option<usize>,
     },
+    /// The Topology view: the rig (and pod) or the loose agents it
+    /// shows, and its tab when not the table.
+    Topology {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rig: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pod: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        loose: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        view: Option<String>,
+    },
     /// A kind this version does not know (a newer app's): dropped.
     #[serde(other)]
     Unknown,
@@ -537,6 +549,32 @@ mod tests {
                 cols: Some(2)
             }
         );
+    }
+
+    #[test]
+    fn the_topology_view_saves_its_scope_and_tab() {
+        let plain = SavedItem::Topology {
+            rig: Some("docs".into()),
+            pod: None,
+            loose: false,
+            view: None,
+        };
+        let text = serde_json::to_string(&plain).unwrap();
+        assert_eq!(text, r#"{"kind":"topology","rig":"docs"}"#);
+        assert_eq!(serde_json::from_str::<SavedItem>(&text).unwrap(), plain);
+        let loose: SavedItem =
+            serde_json::from_str(r#"{ "kind": "topology", "loose": true, "view": "health" }"#).unwrap();
+        assert_eq!(
+            loose,
+            SavedItem::Topology {
+                rig: None,
+                pod: None,
+                loose: true,
+                view: Some("health".into())
+            }
+        );
+        let text = serde_json::to_string(&loose).unwrap();
+        assert_eq!(text, r#"{"kind":"topology","loose":true,"view":"health"}"#);
     }
 
     #[test]

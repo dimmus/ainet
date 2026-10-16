@@ -28,6 +28,7 @@
       "cmd-shift-c": "workspace::OpenComms",
       "cmd-shift-i": "workspace::OpenInbox",
       "ctrl-t": "workspace::OpenMap",
+      "cmd-shift-t": "workspace::OpenTopology",
       "cmd-p": "fleet::ToggleSwitcher",
       "ctrl-o": "fleet::Operator",
       "ctrl-g": "fleet::TileAll",
@@ -163,6 +164,25 @@
     "context": "Terminals",
     "bindings": {
       "cmd-alt-g": "terminals::FocusGrid"
+    }
+  },
+  {
+    // The Topology view itself, not its filter or its graph (whose keys
+    // are their own): / filters the seats, tab and the digits switch its
+    // tabs, ctrl-r shows the next rig; the list keys and enter (the
+    // menu::* ones) move through the table or Recent and open the row.
+    "context": "Topology && view",
+    "bindings": {
+      "/": "topology::FocusFilter",
+      "tab": "topology::NextView",
+      "shift-tab": "topology::PreviousView",
+      "1": "topology::ShowTable",
+      "2": "topology::ShowRecent",
+      "3": "topology::ShowOverview",
+      "4": "topology::ShowGraph",
+      "5": "topology::ShowHealth",
+      "ctrl-r": "topology::CycleRig",
+      "shift-f10": "fleet::OpenContextMenu"
     }
   },
   {

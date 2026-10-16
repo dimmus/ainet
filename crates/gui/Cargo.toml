@@ -26,6 +26,9 @@ ainet-model = { path = "../model" }
 anyhow = "1"
 clap = { version = "4.6", features = ["derive"] }
 futures = "0.3"
+# This machine's name, for the Topology view's host (already in the tree,
+# through x11rb).
+gethostname = "1"
 # Bundled themes, icons, fonts and keymaps, embedded in debug builds too so
 # the binary is always self-contained.
 rust-embed = { version = "8.11", features = ["debug-embed", "include-exclude"] }

@@ -12,6 +12,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use ainet_model::topology::Scope;
 use gpui::{Axis, Entity, Focusable, Subscription, Task, point};
 use ui::prelude::*;
 
@@ -28,6 +29,7 @@ use crate::persistence::{
 };
 use crate::terminal_item::TerminalItem;
 use crate::terminals::TerminalsItem;
+use crate::topology::{SubView, TopologyItem};
 
 /// How often the workspace is compared with what was saved.
 pub const SAVE_CHECK: Duration = Duration::from_millis(1000);
@@ -243,9 +245,11 @@ impl Workspace {
             saved.retain(&|item| match item {
                 SavedItem::Terminal { agent } => store.agents.get(agent).is_some_and(|a| a.state.is_live()),
                 SavedItem::Unknown => false,
-                SavedItem::Inbox | SavedItem::Comms | SavedItem::Map { .. } | SavedItem::Terminals { .. } => {
-                    true
-                }
+                SavedItem::Inbox
+                | SavedItem::Comms
+                | SavedItem::Map { .. }
+                | SavedItem::Terminals { .. }
+                | SavedItem::Topology { .. } => true,
             })
         };
         let Some(saved) = saved else { return };
@@ -351,6 +355,23 @@ impl Workspace {
                 let grid = cx.new(|cx| TerminalsItem::new(fleet, rig, window, cx));
                 grid.update(cx, |grid, cx| grid.set_fixed_cols(cols, cx));
                 Box::new(grid)
+            }
+            SavedItem::Topology {
+                rig,
+                pod,
+                loose,
+                view,
+            } => {
+                let scope = match (rig, pod) {
+                    (Some(rig), Some(pod)) => Some(Scope::Pod { rig, pod }),
+                    (Some(rig), None) => Some(Scope::Rig(rig)),
+                    (None, _) => loose.then_some(Scope::Loose),
+                };
+                let topology = cx.new(|cx| TopologyItem::new(fleet, scope, window, cx));
+                if let Some(view) = view.as_deref().and_then(SubView::from_name) {
+                    topology.update(cx, |t, cx| t.show_view(view, cx));
+                }
+                Box::new(topology)
             }
             SavedItem::Unknown => return None,
         })
@@ -574,6 +595,58 @@ mod tests {
         let history = workspace.read_with(cx, |w, cx| w.command_line().read(cx).history().to_vec());
         assert_eq!(history, ["/ps", "hello"], "the command line's lines");
         assert_eq!(selected(&workspace, cx), left.selected, "the same agent selected");
+    }
+
+    #[gpui::test]
+    async fn the_topology_view_comes_back_on_its_pod_and_tab(cx: &mut TestAppContext) {
+        init_test(cx);
+        let file = temp_file("topology");
+        let pod = Scope::Pod {
+            rig: "docs".into(),
+            pod: "dev".into(),
+        };
+        let left = {
+            let (workspace, cx) = open(cx, &file, demo);
+            let scope = pod.clone();
+            cx.update(|window, cx| {
+                workspace.update(cx, |w, cx| {
+                    let topology = w.open_topology(window, cx);
+                    topology.update(cx, |t, cx| {
+                        t.set_scope(scope, cx);
+                        t.show_view(SubView::Recent, cx);
+                    });
+                })
+            });
+            cx.run_until_parked();
+            workspace.update(cx, |w, cx| w.save_now(cx));
+            saved(&workspace, cx)
+        };
+        let Some(SavedMember::Pane { items, .. }) = &left.center else {
+            panic!("one pane: {:?}", left.center)
+        };
+        assert_eq!(
+            items,
+            &[SavedItem::Topology {
+                rig: Some("docs".into()),
+                pod: Some("dev".into()),
+                loose: false,
+                view: Some("recent".into())
+            }]
+        );
+        let (workspace, cx) = open(cx, &file, demo);
+        let topology = workspace.read_with(cx, |w, cx| {
+            w.active_pane()
+                .read(cx)
+                .active_item()
+                .and_then(|i| i.to_any().downcast::<TopologyItem>().ok())
+                .expect("the Topology view is back")
+        });
+        topology.read_with(cx, |t, _| {
+            assert_eq!(t.scope(), Some(&pod));
+            assert_eq!(t.view(), SubView::Recent);
+            assert_eq!(t.shown().len(), 3, "the pod's seats");
+        });
+        assert_eq!(saved(&workspace, cx), left);
     }
 
     #[gpui::test]

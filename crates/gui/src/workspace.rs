@@ -13,6 +13,7 @@
 
 mod persist;
 
+use ainet_model::topology::Scope;
 use ainet_model::{AgentCommand, command};
 use gpui::{
     Bounds, DragMoveEvent, Entity, FocusHandle, Focusable, Pixels, PromptLevel, Subscription, WeakEntity,
@@ -26,10 +27,10 @@ use crate::actions::{
     ActivateNextItem, ActivateNextPane, ActivatePaneDown, ActivatePaneLeft, ActivatePaneRight,
     ActivatePaneUp, ActivatePreviousItem, ActivatePreviousPane, Allow, Always, Capture, CloseActiveItem,
     CloseAgent, CloseAllItems, CloseOtherItems, CloseWindow, Compose, Continue, Deny, MessageAgent,
-    NextWaiting, OpenComms, OpenInbox, OpenKeymap, OpenMap, OpenSettings, OpenTerminal, Operator, Relaunch,
-    ReleaseSeat, RemoveSeat, SelectNext, SelectPrev, ShowTranscript, SplitDown, SplitRight, TileAll,
-    ToggleBottomDock, ToggleCritterSize, ToggleLeftDock, ToggleRightDock, ToggleSwitcher, ToggleTypingGuard,
-    ToggleZoom, terminal as terminal_actions,
+    NextWaiting, OpenComms, OpenInbox, OpenKeymap, OpenMap, OpenSettings, OpenTerminal, OpenTopology,
+    Operator, Relaunch, ReleaseSeat, RemoveSeat, SelectNext, SelectPrev, ShowTranscript, SplitDown,
+    SplitRight, TileAll, ToggleBottomDock, ToggleCritterSize, ToggleLeftDock, ToggleRightDock,
+    ToggleSwitcher, ToggleTypingGuard, ToggleZoom, terminal as terminal_actions,
 };
 use crate::actions::{
     Down, Grow, Restore, Spawn, SwitchRig, Up, command_palette, tab_switcher, theme_selector,
@@ -66,6 +67,7 @@ use crate::terminals::TerminalsItem;
 use crate::theme_selector::ThemeSelector;
 use crate::title_bar::TitleBar;
 use crate::toast_layer::ToastLayer;
+use crate::topology::TopologyItem;
 use crate::up_modal::SpecPicker;
 use crate::{keymap, quit};
 
@@ -176,6 +178,9 @@ impl Workspace {
             View::Inbox => Box::new(cx.new(|cx| InboxItem::new(fleet.clone(), window, cx))),
             View::Comms => Box::new(cx.new(|cx| CommsItem::new(fleet.clone(), window, cx))),
             View::Map => Box::new(cx.new(|cx| MapItem::new(fleet.clone(), cx))),
+            View::Topology { rig } => {
+                Box::new(cx.new(|cx| TopologyItem::new(fleet.clone(), rig.map(Scope::Rig), window, cx)))
+            }
             View::Terminals { rig } => {
                 Box::new(cx.new(|cx| TerminalsItem::new(fleet.clone(), rig, window, cx)))
             }
@@ -615,6 +620,43 @@ impl Workspace {
         });
         cx.notify();
         map
+    }
+
+    /// Opens the Topology view and gives it the keyboard: activates its
+    /// tab where one is open (in any pane), else adds one, on the selected
+    /// agent's rig, to the active pane.
+    pub fn open_topology(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<TopologyItem> {
+        for pane in self.panes() {
+            let at = pane
+                .read(cx)
+                .items()
+                .position(|i| i.to_any().downcast::<TopologyItem>().is_ok());
+            if let Some(ix) = at {
+                self.active_pane = pane.clone();
+                pane.update(cx, |p, cx| p.activate_item(ix, true, window, cx));
+                return pane
+                    .read(cx)
+                    .active_item()
+                    .and_then(|i| i.to_any().downcast::<TopologyItem>().ok())
+                    .expect("just activated");
+            }
+        }
+        let fleet = self.fleet.clone();
+        let topology = cx.new(|cx| TopologyItem::new(fleet, None, window, cx));
+        self.active_pane.update(cx, |p, cx| {
+            p.add_item(Box::new(topology.clone()), true, true, window, cx)
+        });
+        cx.notify();
+        topology
+    }
+
+    /// Opens the Topology view on `rig` (as it is, for `None`):
+    /// `--view topology:<rig>`, `/view topology:<rig>`.
+    pub fn show_topology(&mut self, rig: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        let topology = self.open_topology(window, cx);
+        if let Some(rig) = rig {
+            topology.update(cx, |t, cx| t.set_scope(Scope::Rig(rig), cx));
+        }
     }
 
     /// Opens the Inbox and gives it the keyboard: activates its tab where
@@ -1183,6 +1225,9 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &Deny, window, cx| this.answer_from_outside(window, cx)))
             .on_action(cx.listener(|this, _: &OpenMap, window, cx| {
                 this.open_map(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &OpenTopology, window, cx| {
+                this.open_topology(window, cx);
             }))
             // Pane actions with the keyboard outside the panes.
             .on_action(cx.listener(|this, _: &SplitRight, window, cx| {

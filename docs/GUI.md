@@ -10,7 +10,7 @@ built by, and the reasons behind it, are in [GUI-PLAN.md](GUI-PLAN.md).
 Contents: [the pin](#the-pin) · [a workspace of its own](#a-workspace-of-its-own) ·
 [the workspace pieces](#the-workspace-pieces) · [Fleet and Agent panels](#the-fleet-and-agent-panels) ·
 [terminals](#the-terminal) · [the Terminals grid](#the-terminals-grid) ·
-[the command line](#the-command-line) ·
+[the command line](#the-command-line) · [the Topology view](#the-topology-view) ·
 [the Inbox](#the-inbox) · [Comms](#comms) ·
 [the bottom dock](#the-bottom-dock-and-reports) · [the Map](#the-map) ·
 [palette and modals](#the-command-palette-pickers-and-modals) ·
@@ -153,7 +153,7 @@ Keys (Linux; macOS has the `cmd` equivalents), in the keymaps:
 | `ctrl-alt-left/right/up/down` | the pane in that direction (Zed's are `ctrl-k` chords, which a terminal needs); in the Terminals grid, the tile that way first |
 | `shift-escape` | zoom the active pane, or put it back |
 | `ctrl-b`, `ctrl-alt-b`, `ctrl-j` | left, right, bottom dock |
-| `ctrl-shift-c`, `ctrl-shift-i`, `ctrl-t` | Comms, Inbox, Map tabs |
+| `ctrl-shift-c`, `ctrl-shift-i`, `ctrl-t`, `ctrl-shift-t` | Comms, Inbox, Map, Topology tabs |
 | `ctrl-y`, `ctrl-a`, `ctrl-n` | allow, always allow, deny (outside the Inbox: open it on the oldest request) |
 | `ctrl-p` | the agent switcher |
 | `ctrl-shift-p` | the command palette |
@@ -665,6 +665,109 @@ commands_starting, complete_command, complete_line}` (every listed
 command understood by `command::parse`, by name, its usage the one a
 usage error gives).
 
+## The Topology view
+
+`TopologyItem` (`topology.rs`) is OpenRig's TUI topology as a tab, opened
+by `workspace::OpenTopology` (`ctrl-shift-t`, `cmd-shift-t` on macOS; the
+palette lists it as "workspace: open topology"), `--view topology` or
+`--view topology:RIG`, and `/view topology` or `/view topology:RIG` in
+the palette, Comms or the command line (a rig that is not there is said,
+as an error). An open one is activated. It starts on the selected
+agent's rig, else the first rig, else the loose agents; the tab reads
+"Topology · docs".
+
+Left, the **explorer**: TOPOLOGY, this host (`gethostname`), each rig
+(its status dot, running/seats), its pods in the order the rig lists
+their seats (seat counts; the tooltip says how many run) and, when there
+are any, the loose agents (live/all). A click on a rig, pod or the loose
+agents shows it on the right (`ctrl-r` goes round the rigs and the loose
+agents); the root and the host choose nothing.
+
+Right, five tabs (Zed's `ToggleButtonGroup`), with the scope's status
+and name beside them:
+
+- **Table**: Zed's `Table` (virtualised) of the seats grouped by pod, the
+  pod's name on its first row and a line above each pod after the first:
+  Pod, Seat (the member, in its agent's colour), RT (`cl`, `cx`, `sh`),
+  Model, Ctx (context in use, or `—`), State (the agent's, coloured as in
+  the Fleet; a seat with no agent running shows the seat's status:
+  stopped, failed, pending), Q (open queue items owned by the seat or
+  addressed to it), Work (its item in progress; the tooltip has the
+  summary), Now (its task, else its last tool). Loose agents are rows of
+  their own, oldest first. Above, the filter (`/`): every word must be in
+  the row's seat, pod, address, model, runtime or state, any case; enter
+  gives the table the keyboard, escape clears the filter and then leaves
+  it, and up and down move through the table while you type. Below, the
+  summary, OpenRig's words, over all the scope's rows: "5 seats · 3
+  working · 1 need attention · 4 open rows" (needing attention: needs
+  you, failed, or a request waiting on you; open rows: the seats' open
+  queue items, each once), with "· N shown" while filtering. A click
+  selects a row and its agent (the Fleet and Agent panels follow); enter
+  or a double click opens the agent's terminal (`fleet::OpenTerminal`; an
+  empty seat says so); a right click (or `shift-f10`) gives the Fleet's
+  agent menu (`fleet_panel::agent_menu`, now shared).
+- **Recent**: the queue's recorded changes for the scope, oldest to
+  newest: when, `#n`, who, the state after it (the Queue panel's chips),
+  the note and the item's summary, the item. Each item's creation (ainetd
+  does not note it; the demo does), then each note (ainetd notes every
+  change of state); an item whose state moved without a note gets one
+  change more at its last update, so the list ends where each item is.
+  The newest is selected; enter or a double click shows the item in full
+  as a report (`QueueShow`, as the Queue panel's Show).
+- **Overview**: the rig's status and summary, spec file (or none), root,
+  age, seats running of seats in pods, rows per state, edges, open queue
+  items; for the loose agents, how many live.
+- **Graph**: the Map of the scope alone (`MapItem::set_scope`, through
+  `map::layout_where`), made the first time it is shown and following the
+  scope; its keys and mouse are the Map's.
+- **Health**: the checks it makes, listed first (seats without a running
+  agent, failed agents, requests waiting on you, working agents with no
+  hook event for 5 minutes, typing guards on and messages held), then
+  what they found, worst first, or "No findings from these checks." It
+  never says more than that.
+
+Everything shown is `ainet_model::topology`, pure and tested: `tree`,
+`rows` and `SeatRow` (its cells, `matches`, `needs_attention`),
+`filtered`, `summary` (and its words), `changes`, `overview`, `health`
+and `CHECKS`, `Scope` (`admits`, `exists`, `title`), `default_scope` and
+`next_scope`. The view keeps its rows in step with the fleet; saved as
+`{ "kind": "topology", "rig": …, "pod": …, "loose": true, "view": … }`
+(each left out when unset or the table).
+
+Keys (contexts `Topology`, and `Topology && view` only while the view
+itself, not its filter or its graph, has the keyboard):
+
+| Keys | Where | Action |
+|---|---|---|
+| `ctrl-shift-t` (`cmd-shift-t` on macOS) | anywhere | `workspace::OpenTopology` |
+| `/` | the view | `topology::FocusFilter` |
+| `tab`, `shift-tab` | the view | `topology::NextView`, `PreviousView` |
+| `1` … `5` | the view | `topology::ShowTable`, `ShowRecent`, `ShowOverview`, `ShowGraph`, `ShowHealth` |
+| `ctrl-r` | the view | `topology::CycleRig` |
+| `up`, `down`, `home`, `end` | the view, the filter | the table's or Recent's selection (`menu::*`) |
+| `enter` | the view | the row's terminal; on Recent, the item in full |
+| `enter`, `escape` | the filter | back to the table; clear, then back |
+| `shift-f10` | the view | the agent menu (`fleet::OpenContextMenu`) |
+
+Tests: in `ainet-model`, the demo's tree, the docs rig's rows and their
+cells by pod, an empty seat as a stopped row still owed its item, the
+filter, the summary and its words, Recent (the demo's creations and
+moves, a claim noted, a move without a note, an item ainetd made, a pod
+and a rig with no queue), the overview, health (only the waiting request
+on the demo; a stopped seat, a failed agent, a quiet one and a guard),
+the scopes and `map::layout_where`. Headless (`topology.rs`): the demo's
+tree drawn and the docs table grouped by pod with its summary and tab
+title, one tab however often opened; the tree and `ctrl-r` choosing the
+scope; the filter narrowing the rows while digits, `/`, tab and `ctrl-r`
+stay its letters, enter and escape; enter and a double click opening the
+row's terminal with the Fleet's selection following; the right-click
+menu sending the Fleet's request, `shift-f10` and escape; the tabs by
+keys and actions, the Graph's map of the rig following the scope, Health
+clean on infra and not on docs; Recent's seven changes, enter showing an
+item as a report, a click and `home`; `--view topology:infra`, `/view
+topology:docs` and a wrong rig; an empty fleet. Also `persist.rs` (back
+on its pod and tab) and `persistence.rs` (its saved form).
+
 ## The Inbox
 
 `InboxItem` (`inbox.rs`) is the TUI's Inbox as a tab, opened by
@@ -967,7 +1070,7 @@ All in the modal layer, on the picker and the text field above:
 | File | What | After Zed's |
 |---|---|---|
 | `command_palette.rs` | `CommandPalette` (`ctrl-shift-p`): every action available where the keyboard was (`Window::available_actions`; `menu::*` left out), named in words as Zed's (`humanize`: `workspace::ToggleLeftDock` is "workspace: toggle left dock"), with its key binding there (`ui::KeyBinding::for_action_in`), fuzzy filtered (`normalize` lets `workspace::toggle_left` find it too), the ones run from it lately first (kept with the workspace). Picking one goes back where the keyboard was and runs it there. A line starting with `/`, or one that matches no action, is a console command: `commands::parse` (`command::parse`, no rig in view, so the selected agent's rig) says in its row what it does (`launching docs`) or what is wrong (the usage, `no command /x`); enter runs it, or stays open while it is wrong | `command_palette` |
-| `commands.rs` | the console's command language for the app, shared with Comms and the command line (`run` returns what was wrong, also shown as a toast): requests through the fleet, the console's own commands (`/view`, `/allow`, `/quit`, …) as the app's actions. `/answer <text>` answers the question waiting on you (`commands::question`: the selected agent's first, else the oldest), as the TUI's answers the one selected. `/view fleet` focuses the Fleet, `/view terminals` opens the Terminals grid on every rig, `/view rig:<name>` and `/view <rig>` on that rig (`Workspace::show_rig_terminals`), whichever agent is selected; another name says there is no such view or rig | — |
+| `commands.rs` | the console's command language for the app, shared with Comms and the command line (`run` returns what was wrong, also shown as a toast): requests through the fleet, the console's own commands (`/view`, `/allow`, `/quit`, …) as the app's actions. `/answer <text>` answers the question waiting on you (`commands::question`: the selected agent's first, else the oldest), as the TUI's answers the one selected. `/view fleet` focuses the Fleet, `/view terminals` opens the Terminals grid on every rig, `/view rig:<name>` and `/view <rig>` on that rig (`Workspace::show_rig_terminals`), whichever agent is selected; `/view topology` and `/view topology:<rig>` the Topology view (`Workspace::show_topology`); another name says there is no such view or rig | — |
 | `up_modal.rs` | `fleet::Up`: `SpecPicker` over the library (`Request::Specs`, through the new `FleetModel::list`), with what is typed offered as a source of its own (a spec file's path, or a name); then `UpModal`: working directory (Browse… asks the system for a folder, `cx.prompt_for_paths`), rig name, fresh seats (`dev.impl, dev.review`). **Plan** shows what would launch (`UpSpec { plan: true }`, `FleetModel::ask`) in the form; **Launch** (or enter in the last field) sends `Up`. Both are `command::up` | `file_finder`, `ui::Modal` |
 | `rig_modals.rs` | `fleet::SwitchRig` (the title bar's rig switcher, which names the selected agent's rig, `title_bar::rig_label`): a `RigPicker`; picking a rig selects its first live agent in the Fleet's order (`rig_modals::first_agent`), so the Fleet, Agent panel, Chatroom and the rig commands follow it. `fleet::Restore`: a `RigPicker`, then `RestoreModal`: the snapshots (`Request::SnapshotList`), the latest by default, picked by click or `up`/`down`; the rig's seats as checkboxes to start fresh; enter restores (`command::restore`). `fleet::Down`: `DownModal` asks about the selected agent's rig (or the only one; else a rig picker first), with **Take a snapshot first** checked; enter takes it down (`command::down`) | — |
 | `seat_modals.rs` | `fleet::Spawn` (`s` in the Fleet): `SpawnModal`, the runtime (claude-code, codex, terminal), working directory (Browse…) and role, as `/spawn` (`command::spawn`). `fleet::Grow`: `GrowModal` for the selected agent's rig (else a rig picker): pod, member, runtime (or the rig's default), role, as `/grow` (`command::grow`); it says so when the pod or member is missing | — |
@@ -1068,7 +1171,8 @@ one workspace per daemon socket and one for the demo:
   selected agent; the Map's zoom and pan (with its tab); the palette's recent actions (the
   last 50) and the command line's lines (the last 50). Terminals are saved by agent id, the Inbox, Comms and the Map
   as themselves, the Terminals grid with its rig filter and the columns
-  asked for; reports and the stand-in tab are not saved.
+  asked for, the Topology view with its rig, pod or loose agents and its
+  tab; reports and the stand-in tab are not saved.
 - **Restoring.** At start the window opens with the saved bounds (at
   least its smallest size; one left on a display that is gone is centred
   on the main display), then the docks, sizes, folds and recent actions
@@ -1195,7 +1299,7 @@ the status bar (`themes:`).
 
 Keys: `crates/gui/assets/keymaps/default-{linux,macos}.json`, in Zed's
 format, with the contexts `Workspace`, `FleetPanel`, `Terminal`, `Inbox`,
-`Comms`, `CommsCompose`, `CommandLine`, `QueuePanel`, `Map`, `Terminals` (with `grid`), `Picker`, `TabSwitcher`, `Form` and `TextInput` (see "The workspace pieces" for the
+`Comms`, `CommsCompose`, `CommandLine`, `QueuePanel`, `Map`, `Terminals` (with `grid`), `Topology` (with `view`), `Picker`, `TabSwitcher`, `Form` and `TextInput` (see "The workspace pieces" for the
 pane, dock and text keys). `~/.config/ainet/keymap.json` adds to them and
 overrides them (`null` unbinds), and reloads on save; bindings it cannot
 read are listed in the status bar and the rest apply. `ctrl-alt-,` opens
@@ -1252,6 +1356,7 @@ module; modules without tests of their own are covered where named):
 | `agent_panel.rs` | 2 | 1 | the selected agent, the gauge, the sparkline |
 | `terminal_item.rs`, `terminal_element.rs`, `terminal_layout.rs`, `terminal_input.rs` | 16 | 12 | layout, colours, selections, row cache and keys; key encoding; the screen drawn, focus and `Interact`, keys past the workspace, one `Resize`, scrollback, copy and paste, the right-click menu by its keys (Paste, Send Ctrl-C, Copy, Clear Selection, Message…, Zoom; escape types nothing), redrawing only what changed |
 | `terminals.rs` | | 11 | the Terminals grid: tiles in the TUI's order, the rig filter, columns, a click and `ctrl-alt` arrows giving tiles the keys with `Interact`, zoom, a hidden grid fetching nothing, tiles following agents, the size rule, `OpenTerminal` into a tile, views opening it |
+| `topology.rs` | | 9 | the Topology view: the tree and the docs table by pod, scopes by click and `ctrl-r`, the filter keeping its letters, enter and a double click opening terminals, the agent menu, the tabs, the Graph, Health, Recent showing items, views and commands opening it, an empty fleet |
 | `command_line.rs` | 4 | 6 | the history, lines as the TUI's and their previews; each kind of line sent through the demo link, errors in the line and as toasts, completion, recall, `ctrl-;` and escape, letters never reaching other views' keys, the setting |
 | `inbox.rs` | 4 | 8 | order, detail styles, picks, the glow; the answer keys, cards by selection and click, the Allow, Always and Deny buttons answering their own card, questions, `ctrl-shift-y`, history, alerts |
 | `comms.rs`, `commands.rs` | 6 | 6 | rows, splices, sticking to the end, mentions, code; lines sent as the TUI's, completion, keys, threads, clicks |
@@ -1271,8 +1376,9 @@ system shows (shaping, fonts).
 demo workspace offscreen with GPUI's own renderer
 (`gpui::HeadlessAppContext`, `gpui_platform::current_headless_renderer`,
 which is wgpu without a surface, and the Linux app's cosmic-text text
-system) and writes `workspace.png`, `terminal.png`, `inbox.png` and
-`map.png` into `target/screenshots/`:
+system) and writes `workspace.png`, `terminal.png`, `inbox.png`,
+`map.png`, `topology.png`, `topology-recent.png`, `topology-overview.png`
+and `topology-health.png` into `target/screenshots/`:
 
 ```sh
 just screenshot-gui   # cargo test --manifest-path crates/gui/Cargo.toml screenshot -- --ignored --nocapture
@@ -1325,6 +1431,14 @@ Collected from the plan's phase notes; none of these is started.
   workspace, not shared between windows; Comms' own meaning of a line
   (answering the selected entry) is the Comms compose box's, not the
   line's.
+- **Topology view:** OpenRig's other explorer sections (specs,
+  projects, terminals, feed, system) are not there; one host only (the
+  one ainetd runs on); columns cannot be resized or sorted; Recent is
+  built from the queue items' notes (what ainetd keeps), not a log of
+  its own, so a change ainetd made without a note shows only as where
+  the item is now; Health's quiet check relies on the hook counts
+  ainetd reports per agent (an agent without them is never called quiet); the explorer is not folded or
+  driven by keys.
 - **Inbox:** Markdown beyond headings,
   lists and fenced code, keyboard focus on single buttons.
 - **Comms:** a right-click menu on messages, a completion list while

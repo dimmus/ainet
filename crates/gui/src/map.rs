@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 
 use ainet_core::{Agent, AgentState, EdgeKind, Message};
 use ainet_model::map::{self as layout, Layout};
+use ainet_model::topology::Scope;
 use gpui::{
     Action, AnyElement, AvailableSpace, BorderStyle, Bounds, ClickEvent, Entity, EventEmitter, FocusHandle,
     Focusable, FontWeight, Hsla, MouseButton, MouseDownEvent, MouseMoveEvent, PathBuilder, Point,
@@ -209,6 +210,9 @@ struct Scene {
 
 pub struct MapItem {
     fleet: Entity<FleetModel>,
+    /// Only this rig or pod (the Topology view's Graph); `None`: the whole
+    /// fleet.
+    scope: Option<Scope>,
     focus_handle: FocusHandle,
     camera: Camera,
     hovered: Option<String>,
@@ -239,6 +243,7 @@ impl MapItem {
         ];
         let mut map = MapItem {
             fleet,
+            scope: None,
             focus_handle: cx.focus_handle(),
             camera: Camera::default(),
             hovered: None,
@@ -250,6 +255,21 @@ impl MapItem {
         };
         map.watch(cx);
         map
+    }
+
+    /// Shows only `scope`'s agents (the whole fleet for `None`), fitted
+    /// anew.
+    pub fn set_scope(&mut self, scope: Option<Scope>, cx: &mut Context<Self>) {
+        if self.scope != scope {
+            self.scope = scope;
+            self.camera = Camera::default();
+            cx.notify();
+        }
+    }
+
+    /// Whether `agent` is drawn: live, and in the scope if there is one.
+    fn on_map(&self, store: &ainet_model::Store, agent: &Agent) -> bool {
+        agent.state.is_live() && self.scope.as_ref().is_none_or(|s| s.admits(store, agent))
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -364,7 +384,15 @@ impl MapItem {
 
         let fleet = self.fleet.read(cx);
         let (store, tick) = (&fleet.store, fleet.tick());
-        let map = layout::layout(store, area.size.width.as_f32(), area.size.height.as_f32());
+        let map = match &self.scope {
+            Some(scope) => layout::layout_where(
+                store,
+                |a| scope.admits(store, a),
+                area.size.width.as_f32(),
+                area.size.height.as_f32(),
+            ),
+            None => layout::layout(store, area.size.width.as_f32(), area.size.height.as_f32()),
+        };
         let agents: Vec<Agent> = map
             .nodes
             .iter()
@@ -880,13 +908,12 @@ impl Render for MapItem {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
         let (fill, border) = (colors.panel_background, colors.border_variant);
-        let empty = !self
-            .fleet
-            .read(cx)
-            .store
-            .agents
-            .values()
-            .any(|a| a.state.is_live());
+        let store = &self.fleet.read(cx).store;
+        let empty = !store.agents.values().any(|a| self.on_map(store, a));
+        let nobody = match &self.scope {
+            Some(scope) => format!("Nobody is running in {}", scope.title()),
+            None => "Nobody is running yet".into(),
+        };
         let view = cx.entity();
         let zoom = self.camera.zoom;
         v_flex()
@@ -931,7 +958,7 @@ impl Render for MapItem {
                                 .items_center()
                                 .justify_center()
                                 .gap_1()
-                                .child(Label::new("Nobody is running yet").color(Color::Muted))
+                                .child(Label::new(nobody).color(Color::Muted))
                                 .child(
                                     Label::new("Rigs and agents show here once they start")
                                         .size(LabelSize::Small)

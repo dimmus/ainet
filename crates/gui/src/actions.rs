@@ -39,6 +39,8 @@ actions!(
         OpenInbox,
         /// Opens the fleet map as a tab.
         OpenMap,
+        /// Opens the Topology view as a tab: the rigs and their seats.
+        OpenTopology,
         /// Makes the active pane fill the window, or puts it back.
         ToggleZoom,
         /// Moves the keyboard to the next pane.
@@ -202,6 +204,37 @@ actions!(
         FocusGrid,
     ]
 );
+
+/// The Topology view's actions, in a module of their own:
+/// `topology::CycleRig` and `terminals::CycleRig` would otherwise clash.
+pub mod topology {
+    use gpui::actions;
+
+    actions!(
+        topology,
+        [
+            /// Shows the seats of the rig as a table.
+            ShowTable,
+            /// Shows the rig's queue changes, oldest first.
+            ShowRecent,
+            /// Shows the rig in a few lines.
+            ShowOverview,
+            /// Shows who directs whom in the rig, as the Map draws it.
+            ShowGraph,
+            /// Shows what the health checks found in the rig.
+            ShowHealth,
+            /// Shows the next of the view's tabs.
+            NextView,
+            /// Shows the previous of the view's tabs.
+            PreviousView,
+            /// Gives the table's filter the keyboard.
+            FocusFilter,
+            /// Shows the next rig, then the loose agents, then the first
+            /// rig again.
+            CycleRig,
+        ]
+    );
+}
 
 actions!(
     map,

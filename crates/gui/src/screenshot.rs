@@ -13,6 +13,7 @@ use std::time::Duration;
 use gpui::{AppContext, HeadlessAppContext, WindowHandle, px, size};
 
 use crate::fleet::FleetModel;
+use crate::topology::SubView;
 use crate::workspace::Workspace;
 
 /// What a picture shows, opened in the workspace.
@@ -63,7 +64,7 @@ fn the_demo_workspace() {
     std::fs::create_dir_all(out_dir()).expect("target/screenshots");
 
     capture(&mut cx, window, "workspace");
-    let views: [(&str, OpenView); 3] = [
+    let views: [(&str, OpenView); 7] = [
         ("terminal", |w, window, cx| {
             let selected = w.fleet().read(cx).store.selected.clone();
             if let Some(id) = selected {
@@ -75,6 +76,21 @@ fn the_demo_workspace() {
         }),
         ("map", |w, window, cx| {
             w.open_map(window, cx);
+        }),
+        ("topology", |w, window, cx| {
+            w.open_topology(window, cx);
+        }),
+        ("topology-recent", |w, window, cx| {
+            let t = w.open_topology(window, cx);
+            t.update(cx, |t, cx| t.show_view(SubView::Recent, cx));
+        }),
+        ("topology-overview", |w, window, cx| {
+            let t = w.open_topology(window, cx);
+            t.update(cx, |t, cx| t.show_view(SubView::Overview, cx));
+        }),
+        ("topology-health", |w, window, cx| {
+            let t = w.open_topology(window, cx);
+            t.update(cx, |t, cx| t.show_view(SubView::Health, cx));
         }),
     ];
     for (name, open) in views {

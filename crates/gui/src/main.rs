@@ -57,6 +57,7 @@ mod theme_selector;
 mod themes;
 mod title_bar;
 mod toast_layer;
+mod topology;
 mod up_modal;
 mod watch;
 mod workspace;

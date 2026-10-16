@@ -64,6 +64,17 @@ pub fn run(fleet: &Entity<FleetModel>, cmd: Command, window: &mut Window, cx: &m
             Ok(View::Comms) => Box::new(OpenComms),
             Ok(View::Inbox) => Box::new(OpenInbox),
             Ok(View::Map) => Box::new(OpenMap),
+            Ok(View::Topology { rig }) => {
+                if let Some(name) = rig
+                    .as_ref()
+                    .filter(|r| !fleet.read(cx).store.rigs.contains_key(*r))
+                {
+                    let text = format!("no rig named {name}");
+                    fleet.update(cx, |fleet, cx| fleet.show(text.clone(), true, cx));
+                    return Some(text);
+                }
+                return show_topology(rig, window, cx);
+            }
             // The Terminals grid, of every rig or of the one named.
             Ok(View::Terminals { rig }) => return show_terminals(rig, window, cx),
             Ok(View::Named(name)) if fleet.read(cx).store.rigs.contains_key(&name) => {
@@ -89,6 +100,16 @@ fn show_terminals(rig: Option<String>, window: &mut Window, cx: &mut App) -> Opt
     let workspace = window.root::<Workspace>().flatten()?;
     window.defer(cx, move |window, cx| {
         workspace.update(cx, |w, cx| w.show_rig_terminals(rig, window, cx));
+    });
+    None
+}
+
+/// Opens the Topology view on `rig` (the one it shows, for `None`) in the
+/// window's workspace, once the view that ran the command is done.
+fn show_topology(rig: Option<String>, window: &mut Window, cx: &mut App) -> Option<String> {
+    let workspace = window.root::<Workspace>().flatten()?;
+    window.defer(cx, move |window, cx| {
+        workspace.update(cx, |w, cx| w.show_topology(rig, window, cx));
     });
     None
 }

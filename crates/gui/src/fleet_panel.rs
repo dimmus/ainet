@@ -43,6 +43,36 @@ const INDENT: Pixels = px(16.);
 /// Where the indent guides sit, under the disclosure or critter column.
 const GUIDE_OFFSET: Pixels = px(14.);
 
+/// The selected agent's menu (`None` with nobody selected), as the Fleet
+/// shows it and the Topology view's table too. Its entries are the
+/// workspace's actions on the selected agent, dispatched from `focus`.
+pub fn agent_menu(
+    fleet: &Entity<FleetModel>,
+    focus: FocusHandle,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<Entity<ContextMenu>> {
+    let store = &fleet.read(cx).store;
+    let agent = store.selected_agent()?;
+    let seated = agent.seat.is_some();
+    let guarded = store.seat_of(agent).is_some_and(|s| s.typing_guard);
+    Some(ContextMenu::build(window, cx, move |menu, _, _| {
+        menu.context(focus)
+            .action("Message…", MessageAgent.boxed_clone())
+            .action("Open Terminal", OpenTerminal.boxed_clone())
+            .action("Show Transcript", ShowTranscript.boxed_clone())
+            .action("Capture Screen", Capture.boxed_clone())
+            .separator()
+            .action_disabled_when(!seated, "Relaunch", Relaunch.boxed_clone())
+            .action_disabled_when(!seated, "Continue", Continue.boxed_clone())
+            .action_checked_with_disabled("Typing Guard", ToggleTypingGuard.boxed_clone(), guarded, !seated)
+            .separator()
+            .action_disabled_when(!seated, "Release Seat", ReleaseSeat.boxed_clone())
+            .action_disabled_when(!seated, "Remove Seat…", RemoveSeat.boxed_clone())
+            .action("Close Agent…", CloseAgent.boxed_clone())
+    }))
+}
+
 /// A row the panel shows: a Store row, and how deep in the tree it is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Entry {
@@ -243,33 +273,9 @@ impl FleetPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let store = &self.fleet.read(cx).store;
-        let Some(agent) = store.selected_agent() else {
+        let Some(menu) = agent_menu(&self.fleet, self.focus_handle.clone(), window, cx) else {
             return;
         };
-        let seated = agent.seat.is_some();
-        let guarded = store.seat_of(agent).is_some_and(|s| s.typing_guard);
-        let focus = self.focus_handle.clone();
-        let menu = ContextMenu::build(window, cx, move |menu, _, _| {
-            menu.context(focus)
-                .action("Message…", MessageAgent.boxed_clone())
-                .action("Open Terminal", OpenTerminal.boxed_clone())
-                .action("Show Transcript", ShowTranscript.boxed_clone())
-                .action("Capture Screen", Capture.boxed_clone())
-                .separator()
-                .action_disabled_when(!seated, "Relaunch", Relaunch.boxed_clone())
-                .action_disabled_when(!seated, "Continue", Continue.boxed_clone())
-                .action_checked_with_disabled(
-                    "Typing Guard",
-                    ToggleTypingGuard.boxed_clone(),
-                    guarded,
-                    !seated,
-                )
-                .separator()
-                .action_disabled_when(!seated, "Release Seat", ReleaseSeat.boxed_clone())
-                .action_disabled_when(!seated, "Remove Seat…", RemoveSeat.boxed_clone())
-                .action("Close Agent…", CloseAgent.boxed_clone())
-        });
         window.focus(&menu.focus_handle(cx), cx);
         let dismissed = cx.subscribe_in(&menu, window, |this, menu, _: &DismissEvent, window, cx| {
             if menu.focus_handle(cx).contains_focused(window, cx) {

@@ -644,6 +644,23 @@ their usage (`command::COMMANDS`, checked against `command::parse`) and
 their completion (`complete_command`, `complete_line`); the TUI does not
 use them, so it behaves as before.
 
+Item 3, the Topology view (`topology.rs`, see GUI.md "The Topology
+view"): a tab (`ctrl-shift-t`, `--view topology[:RIG]`, `/view
+topology[:RIG]`) with an explorer tree on the left (TOPOLOGY, this host,
+rigs with their status, pods with seat counts, the loose agents) choosing
+what the right shows: Table (Zed's `Table` grouped by pod: pod, seat,
+RT, model, ctx, state, Q, work, now; a `/` filter; OpenRig's summary
+line; enter opens the terminal, a right click the Fleet's agent menu,
+now `fleet_panel::agent_menu`), Recent (the queue's changes from the
+items' notes, oldest first; enter shows the item as the Queue panel's
+Show), Overview, Graph (the Map of that rig or pod, `MapItem::set_scope`
+over the new `map::layout_where`) and Health (its checks named, then
+what they found, never more). The bare keys (`/`, `tab`, `1`–`5`,
+`ctrl-r`) live in `Topology && view`, only while the view itself has the
+keyboard. `ainet-model` gained `topology` (tree, rows, filter, summary,
+changes, overview, health, scopes), all tested; no protocol change, the
+TUI untouched.
+
 ## 6. Risks
 
 | Risk | Mitigation |
