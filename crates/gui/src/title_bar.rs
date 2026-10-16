@@ -6,7 +6,8 @@
 //! Inbox) and the connection.
 
 use gpui::{
-    Decorations, Entity, MouseButton, WeakEntity, WindowButton, WindowButtonLayout, WindowControlArea, svg,
+    Action, Decorations, Entity, MouseButton, WeakEntity, WindowButton, WindowButtonLayout,
+    WindowControlArea, svg,
 };
 use theme::{CLIENT_SIDE_DECORATION_BORDER, CLIENT_SIDE_DECORATION_ROUNDING};
 use ui::utils::platform_title_bar_height;
@@ -14,7 +15,7 @@ use ui::{Indicator, Tooltip, prelude::*};
 
 use ainet_model::Store;
 
-use crate::actions::SwitchRig;
+use crate::actions::{OpenComms, OpenConversation, OpenInbox, OpenMap, OpenTopology, SwitchRig, TileAll};
 use crate::fleet::{Connection, FleetModel};
 use crate::inbox::waiting_badge;
 use crate::quit;
@@ -49,6 +50,34 @@ pub fn connection_badge(connection: &Connection) -> (Color, &'static str) {
         Connection::Failed(_) => (Color::Error, "ainetd not running"),
         Connection::Incompatible(_) => (Color::Error, "ainetd incompatible"),
     }
+}
+
+/// The views the title bar opens, as (id, icon, tooltip, action): every
+/// view is one click away, not only behind its key or the palette.
+fn views() -> [(&'static str, IconName, &'static str, Box<dyn Action>); 6] {
+    [
+        (
+            "title-terminals",
+            IconName::Terminal,
+            "Terminals",
+            Box::new(TileAll),
+        ),
+        (
+            "title-topology",
+            IconName::GitGraph,
+            "Topology",
+            Box::new(OpenTopology),
+        ),
+        ("title-map", IconName::Blocks, "Map", Box::new(OpenMap)),
+        ("title-comms", IconName::Chat, "Comms", Box::new(OpenComms)),
+        (
+            "title-conversation",
+            IconName::Thread,
+            "Conversation of the Selected Agent",
+            Box::new(OpenConversation),
+        ),
+        ("title-inbox", IconName::Bell, "Inbox", Box::new(OpenInbox)),
+    ]
 }
 
 /// The rig switcher's words: the rig commands act on (the selected
@@ -109,7 +138,24 @@ impl Render for TitleBar {
                                     workspace.update(cx, |w, cx| w.rig_action(RigAction::Select, window, cx));
                             }),
                     )
-            });
+            })
+            .child(
+                // Not a window drag: these open the views.
+                h_flex()
+                    .gap_0p5()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .children(views().into_iter().map(|(id, icon, title, action)| {
+                        div().debug_selector(move || id.to_uppercase()).child(
+                            IconButton::new(id, icon)
+                                .icon_size(IconSize::Small)
+                                .icon_color(Color::Muted)
+                                .tooltip(Tooltip::for_action_title(title, action.as_ref()))
+                                .on_click(move |_, window, cx| {
+                                    window.dispatch_action(action.boxed_clone(), cx)
+                                }),
+                        )
+                    })),
+            );
         let end = h_flex()
             .gap_3()
             .pr_2()

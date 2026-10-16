@@ -86,6 +86,10 @@ The patches live in the GUI's workspace only, so the console's build and
 - Client-side decorations and the title bar: ported from
   `workspace::client_side_decorations` and `platform_title_bar` (both pull
   in Zed's whole workspace, so they cannot be dependencies).
+  Next to the rig switcher, the title bar has a button per view
+  (Terminals, Topology, Map, Comms, the selected agent's Conversation,
+  Inbox; `title_bar::views`), each with its key in the tooltip, so no view
+  is reachable only by a key or the palette.
 - Assets: `crates/gui/src/assets.rs` embeds `crates/gui/assets` with
   `rust-embed` (also in debug builds, so the binary never reads the source
   tree; Zed's own `assets` crate reads its checkout in debug builds).
@@ -211,6 +215,19 @@ agent so the menu shows their bindings:
 | Release Seat | | `Release` (`ainet release`): the process runs on outside the rig |
 | Remove Seat… | | `RemoveSeat` (`/remove`), after asking |
 | Close Agent… | `delete` | `Close` (`/close`), after asking |
+
+A right click on a rig (DOCS, INFRA) opens the rig's own menu
+(`fleet_panel::rig_menu`), acting on that rig whatever is selected:
+
+| Menu entry | Does |
+|---|---|
+| Open Topology | the Topology view scoped to the rig (`Workspace::show_topology`) |
+| Show Terminals | the Terminals grid filtered to the rig |
+| Add Seat… | `GrowModal` for the rig |
+| Take Snapshot | `SnapshotCreate` (`/snapshot RIG`) |
+| Export as RigSpec | `Export` (`/export RIG`), shown as a report tab |
+| Restore… | `RestoreModal` for the rig |
+| Take Down… | `DownModal` for the rig: asks first, with a snapshot |
 
 `up`/`down` (or `j`/`k`, and `alt-up`/`alt-down` anywhere) move the
 selection, `left`/`right` fold and unfold the selected agent's rig. Seat
@@ -1416,7 +1433,7 @@ settings stay and the status bar says what is wrong. `ctrl-,` opens it
 | `theme` | `"Omarchy"` if installed, else `"Deepharness"` | a name, or `{ "mode": "system" \| "light" \| "dark", "light": "…", "dark": "…" }` as in Zed |
 | `ui_font_family`, `ui_font_size` | `".ZedSans"` (IBM Plex Sans), 16 | sizes are kept within 6–100 |
 | `ui_density` | `"default"` | `"compact"`, `"comfortable"` |
-| `terminal.font_family`, `.font_size`, `.line_height` | `".ZedMono"` (Lilex), 15, `"standard"` | `"comfortable"`, `"standard"` or `{ "custom": 1.4 }`, as in Zed |
+| `terminal.font_family`, `.font_size`, `.line_height` | `".ZedMono"` (Lilex), unset, `"standard"` | unset, the size follows the UI: `ui_font_size × 13/16`, 13 at the default 16 (Zed's 15 stood out beside ainet's small labels); `"comfortable"`, `"standard"` or `{ "custom": 1.4 }`, as in Zed |
 | `terminal.cursor_shape`, `.blinking` | `"block"`, `"on"` | `"bar"`, `"underline"`, `"hollow"`; `"off"`, `"terminal_controlled"` (still), as in Zed |
 | `fleet_panel.dock`, `.width` | `"left"`, 260 | the Agent panel takes the other side |
 | `critters.size` | `"large"` | `"small"`; `ctrl-e` toggles it |

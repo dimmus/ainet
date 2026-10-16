@@ -1114,8 +1114,9 @@ impl Item for ConversationItem {
             Loaded::Failed(_) => Color::Error,
             _ => Color::Muted,
         };
+        // Zed's agent thread icon: Comms has the chat bubbles.
         Some(
-            Icon::new(IconName::Chat)
+            Icon::new(IconName::Thread)
                 .size(IconSize::Small)
                 .color(color)
                 .into_any_element(),

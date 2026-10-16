@@ -36,7 +36,7 @@ pub const TEMPLATE: &str = r#"// ainet desktop settings. Every field is optional
   // "ui_font_family": ".ZedSans",
   // "ui_font_size": 16,
   // "ui_density": "default", // or "compact", "comfortable"
-  // "terminal": { "font_family": ".ZedMono", "font_size": 15, "line_height": "standard",
+  // "terminal": { "font_family": ".ZedMono", "font_size": 13, "line_height": "standard",
   //               "cursor_shape": "block", "blinking": "on" },
   // "fleet_panel": { "dock": "left", "width": 260 },
   // "critters": { "size": "large" },
@@ -135,8 +135,10 @@ impl ThemeSelection {
 pub struct TerminalSettings {
     /// ".ZedMono" is Lilex, bundled.
     pub font_family: SharedString,
-    /// In pixels, 6 to 100.
-    pub font_size: f32,
+    /// In pixels, 6 to 100. Unset, it follows the UI: 13 at the default
+    /// `ui_font_size` of 16, so terminals read like the text around them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_size: Option<f32>,
     /// The height of a line, as a ratio to the font size.
     pub line_height: LineHeight,
     /// The cursor of a focused terminal.
@@ -149,7 +151,7 @@ impl Default for TerminalSettings {
     fn default() -> Self {
         TerminalSettings {
             font_family: ".ZedMono".into(),
-            font_size: 15.,
+            font_size: None,
             line_height: LineHeight::Standard,
             cursor_shape: CursorShape::Block,
             blinking: Blinking::On,
@@ -265,7 +267,22 @@ pub fn parse(text: &str) -> Result<Settings, String> {
     Ok(settings.in_range())
 }
 
+/// The terminal's size against the UI's when settings.json does not set
+/// one. Zed's terminal takes its editor's 15 px, but ainet's UI is mostly
+/// small labels (14 and 12 px at the default 16), and monospace text at 15
+/// stood out beside them, most in the Terminals grid's tiles.
+const TERMINAL_SCALE: f32 = 13. / 16.;
+
 impl Settings {
+    /// The terminal's font size in pixels: `terminal.font_size`, else the
+    /// UI's scaled by [`TERMINAL_SCALE`] (13 at 16), whole pixels.
+    pub fn terminal_font_size(&self) -> f32 {
+        self.terminal
+            .font_size
+            .unwrap_or_else(|| (self.ui_font_size * TERMINAL_SCALE).round())
+            .clamp(MIN_FONT_SIZE, MAX_FONT_SIZE)
+    }
+
     fn in_range(mut self) -> Self {
         let size = |s: f32, default: f32| {
             if s.is_finite() {
@@ -276,7 +293,12 @@ impl Settings {
         };
         let defaults = Settings::default();
         self.ui_font_size = size(self.ui_font_size, defaults.ui_font_size);
-        self.terminal.font_size = size(self.terminal.font_size, defaults.terminal.font_size);
+        // A size that is not a number is as good as none: follow the UI.
+        self.terminal.font_size = self
+            .terminal
+            .font_size
+            .filter(|s| s.is_finite())
+            .map(|s| s.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE));
         if !self.fleet_panel.width.is_finite() {
             self.fleet_panel.width = defaults.fleet_panel.width;
         }
@@ -501,7 +523,7 @@ impl ThemeSettingsProvider for Provider {
     }
 
     fn buffer_font_size(&self, cx: &App) -> Pixels {
-        px(get(cx).terminal.font_size)
+        px(get(cx).terminal_font_size())
     }
 
     fn ui_density(&self, cx: &App) -> UiDensity {
@@ -546,7 +568,8 @@ mod tests {
         let s = Settings::default();
         assert_eq!(s.ui_font_family.as_ref(), ".ZedSans");
         assert_eq!(s.terminal.font_family.as_ref(), ".ZedMono");
-        assert_eq!((s.ui_font_size, s.terminal.font_size), (16., 15.));
+        assert_eq!((s.ui_font_size, s.terminal.font_size), (16., None));
+        assert_eq!(s.terminal_font_size(), 13., "follows the UI");
         assert_eq!(s.ui_density, UiDensity::Default);
         assert_eq!(
             s.fleet_panel,
@@ -560,6 +583,23 @@ mod tests {
         assert!(s.command_line);
         assert_eq!(parse("").unwrap(), s);
         assert_eq!(parse("  // nothing yet\n{}").unwrap(), s);
+    }
+
+    #[test]
+    fn the_terminal_follows_the_ui_unless_told() {
+        let at = |json: &str| parse(json).unwrap().terminal_font_size();
+        assert_eq!(at("{}"), 13.);
+        assert_eq!(at(r#"{ "ui_font_size": 20 }"#), 16.);
+        assert_eq!(at(r#"{ "ui_font_size": 12 }"#), 10.);
+        assert_eq!(
+            at(r#"{ "ui_font_size": 20, "terminal": { "font_size": 15 } }"#),
+            15.
+        );
+        assert_eq!(
+            at(r#"{ "ui_font_size": 6 }"#),
+            MIN_FONT_SIZE,
+            "never below the floor"
+        );
     }
 
     #[test]
@@ -672,7 +712,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             (s.ui_font_size, s.terminal.font_size),
-            (MIN_FONT_SIZE, MAX_FONT_SIZE)
+            (MIN_FONT_SIZE, Some(MAX_FONT_SIZE))
         );
         assert_eq!(s.fleet_panel.width, 120.);
         assert_eq!(LineHeight::Custom(0.5).ratio(), 1.);

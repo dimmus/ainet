@@ -37,7 +37,6 @@
       "$ref": "#/$defs/TerminalSettings",
       "default": {
         "font_family": ".ZedMono",
-        "font_size": 15.0,
         "line_height": "standard",
         "cursor_shape": "block",
         "blinking": "on"
@@ -142,10 +141,12 @@
           "default": ".ZedMono"
         },
         "font_size": {
-          "description": "In pixels, 6 to 100.",
-          "type": "number",
-          "format": "float",
-          "default": 15.0
+          "description": "In pixels, 6 to 100. Unset, it follows the UI: 13 at the default\n`ui_font_size` of 16, so terminals read like the text around them.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float"
         },
         "line_height": {
           "description": "The height of a line, as a ratio to the font size.",

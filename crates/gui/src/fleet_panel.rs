@@ -29,12 +29,15 @@ use crate::actions::{
     OpenTerminal, Relaunch, ReleaseSeat, RemoveSeat, SelectNext, SelectPrev, ShowTranscript,
     ToggleTypingGuard,
 };
+use crate::commands;
 use crate::critter::{Animation, Critter};
 use crate::dock::Panel;
 use crate::fleet::{FleetModel, Tick};
 use crate::panels::{header, state_color};
+use crate::rig_modals::RigAction;
 use crate::settings::{self, CritterSize};
 use crate::themes;
+use crate::workspace::Workspace;
 
 /// Every row is this tall, so the list can be virtualised (Zed's
 /// `uniform_list`): three lines for an agent.
@@ -73,6 +76,96 @@ pub fn agent_menu(
             .action_disabled_when(!seated, "Remove Seat…", RemoveSeat.boxed_clone())
             .action("Close Agent…", CloseAgent.boxed_clone())
     }))
+}
+
+/// What the menu of a rig (a right click on DOCS or INFRA) can do with
+/// it, each on that rig whatever is selected.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RigEntry {
+    Topology,
+    Terminals,
+    Grow,
+    Snapshot,
+    Export,
+    Restore,
+    Down,
+}
+
+impl RigEntry {
+    pub const ALL: [RigEntry; 7] = [
+        RigEntry::Topology,
+        RigEntry::Terminals,
+        RigEntry::Grow,
+        RigEntry::Snapshot,
+        RigEntry::Export,
+        RigEntry::Restore,
+        RigEntry::Down,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            RigEntry::Topology => "Open Topology",
+            RigEntry::Terminals => "Show Terminals",
+            RigEntry::Grow => "Add Seat…",
+            RigEntry::Snapshot => "Take Snapshot",
+            RigEntry::Export => "Export as RigSpec",
+            RigEntry::Restore => "Restore…",
+            RigEntry::Down => "Take Down…",
+        }
+    }
+
+    /// Does it to `rig` in the window's workspace: the views open on that
+    /// rig; Add Seat, Restore and Take Down go through their dialogs (Take
+    /// Down asks first, with a snapshot); a snapshot and the export are
+    /// the console's `/snapshot` and `/export` for that rig.
+    pub fn run(self, fleet: &Entity<FleetModel>, rig: String, window: &mut Window, cx: &mut App) {
+        let command = match self {
+            RigEntry::Snapshot => Some(format!("snapshot {rig}")),
+            RigEntry::Export => Some(format!("export {rig}")),
+            _ => None,
+        };
+        if let Some(line) = command {
+            let cmd = commands::parse(&fleet.read(cx).store, &line);
+            commands::run(fleet, cmd, window, cx);
+            return;
+        }
+        let Some(workspace) = window.root::<Workspace>().flatten() else {
+            return;
+        };
+        let fleet = fleet.clone();
+        workspace.update(cx, |w, cx| match self {
+            RigEntry::Topology => w.show_topology(Some(rig), window, cx),
+            RigEntry::Terminals => w.show_rig_terminals(Some(rig), window, cx),
+            RigEntry::Grow => RigAction::Grow.open(fleet, rig, w, window, cx),
+            RigEntry::Restore => RigAction::Restore.open(fleet, rig, w, window, cx),
+            RigEntry::Down => RigAction::Down.open(fleet, rig, w, window, cx),
+            RigEntry::Snapshot | RigEntry::Export => {}
+        });
+    }
+}
+
+/// The menu of rig `rig`: its views first, then what can be done to it.
+pub fn rig_menu(
+    fleet: &Entity<FleetModel>,
+    rig: &str,
+    focus: FocusHandle,
+    window: &mut Window,
+    cx: &mut App,
+) -> Entity<ContextMenu> {
+    let (fleet, rig) = (fleet.clone(), rig.to_string());
+    ContextMenu::build(window, cx, move |mut menu, _, _| {
+        menu = menu.context(focus);
+        for entry in RigEntry::ALL {
+            if matches!(entry, RigEntry::Grow | RigEntry::Restore) {
+                menu = menu.separator();
+            }
+            let (fleet, rig) = (fleet.clone(), rig.clone());
+            menu = menu.entry(entry.label(), None, move |window, cx| {
+                entry.run(&fleet, rig.clone(), window, cx)
+            });
+        }
+        menu
+    })
 }
 
 /// A row the panel shows: a Store row, and how deep in the tree it is.
@@ -275,9 +368,30 @@ impl FleetPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(menu) = agent_menu(&self.fleet, self.focus_handle.clone(), window, cx) else {
-            return;
-        };
+        if let Some(menu) = agent_menu(&self.fleet, self.focus_handle.clone(), window, cx) {
+            self.show_menu(menu, position, window, cx);
+        }
+    }
+
+    /// Opens rig `rig`'s menu at `position`.
+    pub fn deploy_rig_menu(
+        &mut self,
+        rig: &str,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let menu = rig_menu(&self.fleet, rig, self.focus_handle.clone(), window, cx);
+        self.show_menu(menu, position, window, cx);
+    }
+
+    fn show_menu(
+        &mut self,
+        menu: Entity<ContextMenu>,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         window.focus(&menu.focus_handle(cx), cx);
         let dismissed = cx.subscribe_in(&menu, window, |this, menu, _: &DismissEvent, window, cx| {
             if menu.focus_handle(cx).contains_focused(window, cx) {
@@ -365,8 +479,9 @@ impl FleetPanel {
             .as_ref()
             .map(|s| s.lines().next().unwrap_or_default().to_string());
         let open = !self.collapsed.contains(name);
-        let (disclosed, clicked) = (name.to_string(), name.to_string());
-        ListItem::new(("fleet-rig", entry.row))
+        let (disclosed, clicked, menu_rig) = (name.to_string(), name.to_string(), name.to_string());
+        let selector = format!("FLEET-RIG-{name}");
+        let item = ListItem::new(("fleet-rig", entry.row))
             .height(relative(1.))
             .spacing(ListItemSpacing::Dense)
             .indent_level(entry.depth)
@@ -395,6 +510,15 @@ impl FleetPanel {
                     }),
             )
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.toggle_rig(&clicked, cx)))
+            .on_secondary_mouse_down(cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                this.deploy_rig_menu(&menu_rig, event.position, window, cx);
+                cx.stop_propagation();
+            }));
+        // Its box carries the name, for tests to find the rig.
+        div()
+            .size_full()
+            .debug_selector(move || selector.clone())
+            .child(item)
             .into_any_element()
     }
 
@@ -866,6 +990,83 @@ mod tests {
         let item = pane.read_with(cx, |p, _| p.active_item().unwrap().to_any());
         let terminal = item.downcast::<crate::terminal_item::TerminalItem>().unwrap();
         assert_eq!(terminal.read_with(cx, |t, _| t.agent_id().to_string()), ui);
+    }
+
+    /// The tab active in the active pane, as `T`.
+    fn active<T: 'static>(w: &Entity<Workspace>, cx: &mut VisualTestContext) -> Option<Entity<T>> {
+        w.read_with(cx, |w, cx| {
+            w.active_pane()
+                .read(cx)
+                .active_item()
+                .and_then(|i| i.to_any().downcast::<T>().ok())
+        })
+    }
+
+    #[gpui::test]
+    async fn a_rigs_menu_opens_its_topology_and_acts_on_it(cx: &mut TestAppContext) {
+        use crate::rig_modals::DownModal;
+        use crate::topology::TopologyItem;
+        use ainet_model::topology::Scope;
+        let (w, cx) = demo(cx);
+        let (fleet, panel) = (fleet(&w, cx), panel(&w, cx));
+        let rig_row = |name: &str, cx: &mut VisualTestContext| {
+            cx.debug_bounds(format!("FLEET-RIG-{name}").leak())
+                .unwrap_or_else(|| panic!("rig {name} is drawn"))
+        };
+
+        // Right click on INFRA, first entry: its Topology, whatever is
+        // selected (an agent of docs).
+        let infra = rig_row("infra", cx);
+        cx.simulate_mouse_down(infra.center(), MouseButton::Right, Modifiers::none());
+        assert!(panel.read_with(cx, |p, _| p.context_menu().is_some()));
+        // A menu opens with nothing selected: down picks the first entry.
+        cx.simulate_keystrokes("down enter");
+        cx.run_until_parked();
+        let topology = active::<TopologyItem>(&w, cx).expect("Topology opened");
+        assert_eq!(
+            topology.read_with(cx, |t, _| t.scope().cloned()),
+            Some(Scope::Rig("infra".into()))
+        );
+
+        // Take Snapshot (the fourth entry) snapshots that rig.
+        cx.focus(&panel);
+        let docs = rig_row("docs", cx);
+        cx.simulate_mouse_down(docs.center(), MouseButton::Right, Modifiers::none());
+        cx.simulate_keystrokes("down down down down enter");
+        assert!(matches!(last_sent(&fleet, cx).0, Request::SnapshotCreate { rig, .. } if rig == "docs"));
+
+        // Take Down asks first: its dialog opens, nothing is sent.
+        cx.focus(&panel);
+        let sent = fleet.read_with(cx, |f, _| f.sent.len());
+        let infra = rig_row("infra", cx);
+        cx.simulate_mouse_down(infra.center(), MouseButton::Right, Modifiers::none());
+        cx.simulate_keystrokes("end enter");
+        cx.run_until_parked();
+        assert_eq!(fleet.read_with(cx, |f, _| f.sent.len()), sent, "nothing sent yet");
+        assert!(w.read_with(cx, |w, cx| {
+            w.modal_layer().read(cx).active_modal::<DownModal>().is_some()
+        }));
+    }
+
+    #[gpui::test]
+    async fn the_title_bar_opens_every_view(cx: &mut TestAppContext) {
+        use crate::map::MapItem;
+        use crate::terminals::TerminalsItem;
+        use crate::topology::TopologyItem;
+        let (w, cx) = demo(cx);
+        let click = |id: &str, cx: &mut VisualTestContext| {
+            let at = cx
+                .debug_bounds(id.to_string().leak())
+                .unwrap_or_else(|| panic!("{id} is drawn"));
+            cx.simulate_click(at.center(), Modifiers::none());
+            cx.run_until_parked();
+        };
+        click("TITLE-TOPOLOGY", cx);
+        assert!(active::<TopologyItem>(&w, cx).is_some());
+        click("TITLE-TERMINALS", cx);
+        assert!(active::<TerminalsItem>(&w, cx).is_some());
+        click("TITLE-MAP", cx);
+        assert!(active::<MapItem>(&w, cx).is_some());
     }
 
     #[gpui::test]
