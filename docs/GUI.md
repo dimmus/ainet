@@ -9,7 +9,8 @@ built by, and the reasons behind it, are in [GUI-PLAN.md](GUI-PLAN.md).
 
 Contents: [the pin](#the-pin) · [a workspace of its own](#a-workspace-of-its-own) ·
 [the workspace pieces](#the-workspace-pieces) · [Fleet and Agent panels](#the-fleet-and-agent-panels) ·
-[terminals](#the-terminal) · [the Inbox](#the-inbox) · [Comms](#comms) ·
+[terminals](#the-terminal) · [the Terminals grid](#the-terminals-grid) ·
+[the Inbox](#the-inbox) · [Comms](#comms) ·
 [the bottom dock](#the-bottom-dock-and-reports) · [the Map](#the-map) ·
 [palette and modals](#the-command-palette-pickers-and-modals) ·
 [restore and packaging](#workspace-restore-packaging-and-macos) ·
@@ -148,7 +149,7 @@ Keys (Linux; macOS has the `cmd` equivalents), in the keymaps:
 | `ctrl-shift-tab`, `ctrl-pagedown`, `ctrl-pageup` | previous, next, previous tab |
 | `ctrl-w` | close the tab |
 | `ctrl-\`, `ctrl-alt-\` | split right, down |
-| `ctrl-alt-left/right/up/down` | the pane in that direction (Zed's are `ctrl-k` chords, which a terminal needs) |
+| `ctrl-alt-left/right/up/down` | the pane in that direction (Zed's are `ctrl-k` chords, which a terminal needs); in the Terminals grid, the tile that way first |
 | `shift-escape` | zoom the active pane, or put it back |
 | `ctrl-b`, `ctrl-alt-b`, `ctrl-j` | left, right, bottom dock |
 | `ctrl-shift-c`, `ctrl-shift-i`, `ctrl-t` | Comms, Inbox, Map tabs |
@@ -259,7 +260,15 @@ What it does:
   150 ms (`RESIZE_AFTER`), the agent's pane is asked to take them with one
   quiet `Resize` (dragging a divider asks once, at the end); a streamed
   screen comes anew at that size, a fetched one is fetched again. The
-  demo draws its screens at the asked size.
+  demo draws its screens at the asked size. An agent shown in two places
+  at once (its tab and a tile of the Terminals grid, or a split) has one
+  pane, so one size: the view **shown or given the keyboard last** owns
+  it (`FleetModel::claim_size`, from `show_terminal` and on focus), and
+  the others paint the screen at that size. The owner's layout is asked
+  for at once if it was laid out, else at its next layout; the others'
+  layouts are kept but not sent, so a window resize sends one `Resize`,
+  not one per view in turn. When the owner hides, a view still on show
+  takes the size over with its own.
 - **Fresh screens.** A tab on show (active in its pane) registers with
   `FleetModel::show_terminal`, which streams the agent's terminal
   (`Link::attach`, one stream per agent however many tabs show it,
@@ -313,12 +322,9 @@ What it does:
 - **Paste.** `terminal::Paste` sends the clipboard bracketed
   (`ESC [200~ … ESC [201~`) when the screen asked for bracketed paste,
   else with its line ends as the Enter key sends them.
-- **Tile all.** `fleet::TileAll` (`ctrl-g`) lays out every live terminal
-  of the selected agent's rig (every live terminal when it has none) as a
-  grid of panes, as the TUI's Terminals view: columns chosen by the TUI's
-  `grid_cols` (now `ainet_model::terminal::grid_cols`) from the room in
-  cells, rows of tiles, the last row's tiles wider. Panes left from tiling
-  before make way, so tiling twice gives one grid.
+- **Every terminal at once.** `fleet::TileAll` (`ctrl-g`) opens the
+  Terminals grid, a tab of its own (next section), instead of splitting
+  panes.
 
 Keys in a focused terminal (Linux; macOS uses `cmd-c`, `cmd-v`, `cmd-k`):
 
@@ -351,7 +357,7 @@ agent), keys reaching the agent past the workspace's bindings, one
 `Resize` after the window is dragged through several sizes, the wheel
 asking for scrollback and typing coming back, selection and copy,
 bracketed paste, `SendCtrlC`, the right-click menu driven by its keys
-(which reach the menu, not the agent), and Tile all. In tests the window must be
+(which reach the menu, not the agent). In tests the window must be
 activated (`window.activate_window()`) for focus events to fire.
 
 ## Keeping terminals cheap: measurements and streaming
@@ -467,6 +473,110 @@ reads), `ainet-core` (the wire shapes old peers see), `ainet-model`
 until detached, an old daemon's refusal and the fallback to fetching, a
 stream that ends; `Store` feeding bytes and keeping styled history), and
 the GUI tests listed under the terminal.
+
+## The Terminals grid
+
+`TerminalsItem` (`terminals.rs`) is the TUI's Terminals view (`^G`) as a
+tab: every live agent's terminal at once, in rows and columns, like
+OpenRig's terminal wall. It is opened by `fleet::TileAll` (`ctrl-g`; an
+open grid is activated and keeps its filter, a new one shows every rig),
+`--view terminals`, `--view rig:NAME` (and `pod:RIG/POD`, which shows the
+rig), `--view <rig>`, and `/view terminals`, `/view rig:NAME` or
+`/view <rig>` in the palette or Comms (those set the filter). Tile by
+tile:
+
+- **Tiles.** One per agent of `Store::terminal_ids(rig)`, in the TUI's
+  order (rig, seat, start), each a `TerminalItem` the grid owns: the same
+  header (critter, name, seat, state, "Typing · messages held", the
+  message button), live screen, scrollback, selection, menu and typing as
+  a terminal tab. The grid follows the fleet: an agent that starts gets a
+  tile at its place, one that goes loses it (as a closed tab; the
+  keyboard, if it was there, goes to the grid). The grid calls the item
+  hooks a pane would: `activated` for every tile on show while its tab
+  is, `deactivated` when the tab is hidden or a tile is zoomed away,
+  `on_removed` when a tile or the grid goes, so the fleet streams or
+  fetches exactly the tiles on show and nothing while the grid is hidden.
+- **Columns.** `terminal::grid_cols` from the grid's own room in terminal
+  cells (measured by a `canvas` behind the tiles, as the workspace
+  measures itself): the count that keeps tiles closest to a terminal's
+  shape; rows of that many tiles, the last row's tiles wider. `+` and `-`
+  fix one more or one fewer (`terminal::more_cols`, `fewer_cols`: at
+  least one, at most one per tile), `=` lets the shape pick again, as in
+  the TUI. The strip above the tiles says how many terminals and columns
+  there are and has Fewer, More and Auto buttons.
+- **Rig filter.** `ctrl-r` (`terminals::CycleRig`, the TUI's `^R`, through
+  `terminal::next_rig`, which the TUI now uses too): all, then each rig in
+  name order, then all again; the strip's rig button does the same. The
+  tab reads "Terminals · docs" while filtered.
+- **Keyboard.** A click on a tile gives it the keyboard: typing goes to
+  that agent and ainetd holds its messages (`Interact`), as in a terminal
+  tab; the focused tile's border is the theme's `border_focused`.
+  `ctrl-alt-left/right/up/down` (the workspace's pane keys) move from tile
+  to tile (`terminal::grid_step`; going down onto a short last row lands
+  on its last tile) and, past the grid's edge, on to the pane that way.
+  `ctrl-alt-g` (`terminals::FocusGrid`) leaves a tile for the grid itself,
+  where `enter` (or a `ctrl-alt` arrow) goes back to the tile last used
+  (outlined in `border_selected` meanwhile); a click on the strip does the
+  same as `ctrl-alt-g`. Escape is the agent's.
+- **Zoom.** `terminal::ToggleZoom` in a tile (`shift-escape`, or Zoom in
+  its menu) makes that tile fill the grid, not the pane; the others stop
+  being fetched until it is put back (`shift-escape` again, or the strip's
+  button). Moving with `ctrl-alt` arrows while zoomed zooms the next tile,
+  as the TUI's arrows do. On the grid itself `shift-escape` zooms the pane
+  as anywhere else.
+- **Size.** Each tile asks its agent's pane for its own size as a tab
+  does; an agent also open in a tab of its own follows the rule under
+  "The terminal" (the view shown or focused last wins).
+- **Opening a tiled agent.** `fleet::OpenTerminal` (enter in the Fleet,
+  the switcher, the Inbox's terminal button) for an agent with no tab of
+  its own, while a grid on show has its tile, gives that tile the
+  keyboard instead of opening a tab.
+- **Saved** with the workspace as `{ "kind": "terminals", "rig": …,
+  "cols": … }` (both left out when unset).
+
+Cost: the tiles share one pane, and GPUI redraws a view's whole subtree
+when anything in it changed (an ancestor redrawn renders its cached
+children anew too), so a tile whose screen changed paints the other
+tiles again; their rows come from their row caches (keys and lookups,
+no shaping). Panes side by side (a split of terminal tabs) still redraw
+alone.
+
+Keys (contexts `Terminals`, the grid and its tiles, and `Terminals &&
+grid`, only while the grid itself, not a tile, has the keyboard, so the
+bare keys never fire while you type in a tile):
+
+| Keys | Where | Action |
+|---|---|---|
+| `ctrl-g` | anywhere but a terminal | `fleet::TileAll`: open the grid |
+| `+` (`shift-=`), `-`, `=` | the grid | `terminals::MoreColumns`, `FewerColumns`, `AutoColumns` |
+| `ctrl-r` | the grid | `terminals::CycleRig` |
+| `enter` | the grid | back into the tile last used (`menu::Confirm`) |
+| `ctrl-alt-left/right/up/down` | a tile, the grid | the tile that way (past the edge, the pane) |
+| `ctrl-alt-g` (`cmd-alt-g` on macOS) | a tile | `terminals::FocusGrid` |
+| `shift-escape` | a tile | `terminal::ToggleZoom`: the tile fills the grid, or not |
+
+Tests (headless, `terminals.rs`): `ctrl-g` tiling the demo's seven agents
+in the TUI's order in rows (every tile painted and kept fresh, one tab
+however often it is opened); `ctrl-r` going round the rigs, the tab's
+title, only the filtered tiles kept fresh, the rig button, and `ctrl-r`
+typed into a tile reaching its agent; `+ - =` and the columns drawn (and
+typed into a tile, the agent's); a click giving a tile the keys with
+`Interact`, typing and escape reaching its agent, `ctrl-alt` arrows
+between tiles with ainetd told once the focus settles, `ctrl-alt-g` and
+enter, and stepping out of the grid into the next pane; a new screen
+shaping only its tile's rows; zooming a tile (only it fetched, moving
+zooms the next, the menu's Zoom); a hidden grid fetching nothing on
+output and a closed one letting every tile go; tiles coming and going as
+agents start and stop (the keyboard back on the grid); the latest view of
+an agent owning its size (the tab beside the grid, then a click in the
+tile, then a window resize sending one `Resize`); `OpenTerminal` focusing
+a tile; `--view rig:infra` and a rig's name opening the grid. Also
+`persist.rs` (the grid restored with its rig and columns, its tiles on
+show), `persistence.rs` (its saved form), `fleet.rs` (size ownership),
+`keymap.rs` (no grid key reaching into a tile: every ctrl letter, the
+list keys and `+ - =` stay the agent's), `command_palette.rs` (`/view
+rig:infra`, `/view docs`, `/view terminals`), and in `ainet-model`
+`terminal::{more_cols, fewer_cols, next_rig, grid_step}`.
 
 ## The Inbox
 
@@ -770,7 +880,7 @@ All in the modal layer, on the picker and the text field above:
 | File | What | After Zed's |
 |---|---|---|
 | `command_palette.rs` | `CommandPalette` (`ctrl-shift-p`): every action available where the keyboard was (`Window::available_actions`; `menu::*` left out), named in words as Zed's (`humanize`: `workspace::ToggleLeftDock` is "workspace: toggle left dock"), with its key binding there (`ui::KeyBinding::for_action_in`), fuzzy filtered (`normalize` lets `workspace::toggle_left` find it too), the ones run from it lately first (kept with the workspace). Picking one goes back where the keyboard was and runs it there. A line starting with `/`, or one that matches no action, is a console command: `commands::parse` (`command::parse`, no rig in view, so the selected agent's rig) says in its row what it does (`launching docs`) or what is wrong (the usage, `no command /x`); enter runs it, or stays open while it is wrong | `command_palette` |
-| `commands.rs` | the console's command language for the app, shared with Comms: requests through the fleet, the console's own commands (`/view`, `/allow`, `/quit`, …) as the app's actions. `/answer <text>` answers the question waiting on you (`commands::question`: the selected agent's first, else the oldest), as the TUI's answers the one selected. `/view fleet` focuses the Fleet, `/view rig:<name>` and `/view <rig>` tile that rig's terminals (`Workspace::tile_rig`), whichever agent is selected; another name says there is no such view or rig | — |
+| `commands.rs` | the console's command language for the app, shared with Comms: requests through the fleet, the console's own commands (`/view`, `/allow`, `/quit`, …) as the app's actions. `/answer <text>` answers the question waiting on you (`commands::question`: the selected agent's first, else the oldest), as the TUI's answers the one selected. `/view fleet` focuses the Fleet, `/view terminals` opens the Terminals grid on every rig, `/view rig:<name>` and `/view <rig>` on that rig (`Workspace::show_rig_terminals`), whichever agent is selected; another name says there is no such view or rig | — |
 | `up_modal.rs` | `fleet::Up`: `SpecPicker` over the library (`Request::Specs`, through the new `FleetModel::list`), with what is typed offered as a source of its own (a spec file's path, or a name); then `UpModal`: working directory (Browse… asks the system for a folder, `cx.prompt_for_paths`), rig name, fresh seats (`dev.impl, dev.review`). **Plan** shows what would launch (`UpSpec { plan: true }`, `FleetModel::ask`) in the form; **Launch** (or enter in the last field) sends `Up`. Both are `command::up` | `file_finder`, `ui::Modal` |
 | `rig_modals.rs` | `fleet::SwitchRig` (the title bar's rig switcher, which names the selected agent's rig, `title_bar::rig_label`): a `RigPicker`; picking a rig selects its first live agent in the Fleet's order (`rig_modals::first_agent`), so the Fleet, Agent panel, Chatroom and the rig commands follow it. `fleet::Restore`: a `RigPicker`, then `RestoreModal`: the snapshots (`Request::SnapshotList`), the latest by default, picked by click or `up`/`down`; the rig's seats as checkboxes to start fresh; enter restores (`command::restore`). `fleet::Down`: `DownModal` asks about the selected agent's rig (or the only one; else a rig picker first), with **Take a snapshot first** checked; enter takes it down (`command::down`) | — |
 | `seat_modals.rs` | `fleet::Spawn` (`s` in the Fleet): `SpawnModal`, the runtime (claude-code, codex, terminal), working directory (Browse…) and role, as `/spawn` (`command::spawn`). `fleet::Grow`: `GrowModal` for the selected agent's rig (else a rig picker): pod, member, runtime (or the rig's default), role, as `/grow` (`command::grow`); it says so when the pod or member is missing | — |
@@ -823,8 +933,8 @@ settings.json's text (in place, a missing key, comments and strings
 hiding keys, what it cannot edit); headless ones for the palette (the
 actions with their bindings, the one picked run where the keyboard was,
 lately used first, a usage error kept in the row, `/down` and `/view
-inbox` run, `/answer` answering the waiting question, `/view rig:infra`
-and `/view docs` tiling that rig), the rig switcher (a click, the rig
+inbox` run, `/answer` answering the waiting question, `/view rig:infra`,
+`/view docs` and `/view terminals` filtering the Terminals grid), the rig switcher (a click, the rig
 picked, its first agent selected, the label following), saving the
 theme (an unreadable file left alone, a missing one written, a symlink
 kept), the switcher opening a terminal (`ctrl-enter` only
@@ -869,7 +979,8 @@ one workspace per daemon socket and one for the demo:
   pane's active tab and the active pane; the Fleet's folded rigs and
   selected agent; the Map's zoom and pan (with its tab); the palette's recent actions (the
   last 50). Terminals are saved by agent id, the Inbox, Comms and the Map
-  as themselves; reports and the stand-in tab are not saved.
+  as themselves, the Terminals grid with its rig filter and the columns
+  asked for; reports and the stand-in tab are not saved.
 - **Restoring.** At start the window opens with the saved bounds (at
   least its smallest size; one left on a display that is gone is centred
   on the main display), then the docks, sizes, folds and recent actions
@@ -995,7 +1106,7 @@ the status bar (`themes:`).
 
 Keys: `crates/gui/assets/keymaps/default-{linux,macos}.json`, in Zed's
 format, with the contexts `Workspace`, `FleetPanel`, `Terminal`, `Inbox`,
-`Comms`, `CommsCompose`, `QueuePanel`, `Map`, `Picker`, `TabSwitcher`, `Form` and `TextInput` (see "The workspace pieces" for the
+`Comms`, `CommsCompose`, `QueuePanel`, `Map`, `Terminals` (with `grid`), `Picker`, `TabSwitcher`, `Form` and `TextInput` (see "The workspace pieces" for the
 pane, dock and text keys). `~/.config/ainet/keymap.json` adds to them and
 overrides them (`null` unbinds), and reloads on save; bindings it cannot
 read are listed in the status bar and the rest apply. `ctrl-alt-,` opens
@@ -1044,13 +1155,14 @@ module; modules without tests of their own are covered where named):
 | `themes.rs`, `zed_theme.rs` | 2 | 3 | Deepharness by default, One Dark bundled, user themes loaded, reported and reloaded, palettes as themes |
 | `theme_selector.rs` | | 2 | preview, escape and a click outside restoring, the pick saved; a query matching nothing, a theme per appearance changing only that one, a broken settings.json left alone with a toast |
 | `workspace.rs`, `pane.rs`, `pane_group.rs`, `dock.rs`, `item.rs`, `panels.rs` | 3 | 9 | tabs opening, cycling and closing (click, middle click), the tab's right-click menu (Close, Close Others, Close All, Split Right and Down from a tab that is not active), splits and focus by direction, zoom, dock resizing by dragging, the status bar's dock buttons, the bottom dock's panels and focus actions, toasts |
-| `workspace/persist.rs`, `persistence.rs` | 9 | 6 | the file's format and versions, folding gone tabs, bounds, the debounce; a workspace coming back as left (the Fleet's selection too), gone agents dropped quietly, saving once settled, on close and on quit, saved panes kept while ainetd is silent |
+| `workspace/persist.rs`, `persistence.rs` | 10 | 7 | the file's format and versions, folding gone tabs, bounds, the debounce; a workspace coming back as left (the Fleet's selection too), gone agents dropped quietly, saving once settled, on close and on quit, saved panes kept while ainetd is silent |
 | `modal_layer.rs`, `picker.rs`, `switcher.rs`, `tab_switcher.rs` | | 4 | filtering, keys, escape; the agent switcher (in `workspace.rs`); `ctrl-tab` |
 | `text_input/` | 8 | 5 | the buffer's edits, moves, undo and IME offsets; typing, clipboard, several lines, read-only; Zed's `InputField` on it |
-| `fleet.rs` | | 8 | notices, quiet requests, reconnects, the fetch pump, streamed terminals, changed screens announced, failed and incompatible daemons |
+| `fleet.rs` | | 9 | notices, quiet requests, reconnects, the fetch pump, streamed terminals, changed screens announced, failed and incompatible daemons, the latest view sizing an agent's pane |
 | `fleet_panel.rs`, `message.rs`, `critter.rs` | 6 | 7 | the TUI's order, keys and folds, clicks, the agent menu's requests, `m` and the message modal, critters drawn and animated only while drawn |
 | `agent_panel.rs` | 2 | 1 | the selected agent, the gauge, the sparkline |
-| `terminal_item.rs`, `terminal_element.rs`, `terminal_layout.rs`, `terminal_input.rs` | 16 | 13 | layout, colours, selections, row cache and keys; key encoding; the screen drawn, focus and `Interact`, keys past the workspace, one `Resize`, scrollback, copy and paste, the right-click menu by its keys (Paste, Send Ctrl-C, Copy, Clear Selection, Message…, Zoom; escape types nothing), Tile all, redrawing only what changed |
+| `terminal_item.rs`, `terminal_element.rs`, `terminal_layout.rs`, `terminal_input.rs` | 16 | 12 | layout, colours, selections, row cache and keys; key encoding; the screen drawn, focus and `Interact`, keys past the workspace, one `Resize`, scrollback, copy and paste, the right-click menu by its keys (Paste, Send Ctrl-C, Copy, Clear Selection, Message…, Zoom; escape types nothing), redrawing only what changed |
+| `terminals.rs` | | 11 | the Terminals grid: tiles in the TUI's order, the rig filter, columns, a click and `ctrl-alt` arrows giving tiles the keys with `Interact`, zoom, a hidden grid fetching nothing, tiles following agents, the size rule, `OpenTerminal` into a tile, views opening it |
 | `inbox.rs` | 4 | 8 | order, detail styles, picks, the glow; the answer keys, cards by selection and click, the Allow, Always and Deny buttons answering their own card, questions, `ctrl-shift-y`, history, alerts |
 | `comms.rs`, `commands.rs` | 6 | 6 | rows, splices, sticking to the end, mentions, code; lines sent as the TUI's, completion, keys, threads, clicks |
 | `queue_panel.rs`, `queue_form.rs`, `chatroom.rs`, `events_panel.rs`, `report.rs` | 1 | 9 | the queue's order and chips, every menu entry and form, right click; chat rooms and the cap; the events log; reports |
@@ -1101,9 +1213,11 @@ right.
 Collected from the plan's phase notes; none of these is started.
 
 - **Panes:** dragging tabs between panes, pinned and preview tabs, a
-  component preview window. `--view terminals` and `--view rig:NAME` at
-  start show a stand-in tab; tiling them takes `ctrl-g` or `/view
-  rig:NAME`.
+  component preview window.
+- **Terminals grid:** tiles in one pane redraw together (above); no
+  dragging tiles into another order or out into tabs; the rig filter is a
+  button that goes round, not a list to pick from; `pod:RIG/POD` shows the
+  whole rig; the zoomed tile is not saved.
 - **Fleet and Agent panels:** cost per agent (ainetd does not report it);
   the TUI's spinner and pulsing glyph (a state dot instead).
 - **Terminals:** URL hover, IME composition (keys come from key-down

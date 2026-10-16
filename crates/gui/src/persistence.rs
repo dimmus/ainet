@@ -127,6 +127,13 @@ pub enum SavedItem {
         pan_x: f32,
         pan_y: f32,
     },
+    /// The Terminals grid: its rig filter and the columns asked for.
+    Terminals {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rig: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cols: Option<usize>,
+    },
     /// A kind this version does not know (a newer app's): dropped.
     #[serde(other)]
     Unknown,
@@ -438,8 +445,19 @@ mod tests {
         assert_eq!(load(&file, "/run/user/1000/ainet.sock"), None);
 
         // Another socket's workspace sits beside it.
+        let grids = vec![
+            SavedItem::Terminals {
+                rig: Some("docs".into()),
+                cols: Some(3),
+            },
+            SavedItem::Terminals {
+                rig: None,
+                cols: None,
+            },
+        ];
         let other = SavedWorkspace {
             folded_rigs: vec!["docs".into()],
+            center: Some(pane(grids, 1, true)),
             ..SavedWorkspace::default()
         };
         save(&file, "/tmp/other.sock", &other).unwrap();
@@ -486,6 +504,26 @@ mod tests {
         std::fs::write(&file, mixed).unwrap();
         assert_eq!(load(&file, "bad"), None);
         assert_eq!(load(&file, "good").unwrap().folded_rigs, vec!["docs".to_string()]);
+    }
+
+    #[test]
+    fn the_terminals_grid_saves_only_what_it_was_asked() {
+        let all = SavedItem::Terminals {
+            rig: None,
+            cols: None,
+        };
+        let text = serde_json::to_string(&all).unwrap();
+        assert_eq!(text, r#"{"kind":"terminals"}"#);
+        assert_eq!(serde_json::from_str::<SavedItem>(&text).unwrap(), all);
+        let docs: SavedItem =
+            serde_json::from_str(r#"{ "kind": "terminals", "rig": "docs", "cols": 2 }"#).unwrap();
+        assert_eq!(
+            docs,
+            SavedItem::Terminals {
+                rig: Some("docs".into()),
+                cols: Some(2)
+            }
+        );
     }
 
     #[test]

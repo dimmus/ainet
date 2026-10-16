@@ -50,6 +50,7 @@ mod terminal_element;
 mod terminal_input;
 mod terminal_item;
 mod terminal_layout;
+mod terminals;
 mod text_input;
 mod theme_selector;
 mod themes;

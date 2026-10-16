@@ -134,7 +134,7 @@ impl TerminalItem {
             cx.on_release(move |this, cx| {
                 let agent = this.agent.clone();
                 this.fleet.update(cx, |fleet, cx| {
-                    fleet.hide_terminal(id);
+                    fleet.hide_terminal(id, cx);
                     fleet.set_at_terminal(id, &agent, false, cx);
                 });
             }),
@@ -202,6 +202,12 @@ impl TerminalItem {
         self.selection.as_ref()
     }
 
+    /// The size (rows, cols) the screen was last laid out at.
+    #[cfg(test)]
+    pub fn laid_out_size(&self) -> Option<(u16, u16)> {
+        self.laid_out
+    }
+
     /// Rows scrolled back; 0 shows the live screen.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn scrolled(&self) -> usize {
@@ -209,20 +215,21 @@ impl TerminalItem {
     }
 
     /// The element was laid out at `geometry`. A new size is asked of the
-    /// agent's pane once it has held for [`RESIZE_AFTER`]; scrollback is
-    /// laid out again to fit.
+    /// agent's pane once it has held for [`RESIZE_AFTER`] (the fleet
+    /// passes it on if this is the view the pane takes its size from);
+    /// scrollback is laid out again to fit.
     pub fn laid_out(&mut self, geometry: Geometry, cx: &mut Context<Self>) {
         self.geometry = Some(geometry);
         let size = (geometry.rows, geometry.cols);
         if self.laid_out != Some(size) {
             self.laid_out = Some(size);
-            let agent = self.agent.clone();
+            let (id, agent) = (cx.entity_id(), self.agent.clone());
             self.resize = Some(cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(RESIZE_AFTER).await;
                 let _ = this.update(cx, |this, cx| {
                     this.resize = None;
                     this.fleet
-                        .update(cx, |fleet, cx| fleet.resize_terminal(&agent, size, cx));
+                        .update(cx, |fleet, cx| fleet.resize_terminal(id, &agent, size, cx));
                 });
             }));
         }
@@ -280,14 +287,15 @@ impl TerminalItem {
     }
 
     /// The terminal got or lost the keyboard: ainetd holds the agent's
-    /// messages while you are at it, the cursor shows and blinks, and the
-    /// agent becomes the Fleet's selection, as Zed's project panel follows
-    /// the active file.
+    /// messages while you are at it, the cursor shows and blinks, the
+    /// agent's pane takes this view's size, and the agent becomes the
+    /// Fleet's selection, as Zed's project panel follows the active file.
     fn set_focused(&mut self, focused: bool, cx: &mut Context<Self>) {
         let (id, agent) = (cx.entity_id(), self.agent.clone());
         self.fleet.update(cx, |fleet, cx| {
             fleet.set_at_terminal(id, &agent, focused, cx);
             if focused {
+                fleet.claim_size(id, &agent, cx);
                 fleet.select(&agent, cx);
             }
         });
@@ -654,22 +662,26 @@ impl Item for TerminalItem {
         Some(cx.new(|cx| TerminalItem::new(fleet, agent, window, cx)))
     }
 
-    /// On show: the fleet fetches its screen as the agent prints.
+    /// On show: the fleet fetches its screen as the agent prints, and the
+    /// agent's pane takes this view's size, asked again at the next layout
+    /// (another view of the agent may have sized it meanwhile).
     fn activated(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         let (id, agent) = (cx.entity_id(), self.agent.clone());
         self.fleet
             .update(cx, |fleet, cx| fleet.show_terminal(id, &agent, cx));
+        self.laid_out = None;
+        cx.notify();
     }
 
     fn deactivated(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         let id = cx.entity_id();
-        self.fleet.update(cx, |fleet, _| fleet.hide_terminal(id));
+        self.fleet.update(cx, |fleet, cx| fleet.hide_terminal(id, cx));
     }
 
     fn on_removed(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         let (id, agent) = (cx.entity_id(), self.agent.clone());
         self.fleet.update(cx, |fleet, cx| {
-            fleet.hide_terminal(id);
+            fleet.hide_terminal(id, cx);
             fleet.set_at_terminal(id, &agent, false, cx);
         });
     }
@@ -1221,36 +1233,6 @@ mod tests {
         assert!(modal.is_some(), "the message modal is open");
     }
 
-    #[gpui::test]
-    async fn tile_all_lays_the_rigs_terminals_out_as_panes(cx: &mut TestAppContext) {
-        let (w, _, cx) = terminal(cx);
-        let fleet = fleet(&w, cx);
-        let ids = fleet.read_with(cx, |f, _| {
-            let rig = f.store.selected_agent().and_then(|a| a.rig.clone());
-            f.store.terminal_ids(rig.as_deref())
-        });
-        assert!(ids.len() > 1, "the demo's rig has several terminals");
-        let shown = |cx: &mut VisualTestContext| {
-            w.read_with(cx, |w, cx| {
-                w.panes()
-                    .iter()
-                    .map(|p| {
-                        p.read(cx)
-                            .active_item()
-                            .and_then(|i| i.to_any().downcast::<TerminalItem>().ok())
-                            .map(|t| t.read(cx).agent_id().to_string())
-                    })
-                    .collect::<Vec<_>>()
-            })
-        };
-        cx.dispatch_action(crate::actions::TileAll);
-        let want: Vec<Option<String>> = ids.iter().cloned().map(Some).collect();
-        assert_eq!(shown(cx), want);
-        // Again: the same grid, not a second one.
-        cx.dispatch_action(crate::actions::TileAll);
-        assert_eq!(shown(cx), want);
-    }
-
     /// A screen of `text` lines, as one comes from ainetd.
     fn screen_msg(agent: &str, text: &str) -> Msg {
         Msg::Term {
@@ -1263,16 +1245,28 @@ mod tests {
 
     #[gpui::test]
     async fn only_terminals_whose_screen_changed_draw_again(cx: &mut TestAppContext) {
-        let (w, _, cx) = terminal(cx);
+        let (w, first, cx) = terminal(cx);
         let fleet = fleet(&w, cx);
-        cx.dispatch_action(crate::actions::TileAll);
-        cx.run_until_parked();
-        let items: Vec<Entity<TerminalItem>> = w.read_with(cx, |w, cx| {
-            w.panes()
-                .iter()
-                .filter_map(|p| p.read(cx).active_item()?.to_any().downcast::<TerminalItem>().ok())
-                .collect()
+        // A second agent's terminal in a pane beside it.
+        let agent = first.read_with(cx, |t, _| t.agent_id().to_string());
+        let other = fleet.read_with(cx, |f, _| {
+            f.store
+                .terminal_ids(None)
+                .into_iter()
+                .find(|a| *a != agent)
+                .unwrap()
         });
+        w.update_in(cx, |w, window, cx| {
+            let pane = w.active_pane().clone();
+            w.split_pane(&pane, crate::pane_group::SplitDirection::Right, window, cx);
+            w.open_terminal(&other, window, cx);
+        });
+        cx.run_until_parked();
+        let second = w.read_with(cx, |w, cx| {
+            let item = w.active_pane().read(cx).active_item().unwrap().to_any();
+            item.downcast::<TerminalItem>().unwrap()
+        });
+        let items = [first, second];
         assert!(items.len() > 1);
         let counts = |cx: &mut VisualTestContext| {
             items

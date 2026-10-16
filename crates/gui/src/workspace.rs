@@ -13,7 +13,7 @@
 
 mod persist;
 
-use ainet_model::{AgentCommand, command, terminal};
+use ainet_model::{AgentCommand, command};
 use gpui::{
     Bounds, DragMoveEvent, Entity, FocusHandle, Focusable, Pixels, PromptLevel, Subscription, WeakEntity,
     canvas,
@@ -59,8 +59,8 @@ use crate::settings::{self, DockSide};
 use crate::status_bar::StatusBar;
 use crate::switcher::AgentSwitcher;
 use crate::tab_switcher::TabSwitcher;
-use crate::terminal_element::Metrics as TerminalMetrics;
 use crate::terminal_item::TerminalItem;
+use crate::terminals::TerminalsItem;
 use crate::theme_selector::ThemeSelector;
 use crate::title_bar::TitleBar;
 use crate::toast_layer::ToastLayer;
@@ -172,6 +172,13 @@ impl Workspace {
             View::Inbox => Box::new(cx.new(|cx| InboxItem::new(fleet.clone(), window, cx))),
             View::Comms => Box::new(cx.new(|cx| CommsItem::new(fleet.clone(), window, cx))),
             View::Map => Box::new(cx.new(|cx| MapItem::new(fleet.clone(), cx))),
+            View::Terminals { rig } => {
+                Box::new(cx.new(|cx| TerminalsItem::new(fleet.clone(), rig, window, cx)))
+            }
+            // A rig by name: its terminals (none, if there is no such rig).
+            View::Named(rig) => {
+                Box::new(cx.new(|cx| TerminalsItem::new(fleet.clone(), Some(rig), window, cx)))
+            }
             view => Box::new(cx.new(|cx| Placeholder::new(view, cx))),
         };
         first.update(cx, |pane, cx| pane.add_item(first_item, true, false, window, cx));
@@ -709,118 +716,58 @@ impl Workspace {
                 return;
             }
         }
+        // A Terminals grid on show with the agent's tile: that tile.
+        for pane in self.panes() {
+            let grid = pane
+                .read(cx)
+                .active_item()
+                .and_then(|i| i.to_any().downcast::<TerminalsItem>().ok());
+            if let Some(grid) = grid
+                && grid.update(cx, |grid, cx| grid.focus_agent(id, window, cx))
+            {
+                self.active_pane = pane.clone();
+                return;
+            }
+        }
         let (fleet, id) = (self.fleet.clone(), id.to_string());
         let item = cx.new(|cx| TerminalItem::new(fleet, id, window, cx));
         self.active_pane
             .update(cx, |p, cx| p.add_item(Box::new(item), true, true, window, cx));
     }
 
-    /// Lays out every live terminal of the selected agent's rig (all of
-    /// them if it has none) as a grid of panes, as the TUI's Terminals
-    /// view: the first in the active pane, the rest split off it in rows
-    /// of terminal-shaped tiles. Panes left from tiling before, holding
-    /// only these terminals, make way.
-    pub fn tile_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let store = &self.fleet.read(cx).store;
-        let rig = store.selected_agent().and_then(|a| a.rig.clone());
-        self.tile_rig(rig.as_deref(), window, cx);
-    }
-
-    /// Lays out every live terminal of `rig` (all of them for `None`) as
-    /// [`Self::tile_all`] does: `/view rig:<name>`.
-    pub fn tile_rig(&mut self, rig: Option<&str>, window: &mut Window, cx: &mut Context<Self>) {
-        self.zoom_out(cx);
-        let rig = rig.map(str::to_string);
-        let store = &self.fleet.read(cx).store;
-        let ids = store.terminal_ids(rig.as_deref());
-        let Some(first) = ids.first().cloned() else {
-            let text = match rig {
-                Some(rig) => format!("no live terminals in rig {rig}"),
-                None => "no live terminals".to_string(),
-            };
-            self.fleet.update(cx, |fleet, cx| fleet.show(text, false, cx));
-            return;
-        };
-        let terminal_of = |item: &dyn ItemHandle, cx: &App| {
-            item.to_any()
-                .downcast::<TerminalItem>()
-                .ok()
-                .map(|t| t.read(cx).agent_id().to_string())
-        };
+    /// Opens the Terminals grid (`ctrl-g`) and gives it the keyboard:
+    /// activates its tab where one is open (in any pane), else adds one,
+    /// of every rig, to the active pane.
+    pub fn open_terminals(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<TerminalsItem> {
         for pane in self.panes() {
-            let only_these = pane
+            let at = pane
                 .read(cx)
                 .items()
-                .all(|item| terminal_of(item, cx).is_some_and(|agent| ids.contains(&agent)));
-            if pane != self.active_pane && only_these {
-                pane.update(cx, |p, cx| p.close_all_items(window, cx));
-                self.center.remove(&pane);
+                .position(|i| i.to_any().downcast::<TerminalsItem>().is_ok());
+            if let Some(ix) = at {
+                self.active_pane = pane.clone();
+                pane.update(cx, |p, cx| p.activate_item(ix, true, window, cx));
+                return pane
+                    .read(cx)
+                    .active_item()
+                    .and_then(|i| i.to_any().downcast::<TerminalsItem>().ok())
+                    .expect("just activated");
             }
         }
-
-        // Shaped by the room the center has, in terminal cells.
-        let (width, height) = match self.center.bounding_box_for_pane(&self.active_pane) {
-            Some(b) => (b.size.width, b.size.height),
-            None => (self.bounds.size.width, self.bounds.size.height),
-        };
-        let cell = TerminalMetrics::new(window, cx).cell;
-        let cols = terminal::grid_cols(
-            ids.len(),
-            f64::from(width / cell.width),
-            f64::from(height / cell.height),
-            None,
-        );
-        let rows: Vec<&[String]> = ids.chunks(cols).collect();
-
-        let anchor = self.active_pane.clone();
-        let existing = anchor
-            .read(cx)
-            .items()
-            .position(|item| terminal_of(item, cx).as_deref() == Some(&first));
-        match existing {
-            Some(ix) => anchor.update(cx, |p, cx| p.activate_item(ix, false, window, cx)),
-            None => {
-                let item = self.new_terminal(&first, window, cx);
-                anchor.update(cx, |p, cx| p.add_item(item, true, false, window, cx));
-            }
-        }
-        // The rows first, one below the other, then each row's tiles.
-        let mut row_starts = vec![anchor.clone()];
-        for row in &rows[1..] {
-            let above = row_starts.last().cloned().unwrap_or_else(|| anchor.clone());
-            let item = self.new_terminal(&row[0], window, cx);
-            row_starts.push(self.split_with(&above, SplitDirection::Down, item, window, cx));
-        }
-        for (row, start) in rows.iter().zip(row_starts) {
-            let mut last = start;
-            for id in &row[1..] {
-                let item = self.new_terminal(id, window, cx);
-                last = self.split_with(&last, SplitDirection::Right, item, window, cx);
-            }
-        }
-        self.active_pane = anchor.clone();
-        anchor.update(cx, |p, cx| p.activate_item(p.active_index(), true, window, cx));
+        let fleet = self.fleet.clone();
+        let grid = cx.new(|cx| TerminalsItem::new(fleet, None, window, cx));
+        self.active_pane.update(cx, |p, cx| {
+            p.add_item(Box::new(grid.clone()), true, true, window, cx)
+        });
         cx.notify();
+        grid
     }
 
-    fn new_terminal(&self, id: &str, window: &mut Window, cx: &mut Context<Self>) -> Box<dyn ItemHandle> {
-        let (fleet, id) = (self.fleet.clone(), id.to_string());
-        Box::new(cx.new(|cx| TerminalItem::new(fleet, id, window, cx)))
-    }
-
-    /// Splits `pane` with a new pane holding `item`.
-    fn split_with(
-        &mut self,
-        pane: &Entity<Pane>,
-        direction: SplitDirection,
-        item: Box<dyn ItemHandle>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Entity<Pane> {
-        let new = self.add_pane(window, cx);
-        new.update(cx, |p, cx| p.add_item(item, true, false, window, cx));
-        self.center.split(pane, &new, direction);
-        new
+    /// Opens the Terminals grid on `rig`'s terminals (every one's for
+    /// `None`): `--view rig:<name>`, `/view terminals`.
+    pub fn show_rig_terminals(&mut self, rig: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        let grid = self.open_terminals(window, cx);
+        grid.update(cx, |grid, cx| grid.set_rig(rig, window, cx));
     }
 
     /// The selected agent's id.
@@ -1167,7 +1114,9 @@ impl Render for Workspace {
                 cx.listener(|this, _: &SwitchRig, window, cx| this.rig_action(RigAction::Select, window, cx)),
             )
             // The selected agent's actions, from the Fleet's keys and menu.
-            .on_action(cx.listener(|this, _: &TileAll, window, cx| this.tile_all(window, cx)))
+            .on_action(cx.listener(|this, _: &TileAll, window, cx| {
+                this.open_terminals(window, cx);
+            }))
             .on_action(cx.listener(|this, _: &OpenTerminal, window, cx| {
                 if let Some(id) = this.selected(cx) {
                     this.open_terminal(&id, window, cx);

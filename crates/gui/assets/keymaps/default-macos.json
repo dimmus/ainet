@@ -144,6 +144,26 @@
     }
   },
   {
+    // The Terminals grid itself, not one of its tiles (whose keys are the
+    // agent's): + - = set the columns and ctrl-r shows the next rig, as
+    // the TUI's; enter types into the tile last used.
+    "context": "Terminals && grid",
+    "bindings": {
+      "+": "terminals::MoreColumns",
+      "shift-=": "terminals::MoreColumns",
+      "-": "terminals::FewerColumns",
+      "=": "terminals::AutoColumns",
+      "ctrl-r": "terminals::CycleRig"
+    }
+  },
+  {
+    // Anywhere in the grid: back from a tile to the grid itself.
+    "context": "Terminals",
+    "bindings": {
+      "cmd-alt-g": "terminals::FocusGrid"
+    }
+  },
+  {
     // The Queue panel (bottom dock): the list keys move through the
     // items, enter shows one in full, shift-f10 opens its menu.
     "context": "QueuePanel",

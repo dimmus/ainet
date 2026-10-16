@@ -274,6 +274,8 @@ mod tests {
                     "Comms",
                     "QueuePanel",
                     "Map",
+                    "Terminals",
+                    "Terminals && grid",
                     "Picker",
                     "TabSwitcher",
                     "Form",
@@ -302,7 +304,16 @@ mod tests {
             for path in ["keymaps/default-linux.json", "keymaps/default-macos.json"] {
                 let (bound, _) = bindings(&parse(&Assets::text(path).unwrap()).unwrap(), cx);
                 let keymap = gpui::Keymap::new(bound);
-                let stack = ["Workspace", "Terminal"].map(|c| gpui::KeyContext::parse(c).unwrap());
+                // A terminal tab, and a tile of the Terminals grid.
+                let stacks = [
+                    vec!["Workspace", "Terminal"],
+                    vec!["Workspace", "Terminals", "Terminal"],
+                ]
+                .map(|s| {
+                    s.into_iter()
+                        .map(|c| gpui::KeyContext::parse(c).unwrap())
+                        .collect::<Vec<_>>()
+                });
                 let ctrl = ('a'..='z')
                     .map(String::from)
                     .chain(["\\".into()])
@@ -325,13 +336,19 @@ mod tests {
                     "a",
                     "j",
                     "space",
+                    "+",
+                    "-",
+                    "=",
+                    "shift-=",
                 ]
                 .map(String::from);
                 for keys in ctrl.chain(plain) {
                     let keystroke = gpui::Keystroke::parse(&keys).unwrap();
-                    let (found, _) = keymap.bindings_for_input(&[keystroke], &stack);
-                    let names: Vec<_> = found.iter().map(|b| b.action().name()).collect();
-                    assert!(names.is_empty(), "{path}: {keys} is bound to {names:?}");
+                    for stack in &stacks {
+                        let (found, _) = keymap.bindings_for_input(std::slice::from_ref(&keystroke), stack);
+                        let names: Vec<_> = found.iter().map(|b| b.action().name()).collect();
+                        assert!(names.is_empty(), "{path}: {keys} is bound to {names:?}");
+                    }
                 }
             }
         });

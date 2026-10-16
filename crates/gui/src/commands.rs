@@ -9,7 +9,7 @@ use ainet_model::{Command, Store, command};
 use gpui::{Action, App, Entity, Window};
 
 use crate::actions::panel::fleet_panel;
-use crate::actions::{Allow, Always, Deny, OpenComms, OpenInbox, OpenMap, Quit, TileAll, ToggleCritterSize};
+use crate::actions::{Allow, Always, Deny, OpenComms, OpenInbox, OpenMap, Quit, ToggleCritterSize};
 use crate::args::View;
 use crate::fleet::FleetModel;
 use crate::workspace::Workspace;
@@ -59,11 +59,10 @@ pub fn run(fleet: &Entity<FleetModel>, cmd: Command, window: &mut Window, cx: &m
             Ok(View::Comms) => Box::new(OpenComms),
             Ok(View::Inbox) => Box::new(OpenInbox),
             Ok(View::Map) => Box::new(OpenMap),
-            Ok(View::Terminals { rig: None }) => Box::new(TileAll),
-            // A rig's terminals: that rig's, whichever agent is selected.
-            Ok(View::Terminals { rig: Some(rig) }) => return tile_rig(&rig, window, cx),
+            // The Terminals grid, of every rig or of the one named.
+            Ok(View::Terminals { rig }) => return show_terminals(rig, window, cx),
             Ok(View::Named(name)) if fleet.read(cx).store.rigs.contains_key(&name) => {
-                return tile_rig(&name, window, cx);
+                return show_terminals(Some(name), window, cx);
             }
             Ok(View::Named(name)) => {
                 let text = format!("no view or rig named {name}");
@@ -77,15 +76,15 @@ pub fn run(fleet: &Entity<FleetModel>, cmd: Command, window: &mut Window, cx: &m
     window.dispatch_action(action, cx);
 }
 
-/// Tiles `rig`'s terminals in the window's workspace, once the view
-/// that ran the command is done (as a dispatched action would be).
-fn tile_rig(rig: &str, window: &mut Window, cx: &mut App) {
+/// Opens the Terminals grid on `rig`'s terminals (every one's for
+/// `None`) in the window's workspace, once the view that ran the command
+/// is done (as a dispatched action would be).
+fn show_terminals(rig: Option<String>, window: &mut Window, cx: &mut App) {
     let Some(workspace) = window.root::<Workspace>().flatten() else {
         return;
     };
-    let rig = rig.to_string();
     window.defer(cx, move |window, cx| {
-        workspace.update(cx, |w, cx| w.tile_rig(Some(&rig), window, cx));
+        workspace.update(cx, |w, cx| w.show_rig_terminals(rig, window, cx));
     });
 }
 

@@ -126,7 +126,8 @@ actions!(
         Operator,
         /// Selects the next agent waiting for you.
         NextWaiting,
-        /// Lays the rig's terminals out side by side, as the TUI's grid.
+        /// Opens the Terminals grid: every live terminal at once, as the
+        /// TUI's `^G`.
         TileAll,
         /// Finds an agent by name, seat, role or rig.
         ToggleSwitcher,
@@ -161,6 +162,23 @@ actions!(
         Reply,
         /// Completes the `@name` in the compose box.
         Complete,
+    ]
+);
+
+actions!(
+    terminals,
+    [
+        /// One column more in the Terminals grid.
+        MoreColumns,
+        /// One column fewer in the Terminals grid.
+        FewerColumns,
+        /// Lets the Terminals grid pick its columns from its shape again.
+        AutoColumns,
+        /// Shows the next rig's terminals in the grid: all, each rig, all.
+        CycleRig,
+        /// Gives the Terminals grid itself the keyboard, from one of its
+        /// tiles.
+        FocusGrid,
     ]
 );
 

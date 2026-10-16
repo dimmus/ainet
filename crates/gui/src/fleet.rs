@@ -167,6 +167,11 @@ pub struct FleetModel {
     shown: HashMap<EntityId, String>,
     /// Which shown screens are stale, and the sizes asked of their panes.
     pump: Pump,
+    /// The size each shown item was laid out at, with its agent.
+    laid_out: HashMap<EntityId, (String, (u16, u16))>,
+    /// Whose size each agent's pane takes: the item that was shown or got
+    /// the keyboard last, so two views of one agent never take turns.
+    size_owner: HashMap<String, EntityId>,
     /// The shown terminals streamed from ainetd, with their streams'
     /// numbers; the pump leaves them alone.
     streams: HashMap<String, u64>,
@@ -278,6 +283,8 @@ impl FleetModel {
             alerts: 0,
             shown: HashMap::new(),
             pump: Pump::new(),
+            laid_out: HashMap::new(),
+            size_owner: HashMap::new(),
             streams: HashMap::new(),
             pump_task: None,
             at: HashMap::new(),
@@ -470,17 +477,35 @@ impl FleetModel {
 
     /// Item `item` shows agent `agent`'s terminal: it is streamed, or its
     /// screen is fetched now and whenever the agent prints something.
+    /// Its size is the one the agent's pane takes from now on.
     pub fn show_terminal(&mut self, item: EntityId, agent: &str, cx: &mut Context<Self>) {
         self.shown.insert(item, agent.to_string());
+        self.claim_size(item, agent, cx);
         self.stream_or_fetch(agent, cx);
     }
 
     /// Item `item` no longer shows a terminal (hidden, closed or gone);
-    /// one no item shows any more stops streaming.
-    pub fn hide_terminal(&mut self, item: EntityId) {
+    /// one no item shows any more stops streaming. If the agent's pane had
+    /// its size, another view of the agent still on show passes on its.
+    pub fn hide_terminal(&mut self, item: EntityId, cx: &mut Context<Self>) {
+        self.laid_out.remove(&item);
         let Some(agent) = self.shown.remove(&item) else {
             return;
         };
+        if self.size_owner.get(&agent) == Some(&item) {
+            self.size_owner.remove(&agent);
+            let heir = self
+                .laid_out
+                .iter()
+                .find(|(_, (a, _))| *a == agent)
+                .map(|(id, (_, size))| (*id, *size));
+            if let Some((heir, size)) = heir {
+                self.size_owner.insert(agent.clone(), heir);
+                if self.ask_size(&agent, size) {
+                    self.pump(cx);
+                }
+            }
+        }
         if !self.is_shown(&agent) && self.streams.remove(&agent).is_some() {
             #[cfg(test)]
             self.detached.push(agent.clone());
@@ -531,17 +556,46 @@ impl FleetModel {
         self.pump(cx);
     }
 
-    /// `agent`'s terminal was laid out at `size` (rows, cols): asks its
-    /// pane to take that size, once per change, and fetches the screen.
-    pub fn resize_terminal(&mut self, agent: &str, size: (u16, u16), cx: &mut Context<Self>) {
-        if self.pump.resize(agent, size) {
+    /// Item `item` laid `agent`'s terminal out at `size` (rows, cols): if
+    /// the agent's pane takes this item's size (see
+    /// [`FleetModel::claim_size`]), asks it to, once per change, and
+    /// fetches the screen. Other views of the agent paint the screen at
+    /// the size it has.
+    pub fn resize_terminal(&mut self, item: EntityId, agent: &str, size: (u16, u16), cx: &mut Context<Self>) {
+        self.laid_out.insert(item, (agent.to_string(), size));
+        let owner = *self.size_owner.entry(agent.to_string()).or_insert(item);
+        if owner == item && self.ask_size(agent, size) {
+            self.pump(cx);
+        }
+    }
+
+    /// Item `item`, showing `agent`'s terminal, was shown or got the
+    /// keyboard: the agent's pane takes its size from now on (at once, if
+    /// it was laid out already). The latest view wins, so an agent shown
+    /// in the Terminals grid and in a tab of its own does not flip between
+    /// their sizes.
+    pub fn claim_size(&mut self, item: EntityId, agent: &str, cx: &mut Context<Self>) {
+        self.size_owner.insert(agent.to_string(), item);
+        let size = match self.laid_out.get(&item) {
+            Some((a, size)) if a == agent => *size,
+            _ => return,
+        };
+        if self.ask_size(agent, size) {
+            self.pump(cx);
+        }
+    }
+
+    /// Asks `agent`'s pane to take `size`, unless it was asked already.
+    fn ask_size(&mut self, agent: &str, size: (u16, u16)) -> bool {
+        let changed = self.pump.resize(agent, size);
+        if changed {
             self.quiet(Request::Resize {
                 agent: agent.to_string(),
                 rows: size.0,
                 cols: size.1,
             });
-            self.pump(cx);
         }
+        changed
     }
 
     /// The size `agent`'s pane was asked to take.
@@ -1039,8 +1093,8 @@ mod tests {
         cx.executor()
             .advance_clock(ainet_model::terminal::FETCH_EVERY * 2);
         fleet.update(cx, |f, cx| {
-            f.resize_terminal(&a, (30, 100), cx);
-            f.resize_terminal(&a, (30, 100), cx);
+            f.resize_terminal(item, &a, (30, 100), cx);
+            f.resize_terminal(item, &a, (30, 100), cx);
         });
         let fetched_at = fleet.update(cx, |f, _| std::mem::take(&mut f.fetched));
         assert_eq!(fetched_at, [(a.clone(), (30, 100))]);
@@ -1054,7 +1108,7 @@ mod tests {
 
         // Hidden: output no longer fetches.
         fleet.update(cx, |f, cx| {
-            f.hide_terminal(item);
+            f.hide_terminal(item, cx);
             f.apply(vec![output(&a)], cx);
         });
         cx.executor()
@@ -1093,7 +1147,7 @@ mod tests {
         fleet.update(cx, |f, cx| {
             f.apply(vec![output()], cx);
             f.input(&a, b"x", cx);
-            f.resize_terminal(&a, (30, 100), cx);
+            f.resize_terminal(second, &a, (30, 100), cx);
         });
         cx.executor()
             .advance_clock(ainet_model::terminal::FETCH_EVERY * 2);
@@ -1120,14 +1174,55 @@ mod tests {
         assert_eq!(take(cx).0, std::slice::from_ref(&a));
 
         // Hidden from one view it still streams; from both, it stops.
-        fleet.update(cx, |f, _| f.hide_terminal(first));
+        fleet.update(cx, |f, cx| f.hide_terminal(first, cx));
         assert!(fleet.read_with(cx, |f, _| f.detached.is_empty()));
-        fleet.update(cx, |f, _| f.hide_terminal(second));
+        fleet.update(cx, |f, cx| f.hide_terminal(second, cx));
         assert_eq!(
             fleet.read_with(cx, |f, _| f.detached.clone()),
             std::slice::from_ref(&a)
         );
         assert!(!fleet.read_with(cx, |f, _| f.is_streamed(&a)));
+    }
+
+    #[gpui::test]
+    async fn the_latest_view_of_an_agent_sizes_its_pane(cx: &mut TestAppContext) {
+        let fleet = cx.new(|_| FleetModel::empty(false));
+        let a = "a".to_string();
+        let resizes = |cx: &mut TestAppContext| {
+            fleet.update(cx, |f, _| {
+                std::mem::take(&mut f.sent)
+                    .into_iter()
+                    .filter_map(|(r, _)| match r {
+                        Request::Resize { rows, cols, .. } => Some((rows, cols)),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            })
+        };
+        let (tab, tile) = (EntityId::from(1u64), EntityId::from(2u64));
+        // A tab of its own, then a tile in the grid: the tile, shown last,
+        // sizes the pane; the tab laid out again (a window resize) does
+        // not take it back.
+        fleet.update(cx, |f, cx| {
+            f.show_terminal(tab, &a, cx);
+            f.resize_terminal(tab, &a, (40, 120), cx);
+            f.show_terminal(tile, &a, cx);
+            f.resize_terminal(tile, &a, (20, 60), cx);
+            f.resize_terminal(tab, &a, (41, 121), cx);
+        });
+        assert_eq!(resizes(cx), [(40, 120), (20, 60)]);
+        // The tab gets the keyboard: its size, at once.
+        fleet.update(cx, |f, cx| f.claim_size(tab, &a, cx));
+        assert_eq!(resizes(cx), [(41, 121)]);
+        fleet.update(cx, |f, cx| f.resize_terminal(tile, &a, (21, 61), cx));
+        assert!(resizes(cx).is_empty());
+        // Hidden, it passes the size to the view still on show.
+        fleet.update(cx, |f, cx| f.claim_size(tile, &a, cx));
+        assert_eq!(resizes(cx), [(21, 61)]);
+        fleet.update(cx, |f, cx| f.hide_terminal(tile, cx));
+        assert_eq!(resizes(cx), [(41, 121)]);
+        fleet.update(cx, |f, cx| f.hide_terminal(tab, cx));
+        assert!(resizes(cx).is_empty());
     }
 
     #[gpui::test]

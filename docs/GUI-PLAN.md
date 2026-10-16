@@ -611,7 +611,21 @@ From trying the app on a real display:
 
 Done in this phase so far: the Inbox as a table above the selected
 request, with a reply field that denies with a reason (a new optional
-`message` on `Request::Answer`) or messages the agent.
+`message` on `Request::Answer`) or messages the agent; and item 1, the
+Terminals grid (`terminals.rs`, see GUI.md "The Terminals grid"): one tab
+whose tiles are `TerminalItem`s told when they show and hide as a pane
+tells its tabs, replacing the split-based tiling (`Workspace::tile_rig`
+is gone) for `ctrl-g`, `--view terminals`/`rig:NAME`/`<rig>` and `/view`;
+`+ - =` and `ctrl-r` on the grid itself (context `Terminals && grid`),
+`ctrl-alt` arrows between tiles, `ctrl-alt-g` back to the grid, a tile
+zoomed inside the grid; the grid saved with its rig and columns. Two
+rules came with it: the view of an agent shown or focused last sizes its
+pane (`FleetModel::claim_size`), so a tile and a tab of one agent never
+take turns; and `ainet-model` has the grid's arithmetic
+(`terminal::{more_cols, fewer_cols, next_rig, grid_step}`, the first
+three now used by the TUI too, which behaves as before). Tiles in one
+pane redraw together (GPUI redraws a view's subtree), from their row
+caches.
 
 ## 6. Risks
 

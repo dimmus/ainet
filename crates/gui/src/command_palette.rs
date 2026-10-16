@@ -517,32 +517,30 @@ mod tests {
             );
         }
 
-        /// `/view rig:<name>` and `/view <rig>` tile that rig's terminals,
-        /// whichever agent is selected.
+        /// `/view rig:<name>` and `/view <rig>` show that rig's terminals in
+        /// the Terminals grid, whichever agent is selected; `/view
+        /// terminals` shows every one's.
         #[gpui::test]
-        async fn view_a_rig_tiles_that_rigs_terminals(cx: &mut TestAppContext) {
-            use crate::terminal_item::TerminalItem;
+        async fn view_a_rig_shows_that_rigs_terminals(cx: &mut TestAppContext) {
+            use crate::terminals::TerminalsItem;
 
             let (w, cx) = demo_workspace(cx);
             let fleet = w.read_with(cx, |w, _| w.fleet().clone());
             let tiled = |cx: &mut VisualTestContext| {
                 w.read_with(cx, |w, cx| {
-                    let mut ids: Vec<String> = w
+                    let grids: Vec<_> = w
                         .panes()
                         .iter()
                         .flat_map(|p| p.read(cx).items().map(|i| i.to_any()).collect::<Vec<_>>())
-                        .filter_map(|i| i.downcast::<TerminalItem>().ok())
-                        .map(|t| t.read(cx).agent_id().to_string())
+                        .filter_map(|i| i.downcast::<TerminalsItem>().ok())
                         .collect();
-                    ids.sort();
-                    ids
+                    assert_eq!(grids.len(), 1, "one grid");
+                    grids[0].read(cx).agents()
                 })
             };
             let infra = fleet.read_with(cx, |f, _| {
                 assert_ne!(f.store.selected_agent().unwrap().rig.as_deref(), Some("infra"));
-                let mut ids = f.store.terminal_ids(Some("infra"));
-                ids.sort();
-                ids
+                f.store.terminal_ids(Some("infra"))
             });
             assert!(!infra.is_empty());
             run_line("/view rig:infra", cx);
@@ -550,7 +548,9 @@ mod tests {
 
             let docs = fleet.read_with(cx, |f, _| f.store.terminal_ids(Some("docs")));
             run_line("/view docs", cx);
-            assert!(docs.iter().all(|id| tiled(cx).contains(id)));
+            assert_eq!(tiled(cx), docs);
+            run_line("/view terminals", cx);
+            assert_eq!(tiled(cx), fleet.read_with(cx, |f, _| f.store.terminal_ids(None)));
 
             run_line("/view nowhere", cx);
             let said = fleet.read_with(cx, |f, _| f.notices().last().map(|n| n.text.clone()));

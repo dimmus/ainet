@@ -27,6 +27,7 @@ use crate::persistence::{
     self, Debounce, SavedAxis, SavedDock, SavedItem, SavedMember, SavedWindow, SavedWorkspace,
 };
 use crate::terminal_item::TerminalItem;
+use crate::terminals::TerminalsItem;
 
 /// How often the workspace is compared with what was saved.
 pub const SAVE_CHECK: Duration = Duration::from_millis(1000);
@@ -239,7 +240,9 @@ impl Workspace {
             saved.retain(&|item| match item {
                 SavedItem::Terminal { agent } => store.agents.get(agent).is_some_and(|a| a.state.is_live()),
                 SavedItem::Unknown => false,
-                SavedItem::Inbox | SavedItem::Comms | SavedItem::Map { .. } => true,
+                SavedItem::Inbox | SavedItem::Comms | SavedItem::Map { .. } | SavedItem::Terminals { .. } => {
+                    true
+                }
             })
         };
         let Some(saved) = saved else { return };
@@ -340,6 +343,11 @@ impl Workspace {
                 };
                 map.update(cx, |map, cx| map.set_camera(camera, cx));
                 Box::new(map)
+            }
+            SavedItem::Terminals { rig, cols } => {
+                let grid = cx.new(|cx| TerminalsItem::new(fleet, rig, window, cx));
+                grid.update(cx, |grid, cx| grid.set_fixed_cols(cols, cx));
+                Box::new(grid)
             }
             SavedItem::Unknown => return None,
         })
@@ -558,6 +566,67 @@ mod tests {
         let recent = cx.update(|_, cx| command_palette::recent(cx));
         assert_eq!(recent, vec!["workspace: toggle left dock".to_string()]);
         assert_eq!(selected(&workspace, cx), left.selected, "the same agent selected");
+    }
+
+    #[gpui::test]
+    async fn the_terminals_grid_comes_back_with_its_rig_and_columns(cx: &mut TestAppContext) {
+        init_test(cx);
+        let file = temp_file("grid");
+        let left = {
+            let (workspace, cx) = open(cx, &file, demo);
+            let grid = cx.update(|window, cx| {
+                workspace.update(cx, |w, cx| {
+                    let grid = w.open_terminals(window, cx);
+                    grid.update(cx, |g, cx| {
+                        g.set_rig(Some("infra".into()), window, cx);
+                        g.set_fixed_cols(Some(2), cx);
+                    });
+                    grid
+                })
+            });
+            cx.run_until_parked();
+            assert_eq!(grid.read_with(cx, |g, _| g.agents().len()), 2);
+            workspace.update(cx, |w, cx| w.save_now(cx));
+            saved(&workspace, cx)
+        };
+        let Some(SavedMember::Pane { items, .. }) = &left.center else {
+            panic!("one pane: {:?}", left.center)
+        };
+        assert_eq!(
+            items,
+            &[SavedItem::Terminals {
+                rig: Some("infra".into()),
+                cols: Some(2)
+            }],
+            "the stand-in tab is not saved"
+        );
+
+        let (workspace, cx) = open(cx, &file, demo);
+        let grid = workspace.read_with(cx, |w, cx| {
+            w.active_pane()
+                .read(cx)
+                .active_item()
+                .and_then(|i| i.to_any().downcast::<TerminalsItem>().ok())
+                .expect("the grid is back")
+        });
+        let infra = live_agents(&workspace, cx);
+        let fleet = workspace.read_with(cx, |w, _| w.fleet().clone());
+        let infra: Vec<String> = fleet.read_with(cx, |f, _| {
+            infra
+                .into_iter()
+                .filter(|a| f.store.agents[a].rig.as_deref() == Some("infra"))
+                .collect()
+        });
+        grid.read_with(cx, |g, _| {
+            assert_eq!(g.rig(), Some("infra"));
+            assert_eq!(g.fixed_cols(), Some(2));
+            assert_eq!(g.agents(), infra);
+        });
+        assert!(
+            infra.iter().all(|a| fleet.read_with(cx, |f, _| f.is_shown(a))),
+            "on show"
+        );
+        assert_eq!(saved(&workspace, cx), left);
     }
 
     #[gpui::test]
