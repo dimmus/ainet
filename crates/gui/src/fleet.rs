@@ -510,7 +510,7 @@ impl FleetModel {
     pub fn quiet(&mut self, req: Request) {
         #[cfg(test)]
         self.sent.push((req.clone(), String::new()));
-        if let Some(link) = &self.link {
+        if let Some(link) = &mut self.link {
             link.quiet(req);
         }
     }

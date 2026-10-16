@@ -303,10 +303,19 @@ impl<S: Sink> Link<S> {
     }
 
     /// A request only the daemon acts on (keystrokes, resizes), quietly and
-    /// with a short timeout; the demo ignores it.
-    pub fn quiet(&self, req: Request) {
-        if let Backend::Daemon(socket) = &self.backend {
-            request(socket, req, &self.sink, String::new(), Duration::from_secs(3));
+    /// with a short timeout. The demo ignores it, but for keystrokes in the
+    /// desktop app's demo (`Demo::full`), which it echoes in the terminal.
+    pub fn quiet(&mut self, req: Request) {
+        match (&mut self.backend, req) {
+            (Backend::Daemon(socket), req) => {
+                request(socket, req, &self.sink, String::new(), Duration::from_secs(3));
+            }
+            (Backend::Demo(demo), Request::Input { agent, data }) => {
+                if demo.input(&agent, &data) {
+                    self.sink.send(Msg::Event(Box::new(Event::Output { agent })));
+                }
+            }
+            (Backend::Demo(_), _) => {}
         }
     }
 
