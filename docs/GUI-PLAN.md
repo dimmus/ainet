@@ -661,6 +661,30 @@ keyboard. `ainet-model` gained `topology` (tree, rows, filter, summary,
 changes, overview, health, scopes), all tested; no protocol change, the
 TUI untouched.
 
+Item 4, the Conversation view (`conversation.rs`, see GUI.md "The
+Conversation view"): a tab per agent (`ctrl-shift-o`, `c` in the Fleet,
+its menu, the terminal strip's chat button; splits; and
+`workspace::TileConversations` for a rig side by side) showing the
+session as Zed's agent panel would: your prompts on lighter blocks, the
+agent's words after a dot, tool calls as `Bash(cargo test)` with an
+output excerpt behind `⎿`, the messages ainetd typed in as framed blocks
+(From, To, Sent, body, `↩ Reply:`), `ainet …`/`rig …` commands in amber,
+a header with runtime and seat, a footer with permission mode, model and
+cwd, and a `❯` prompt box sending what the Message modal sends. The data
+is a new, additive `Request::Conversation { agent, tail, after }`
+answered with `ainet_core::Conversation` entries (serde defaults, empty
+fields left off, unknown kinds read as `other`), read by ainetd with
+`ainet_claude::transcript::thread` (forwards, whole lines, ids growing
+along the file); the tab asks for what came after its last entry (or
+from a call still running) when the agent moves and every 3 s while
+shown. An older ainetd's `bad request` falls back to `Transcript`'s text
+with a notice; Codex and shell seats get a notice. The text ainetd types
+for a message moved into `ainet-core` (`conversation::delivery`,
+`mention`, unchanged) so it is known again as an inbound message. The
+app's demo tells conversations that grow as it talks; the console's
+demo answers as before. The TUI only gained a no-op match arm for the
+new `Change::Conversation`.
+
 ## 6. Risks
 
 | Risk | Mitigation |

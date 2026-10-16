@@ -154,6 +154,10 @@ pub enum SavedItem {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         view: Option<String>,
     },
+    /// An agent's conversation.
+    Conversation {
+        agent: String,
+    },
     /// A kind this version does not know (a newer app's): dropped.
     #[serde(other)]
     Unknown,
@@ -549,6 +553,14 @@ mod tests {
                 cols: Some(2)
             }
         );
+    }
+
+    #[test]
+    fn a_conversation_saves_its_agent() {
+        let talk = SavedItem::Conversation { agent: "a".into() };
+        let text = serde_json::to_string(&talk).unwrap();
+        assert_eq!(text, r#"{"kind":"conversation","agent":"a"}"#);
+        assert_eq!(serde_json::from_str::<SavedItem>(&text).unwrap(), talk);
     }
 
     #[test]

@@ -27,10 +27,10 @@ use crate::actions::{
     ActivateNextItem, ActivateNextPane, ActivatePaneDown, ActivatePaneLeft, ActivatePaneRight,
     ActivatePaneUp, ActivatePreviousItem, ActivatePreviousPane, Allow, Always, Capture, CloseActiveItem,
     CloseAgent, CloseAllItems, CloseOtherItems, CloseWindow, Compose, Continue, Deny, MessageAgent,
-    NextWaiting, OpenComms, OpenInbox, OpenKeymap, OpenMap, OpenSettings, OpenTerminal, OpenTopology,
-    Operator, Relaunch, ReleaseSeat, RemoveSeat, SelectNext, SelectPrev, ShowTranscript, SplitDown,
-    SplitRight, TileAll, ToggleBottomDock, ToggleCritterSize, ToggleLeftDock, ToggleRightDock,
-    ToggleSwitcher, ToggleTypingGuard, ToggleZoom, terminal as terminal_actions,
+    NextWaiting, OpenComms, OpenConversation, OpenInbox, OpenKeymap, OpenMap, OpenSettings, OpenTerminal,
+    OpenTopology, Operator, Relaunch, ReleaseSeat, RemoveSeat, SelectNext, SelectPrev, ShowTranscript,
+    SplitDown, SplitRight, TileAll, TileConversations, ToggleBottomDock, ToggleCritterSize, ToggleLeftDock,
+    ToggleRightDock, ToggleSwitcher, ToggleTypingGuard, ToggleZoom, terminal as terminal_actions,
 };
 use crate::actions::{
     Down, Grow, Restore, Spawn, SwitchRig, Up, command_palette, tab_switcher, theme_selector,
@@ -41,6 +41,7 @@ use crate::chatroom::ChatroomPanel;
 use crate::command_line::CommandLine;
 use crate::command_palette::CommandPalette;
 use crate::comms::CommsItem;
+use crate::conversation::ConversationItem;
 use crate::decorations::client_side_decorations;
 use crate::dock::{Dock, DockPosition, DraggedDock, Panel, RESIZE_HANDLE_SIZE};
 use crate::events_panel::EventsPanel;
@@ -496,13 +497,40 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<Pane> {
+        let item = pane.read(cx).active_item().map(|i| i.boxed_clone());
+        let copy = item
+            .filter(|i| i.can_split(cx))
+            .and_then(|item| item.clone_on_split(window, cx));
+        match copy {
+            Some(copy) => self.split_pane_with(pane, direction, copy, window, cx),
+            None => self.split_pane_holding(pane, direction, None, window, cx),
+        }
+    }
+
+    /// Splits `pane`, `item` in the new pane, which takes the keyboard.
+    pub fn split_pane_with(
+        &mut self,
+        pane: &Entity<Pane>,
+        direction: SplitDirection,
+        item: Box<dyn ItemHandle>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<Pane> {
+        self.split_pane_holding(pane, direction, Some(item), window, cx)
+    }
+
+    fn split_pane_holding(
+        &mut self,
+        pane: &Entity<Pane>,
+        direction: SplitDirection,
+        item: Option<Box<dyn ItemHandle>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<Pane> {
         self.zoom_out(cx);
         let new = self.add_pane(window, cx);
-        let item = pane.read(cx).active_item().map(|i| i.boxed_clone());
-        if let Some(item) = item.filter(|i| i.can_split(cx))
-            && let Some(copy) = item.clone_on_split(window, cx)
-        {
-            new.update(cx, |p, cx| p.add_item(copy, true, false, window, cx));
+        if let Some(item) = item {
+            new.update(cx, |p, cx| p.add_item(item, true, false, window, cx));
         }
         self.center.split(pane, &new, direction);
         self.active_pane = new.clone();
@@ -793,6 +821,106 @@ impl Workspace {
         let item = cx.new(|cx| TerminalItem::new(fleet, id, window, cx));
         self.active_pane
             .update(cx, |p, cx| p.add_item(Box::new(item), true, true, window, cx));
+    }
+
+    /// Opens agent `id`'s conversation: activates its tab where one is
+    /// open (in any pane), else adds one to the active pane. Its prompt
+    /// box takes the keyboard, to write to the agent at once.
+    pub fn open_conversation(
+        &mut self,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<ConversationItem>> {
+        if !self.fleet.read(cx).store.agents.contains_key(id) {
+            return None;
+        }
+        for pane in self.panes() {
+            let found = pane.read(cx).items().position(|item| {
+                item.to_any()
+                    .downcast::<ConversationItem>()
+                    .is_ok_and(|c| c.read(cx).agent_id() == id)
+            });
+            if let Some(ix) = found {
+                self.active_pane = pane.clone();
+                pane.update(cx, |p, cx| p.activate_item(ix, true, window, cx));
+                let item = pane
+                    .read(cx)
+                    .active_item()
+                    .and_then(|i| i.to_any().downcast::<ConversationItem>().ok())?;
+                let focus = item.read(cx).prompt().focus_handle(cx);
+                window.focus(&focus, cx);
+                return Some(item);
+            }
+        }
+        let (fleet, id) = (self.fleet.clone(), id.to_string());
+        let item = cx.new(|cx| ConversationItem::new(fleet, id, window, cx));
+        self.active_pane.update(cx, |p, cx| {
+            p.add_item(Box::new(item.clone()), true, true, window, cx)
+        });
+        let focus = item.read(cx).prompt().focus_handle(cx);
+        window.focus(&focus, cx);
+        cx.notify();
+        Some(item)
+    }
+
+    /// `workspace::TileConversations`: the conversations of the selected
+    /// agent's rig (its live agents, in the Fleet's order) side by side,
+    /// each in a pane of its own to the right of the one before; the
+    /// first goes in the active pane unless that shows a conversation.
+    /// One already open stays where it is.
+    pub fn tile_conversations(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let store = &self.fleet.read(cx).store;
+        let agents = store
+            .rig_for(None, None)
+            .map(|rig| store.terminal_ids(Some(&rig)))
+            .unwrap_or_default();
+        if agents.is_empty() {
+            return self.fleet.update(cx, |fleet, cx| {
+                fleet.show(
+                    "select an agent in a rig with live agents to lay out their conversations".into(),
+                    true,
+                    cx,
+                )
+            });
+        }
+        let is_open = |id: &str, this: &Self, cx: &App| {
+            this.panes().iter().any(|pane| {
+                pane.read(cx).items().any(|item| {
+                    item.to_any()
+                        .downcast::<ConversationItem>()
+                        .is_ok_and(|c| c.read(cx).agent_id() == id)
+                })
+            })
+        };
+        let mut last: Option<Entity<Pane>> = None;
+        for id in agents {
+            if is_open(&id, self, cx) {
+                continue;
+            }
+            let item = {
+                let fleet = self.fleet.clone();
+                cx.new(|cx| ConversationItem::new(fleet, id, window, cx))
+            };
+            let showing_one = self
+                .active_pane
+                .read(cx)
+                .active_item()
+                .is_some_and(|i| i.to_any().downcast::<ConversationItem>().is_ok());
+            match last.clone() {
+                None if !showing_one => {
+                    self.active_pane
+                        .update(cx, |p, cx| p.add_item(Box::new(item), true, true, window, cx));
+                    last = Some(self.active_pane.clone());
+                }
+                from => {
+                    let from = from.unwrap_or_else(|| self.active_pane.clone());
+                    last =
+                        Some(self.split_pane_with(&from, SplitDirection::Right, Box::new(item), window, cx));
+                }
+            }
+        }
+        cx.notify();
     }
 
     /// Opens the Terminals grid (`ctrl-g`) and gives it the keyboard:
@@ -1189,6 +1317,14 @@ impl Render for Workspace {
                 }
             }))
             .on_action(cx.listener(|this, _: &MessageAgent, window, cx| this.message_agent(window, cx)))
+            .on_action(cx.listener(|this, _: &OpenConversation, window, cx| {
+                if let Some(id) = this.selected(cx) {
+                    this.open_conversation(&id, window, cx);
+                }
+            }))
+            .on_action(
+                cx.listener(|this, _: &TileConversations, window, cx| this.tile_conversations(window, cx)),
+            )
             .on_action(cx.listener(|this, _: &CloseAgent, window, cx| this.close_agent(window, cx)))
             .on_action(
                 cx.listener(|this, _: &ShowTranscript, _, cx| {

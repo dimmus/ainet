@@ -12,6 +12,7 @@ mod command_line;
 mod command_palette;
 mod commands;
 mod comms;
+mod conversation;
 mod critter;
 mod decorations;
 mod dock;

@@ -41,6 +41,9 @@ actions!(
         OpenMap,
         /// Opens the Topology view as a tab: the rigs and their seats.
         OpenTopology,
+        /// Lays the conversations of the selected agent's rig side by
+        /// side, a pane each.
+        TileConversations,
         /// Makes the active pane fill the window, or puts it back.
         ToggleZoom,
         /// Moves the keyboard to the next pane.
@@ -87,6 +90,9 @@ actions!(
         SelectPrev,
         /// Opens the selected agent's terminal as a tab.
         OpenTerminal,
+        /// Opens the selected agent's conversation as a tab: its session
+        /// read from the transcript, with a box to message it.
+        OpenConversation,
         /// Starts a message to the selected agent.
         MessageAgent,
         /// Closes the selected agent (its process ends), after asking.

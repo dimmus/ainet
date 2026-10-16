@@ -25,8 +25,9 @@ use ui::{
 };
 
 use crate::actions::{
-    Capture, CloseAgent, CollapseRig, Continue, ExpandRig, MessageAgent, OpenContextMenu, OpenTerminal,
-    Relaunch, ReleaseSeat, RemoveSeat, SelectNext, SelectPrev, ShowTranscript, ToggleTypingGuard,
+    Capture, CloseAgent, CollapseRig, Continue, ExpandRig, MessageAgent, OpenContextMenu, OpenConversation,
+    OpenTerminal, Relaunch, ReleaseSeat, RemoveSeat, SelectNext, SelectPrev, ShowTranscript,
+    ToggleTypingGuard,
 };
 use crate::critter::{Animation, Critter};
 use crate::dock::Panel;
@@ -60,6 +61,7 @@ pub fn agent_menu(
         menu.context(focus)
             .action("Message…", MessageAgent.boxed_clone())
             .action("Open Terminal", OpenTerminal.boxed_clone())
+            .action("Open Conversation", OpenConversation.boxed_clone())
             .action("Show Transcript", ShowTranscript.boxed_clone())
             .action("Capture Screen", Capture.boxed_clone())
             .separator()
@@ -875,11 +877,11 @@ mod tests {
         let bounds = row_bounds(row, cx).expect("drawn");
 
         // A right click selects the agent and opens its menu; picking
-        // Relaunch (the fifth entry) relaunches its seat afresh.
+        // Relaunch (the sixth entry) relaunches its seat afresh.
         cx.simulate_mouse_down(bounds.center(), MouseButton::Right, Modifiers::none());
         assert_eq!(selected(&fleet, cx), Some(ui.clone()));
         assert!(panel.read_with(cx, |p, _| p.context_menu().is_some()));
-        cx.simulate_keystrokes("down down down down down enter");
+        cx.simulate_keystrokes("down down down down down down enter");
         assert!(panel.read_with(cx, |p, _| p.context_menu().is_none()));
         match last_sent(&fleet, cx) {
             (Request::Launch { seat, fresh }, ok) => {

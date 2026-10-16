@@ -24,7 +24,7 @@ use gpui::{
 };
 use ui::{ContextMenu, Indicator, Tooltip, prelude::*};
 
-use crate::actions::{MessageAgent, terminal};
+use crate::actions::{MessageAgent, OpenConversation, terminal};
 use crate::critter::{Animation, Critter};
 use crate::fleet::{FleetModel, ScreenChanged, Tick};
 use crate::item::{Item, ItemEvent, TabContentParams};
@@ -510,8 +510,8 @@ impl TerminalItem {
         cx.notify();
     }
 
-    /// The strip above the screen: who, where, in what state, and a
-    /// button to message the agent.
+    /// The strip above the screen: who, where, in what state, and buttons
+    /// to its conversation and to message it.
     fn render_header(&self, focused: bool, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let fleet = self.fleet.read(cx);
         let agent = fleet.store.agents.get(&self.agent)?;
@@ -565,6 +565,19 @@ impl TerminalItem {
                             .size(LabelSize::Small)
                             .color(Color::Accent),
                     )
+                })
+                .child({
+                    let (fleet, id) = (self.fleet.clone(), agent.id.clone());
+                    let focus = self.focus_handle.clone();
+                    IconButton::new("open-conversation", IconName::Chat)
+                        .icon_size(IconSize::Small)
+                        .tooltip(move |_, cx| {
+                            Tooltip::for_action_in("Open Conversation", &OpenConversation, &focus, cx)
+                        })
+                        .on_click(move |_, window, cx| {
+                            fleet.update(cx, |fleet, cx| fleet.select(&id, cx));
+                            window.dispatch_action(OpenConversation.boxed_clone(), cx);
+                        })
                 })
                 .child(
                     IconButton::new("message-agent", IconName::Envelope)

@@ -12,7 +12,9 @@ use std::time::Duration;
 
 use gpui::{AppContext, HeadlessAppContext, WindowHandle, px, size};
 
+use crate::conversation::ConversationItem;
 use crate::fleet::FleetModel;
+use crate::pane_group::SplitDirection;
 use crate::topology::SubView;
 use crate::workspace::Workspace;
 
@@ -64,7 +66,7 @@ fn the_demo_workspace() {
     std::fs::create_dir_all(out_dir()).expect("target/screenshots");
 
     capture(&mut cx, window, "workspace");
-    let views: [(&str, OpenView); 7] = [
+    let views: [(&str, OpenView); 8] = [
         ("terminal", |w, window, cx| {
             let selected = w.fleet().read(cx).store.selected.clone();
             if let Some(id) = selected {
@@ -91,6 +93,25 @@ fn the_demo_workspace() {
         ("topology-health", |w, window, cx| {
             let t = w.open_topology(window, cx);
             t.update(cx, |t, cx| t.show_view(SubView::Health, cx));
+        }),
+        // Two conversations side by side, as OpenRig's.
+        ("conversations", |w, window, cx| {
+            let seat = |w: &Workspace, seat: &str, cx: &gpui::App| {
+                let store = &w.fleet().read(cx).store;
+                store
+                    .agents
+                    .values()
+                    .find(|a| a.seat.as_deref() == Some(seat))
+                    .map(|a| a.id.clone())
+            };
+            let (Some(lead), Some(app)) = (seat(w, "orch-lead@docs", cx), seat(w, "dev-app@docs", cx)) else {
+                return;
+            };
+            w.open_conversation(&lead, window, cx);
+            let pane = w.active_pane().clone();
+            let fleet = w.fleet().clone();
+            let item = cx.new(|cx| ConversationItem::new(fleet, app, window, cx));
+            w.split_pane_with(&pane, SplitDirection::Right, Box::new(item), window, cx);
         }),
     ];
     for (name, open) in views {

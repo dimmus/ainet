@@ -11,6 +11,7 @@ Contents: [the pin](#the-pin) · [a workspace of its own](#a-workspace-of-its-ow
 [the workspace pieces](#the-workspace-pieces) · [Fleet and Agent panels](#the-fleet-and-agent-panels) ·
 [terminals](#the-terminal) · [the Terminals grid](#the-terminals-grid) ·
 [the command line](#the-command-line) · [the Topology view](#the-topology-view) ·
+[the Conversation view](#the-conversation-view) ·
 [the Inbox](#the-inbox) · [Comms](#comms) ·
 [the bottom dock](#the-bottom-dock-and-reports) · [the Map](#the-map) ·
 [palette and modals](#the-command-palette-pickers-and-modals) ·
@@ -154,6 +155,7 @@ Keys (Linux; macOS has the `cmd` equivalents), in the keymaps:
 | `shift-escape` | zoom the active pane, or put it back |
 | `ctrl-b`, `ctrl-alt-b`, `ctrl-j` | left, right, bottom dock |
 | `ctrl-shift-c`, `ctrl-shift-i`, `ctrl-t`, `ctrl-shift-t` | Comms, Inbox, Map, Topology tabs |
+| `ctrl-shift-o` | the selected agent's conversation (also from a terminal: its agent is the selected one) |
 | `ctrl-y`, `ctrl-a`, `ctrl-n` | allow, always allow, deny (outside the Inbox: open it on the oldest request) |
 | `ctrl-p` | the agent switcher |
 | `ctrl-shift-p` | the command palette |
@@ -200,6 +202,7 @@ agent so the menu shows their bindings:
 |---|---|---|
 | Message… | `m` | `Message { to: [id], force: true }` (`@Name text`) |
 | Open Terminal | `enter`, double click | — (opens the tab) |
+| Open Conversation | `c` | `Conversation { agent }` (the Conversation view) |
 | Show Transcript | | `Transcript { agent }`, shown as a report tab |
 | Capture Screen | | `Capture` (`/capture`) |
 | Relaunch | | `Launch { fresh: true }` (`/relaunch`) |
@@ -236,7 +239,7 @@ sizes as `Resize`.
 
 | File | What | After Zed's |
 |---|---|---|
-| `terminal_item.rs` | the tab: critter, name and a state dot; a strip with the seat address, state, "Typing · messages held" while focused, the scroll position and a message button (`fleet::MessageAgent`); keys, mouse, menu and actions | `terminal_view::TerminalView` |
+| `terminal_item.rs` | the tab: critter, name and a state dot; a strip with the seat address, state, "Typing · messages held" while focused, the scroll position, a conversation button (`fleet::OpenConversation`) and a message button (`fleet::MessageAgent`); keys, mouse, menu and actions | `terminal_view::TerminalView` |
 | `terminal_element.rs` | `TerminalElement`: measures a cell of the terminal font, fits rows × columns in its bounds, paints backgrounds, selection, text and cursor; rows shaped once and kept while they show the same (`ShapedRow` in the item's `RowCache`) | `terminal_view::TerminalElement` |
 | `terminal_layout.rs` | the pure part: a screen as merged background rectangles and runs of text of one style (bold, italic, underline, inverse, dim; 16, 256 and true colours through the theme's terminal ANSI colours), wide characters, selections and their text, scrollback laid out as a screen (with its colours when ainetd sends them), `row_keys` and `RowCache` | `layout_grid`, `convert_color` |
 | `terminal_input.rs` | a GPUI `Keystroke` as the bytes xterm sends, through `ainet_model::terminal::encode_in` (the TUI's table) | `terminal::mappings::keys` |
@@ -768,6 +771,138 @@ item as a report, a click and `home`; `--view topology:infra`, `/view
 topology:docs` and a wrong rig; an empty fleet. Also `persist.rs` (back
 on its pod and tab) and `persistence.rs` (its saved form).
 
+## The Conversation view
+
+`ConversationItem` (`conversation.rs`) is OpenRig's communication view: an
+agent's session as a readable thread rather than a raw terminal, styled
+after Zed's agent panel (`agent_ui`'s thread view). One tab per agent,
+opened by `fleet::OpenConversation` (`ctrl-shift-o`, `c` in the Fleet,
+Open Conversation in the agent's menu, the chat button in a terminal's
+strip; an open one is activated) with its prompt box at the keyboard.
+It splits like a terminal (`ctrl-\` gives a second view of the same
+agent), and `workspace::TileConversations` (the palette's "workspace:
+tile conversations") lays the live agents of the selected agent's rig
+side by side, each in a pane of its own to the right of the one before
+(the first in the active pane unless that shows a conversation; one
+already open stays where it is), as OpenRig shows two seats at once.
+
+- **Header.** The critter, the runtime ("Claude Code", "Codex") and the
+  seat, the state, how many entries, a button to the terminal and one to
+  read again.
+- **The thread** (a `gpui::list`, rows of any height, only those on show
+  drawn), oldest first:
+  - *You*: your prompt on a lighter, bordered block (the theme's element
+    background), with how long ago.
+  - *The agent's words*: paragraphs after a dot, fenced code in the
+    buffer font.
+  - *Tool calls*: `● Bash(cargo test)` in the buffer font, the tool's
+    name in bold, the dot green when done, red when it failed (with
+    "failed"), the accent while it runs; what it was for below, muted;
+    then **Output excerpt**, the first five lines of its result
+    (stdout, else stderr, else the result's text) behind `⎿`, indented
+    with a rule on the left as Zed's tool output.
+  - *Messages* ainetd typed into the terminal: a framed block, "Message
+    #4" (or "Reply #9 to #7", "Mention in docs · general"), From (in the
+    sender's colour), To (the seat), Sent, a rule, the body, a rule, and
+    `↩ Reply: ainet msg reply 4 "…"`.
+  - Commands of ainet and OpenRig (`ainet queue show …`, `rig send …`,
+    after a space, quote, bracket or backtick and followed by one of
+    their subcommands, to the closing backtick or the end of the line)
+    are drawn in the theme's warning colour (amber) wherever they
+    appear: in a tool call, in words, in code.
+- **Prompt box.** `❯` and a multi-line `TextInput` (six lines before it
+  scrolls): enter sends, `shift-enter` starts a new line, escape gives the
+  thread the keyboard (and enter on the thread gives it back). It sends
+  what the Message modal sends (`command::message_to`: to this agent,
+  delivered into its terminal through the typing guard), so the message
+  comes back into the thread as ainetd typed it.
+- **Footer.** The permission mode, model and working directory as the
+  transcript last said them (else as the fleet knows the agent).
+- **Sticking to the end.** As Comms (`comms::sticks`): new entries keep
+  it at the bottom unless you scrolled up; sending brings it back.
+
+**Where it comes from.** `Request::Conversation { agent, tail, after }`
+(added without bumping `protocol::VERSION`) answers
+`Response::Conversation { conversation }`: `ainet_core::Conversation`
+(entries, model, cwd, permission mode, a notice, plain text), each
+`ConversationEntry` a kind (`you`, `reply`, `tool`, `inbound`, and
+`other` for kinds a newer daemon adds), an id, when, and only the
+fields it uses (the rest are left off the line). ainetd reads it with
+`ainet_claude::transcript::thread`: forwards from a place in the file (or
+the last 8 MiB), whole lines only (a line being written waits for the
+next read), prompts, words and tool calls with their results attached,
+skipping meta lines, command echoes and Claude Code's own notes; an id
+is the line's byte offset times 64 plus the block's place in it, so ids
+grow along the file and `after` asks for what came later. A prompt that
+reads as a delivery becomes an inbound message:
+`ainet_core::conversation::{delivery, mention}` make the text ainetd
+types in (the daemon now calls them; the text is unchanged) and
+`parse_delivery` reads it back. A Codex or shell seat gets a notice
+(`conversation::unreadable`), a Claude Code session that has not named
+its transcript yet another (`NO_TRANSCRIPT`).
+
+**Keeping up.** The tab asks for what came after its last entry, or from
+the first tool call since your last prompt still waiting for its result
+(`resume_after`), and splices it in (`merge`), when its agent moves (its
+state, its last tool, a message to or from it, a new snapshot; a new
+transcript, a new session in the seat, is read from the start), and every
+3 s (`POLL_EVERY`) while it shows, since words are written without a
+hook firing. A hidden tab asks nothing and catches up once shown; one
+request at a time. `FleetModel::conversation` routes the reply to the
+tab (`Link::conversation`, `Msg::Conversation`, `Change::Conversation`),
+without re-rendering anything else.
+
+**An older ainetd** answers `bad request: unknown variant`; the link then
+asks `Request::Transcript` and hands back its text as the conversation's
+`plain` text with a notice (`link::OLD_DAEMON`), shown in the buffer font
+under it, read whole again each time. The demo (`Demo::full`) tells
+believable conversations: each agent's task and queue item, `ainet queue
+show`, a tool call, words naming an `ainet` command, its checks (failed
+for the agent that needs you), then every message it got (as ainetd
+typed it) and sent (as the `ainet msg` command it ran), so the thread
+grows as the demo talks and as you write; the console's demo answers it
+cannot. `Demo::without_conversations` plays an older daemon for tests.
+
+Saved as `{ "kind": "conversation", "agent": "…" }`, and restored while
+the fleet still knows the agent, gone or not (its transcript is still
+there to read).
+
+Keys (context `Conversation`; nothing bare is bound there, so typing in
+the box never triggers a key):
+
+| Keys | Where | Action |
+|---|---|---|
+| `ctrl-shift-o` (`cmd-shift-o` on macOS) | anywhere | `fleet::OpenConversation` |
+| `c` | the Fleet | `fleet::OpenConversation` |
+| | the palette | `workspace::TileConversations` |
+| `enter`, `shift-enter` | the prompt box | send, new line |
+| `escape` | the prompt box | the thread takes the keyboard |
+| `enter` | the thread | the prompt box takes the keyboard |
+
+Tests: in `ainet-core`, deliveries and mentions read back (cut short,
+or not ainetd's at all), entries leaving empty fields off and reading
+kinds and fields from newer daemons, and the request and reply on the
+wire; in `ainet-claude`, the transcript fixture
+(`tests/fixtures/transcript-2.1.289/`, a session shaped like Claude Code
+2.1.289 writes it) read as a thread (the echo and meta lines skipped,
+results attached, a failed call, a Read's text, a call still running,
+the session's model, cwd and permission mode) and read on from a place
+(a result arriving for a call that was waiting, a half-written line
+read once whole); in `ainet-daemon`, the fixture's entries with its
+delivered message known; in `ainet-model`, the demo's conversations
+growing with a message and a Codex notice, the link against a pretend
+daemon that sends entries and an old one that does not (the transcript
+as text), and the reply's errors. Headless (`conversation.rs`): the
+demo's thread drawn (a prompt, words, a tool call with its output, the
+message it got, the commands standing out, the footer), one tab however
+often opened; the prompt box sending the Message modal's request and the
+thread asking for what came after its last entry and showing it,
+followed; escape and enter between box and thread; a hidden tab asking
+nothing until shown, then polling; a Codex seat's notice; an older
+daemon's text and notice; `c`, `ctrl-shift-o` and `TileConversations`.
+Also `persist.rs` (conversations back, of a gone agent too) and
+`persistence.rs` (its saved form).
+
 ## The Inbox
 
 `InboxItem` (`inbox.rs`) is the TUI's Inbox as a tab, opened by
@@ -1169,7 +1304,7 @@ one workspace per daemon socket and one for the demo:
   dragged to a size; the pane tree with its splits, shares, tabs, each
   pane's active tab and the active pane; the Fleet's folded rigs and
   selected agent; the Map's zoom and pan (with its tab); the palette's recent actions (the
-  last 50) and the command line's lines (the last 50). Terminals are saved by agent id, the Inbox, Comms and the Map
+  last 50) and the command line's lines (the last 50). Terminals and conversations are saved by agent id, the Inbox, Comms and the Map
   as themselves, the Terminals grid with its rig filter and the columns
   asked for, the Topology view with its rig, pod or loose agents and its
   tab; reports and the stand-in tab are not saved.
@@ -1299,7 +1434,7 @@ the status bar (`themes:`).
 
 Keys: `crates/gui/assets/keymaps/default-{linux,macos}.json`, in Zed's
 format, with the contexts `Workspace`, `FleetPanel`, `Terminal`, `Inbox`,
-`Comms`, `CommsCompose`, `CommandLine`, `QueuePanel`, `Map`, `Terminals` (with `grid`), `Topology` (with `view`), `Picker`, `TabSwitcher`, `Form` and `TextInput` (see "The workspace pieces" for the
+`Comms`, `CommsCompose`, `CommandLine`, `QueuePanel`, `Map`, `Terminals` (with `grid`), `Topology` (with `view`), `Conversation` (for user bindings; none by default), `Picker`, `TabSwitcher`, `Form` and `TextInput` (see "The workspace pieces" for the
 pane, dock and text keys). `~/.config/ainet/keymap.json` adds to them and
 overrides them (`null` unbinds), and reloads on save; bindings it cannot
 read are listed in the status bar and the rest apply. `ctrl-alt-,` opens
@@ -1356,6 +1491,7 @@ module; modules without tests of their own are covered where named):
 | `agent_panel.rs` | 2 | 1 | the selected agent, the gauge, the sparkline |
 | `terminal_item.rs`, `terminal_element.rs`, `terminal_layout.rs`, `terminal_input.rs` | 16 | 12 | layout, colours, selections, row cache and keys; key encoding; the screen drawn, focus and `Interact`, keys past the workspace, one `Resize`, scrollback, copy and paste, the right-click menu by its keys (Paste, Send Ctrl-C, Copy, Clear Selection, Message…, Zoom; escape types nothing), redrawing only what changed |
 | `terminals.rs` | | 11 | the Terminals grid: tiles in the TUI's order, the rig filter, columns, a click and `ctrl-alt` arrows giving tiles the keys with `Interact`, zoom, a hidden grid fetching nothing, tiles following agents, the size rule, `OpenTerminal` into a tile, views opening it |
+| `conversation.rs` | 3 | 6 | the Conversation view: commands found in text, tool titles and reply hints, asking again from a call still running and merging; the demo's thread drawn, the prompt box's request and the thread growing, a hidden tab catching up and polling, Codex's notice, an older daemon's text, the keys and tiling a rig |
 | `topology.rs` | | 9 | the Topology view: the tree and the docs table by pod, scopes by click and `ctrl-r`, the filter keeping its letters, enter and a double click opening terminals, the agent menu, the tabs, the Graph, Health, Recent showing items, views and commands opening it, an empty fleet |
 | `command_line.rs` | 4 | 6 | the history, lines as the TUI's and their previews; each kind of line sent through the demo link, errors in the line and as toasts, completion, recall, `ctrl-;` and escape, letters never reaching other views' keys, the setting |
 | `inbox.rs` | 4 | 8 | order, detail styles, picks, the glow; the answer keys, cards by selection and click, the Allow, Always and Deny buttons answering their own card, questions, `ctrl-shift-y`, history, alerts |
@@ -1377,8 +1513,9 @@ demo workspace offscreen with GPUI's own renderer
 (`gpui::HeadlessAppContext`, `gpui_platform::current_headless_renderer`,
 which is wgpu without a surface, and the Linux app's cosmic-text text
 system) and writes `workspace.png`, `terminal.png`, `inbox.png`,
-`map.png`, `topology.png`, `topology-recent.png`, `topology-overview.png`
-and `topology-health.png` into `target/screenshots/`:
+`map.png`, `topology.png`, `topology-recent.png`, `topology-overview.png`,
+`topology-health.png` and `conversations.png` (two side by side) into
+`target/screenshots/`:
 
 ```sh
 just screenshot-gui   # cargo test --manifest-path crates/gui/Cargo.toml screenshot -- --ignored --nocapture
@@ -1439,6 +1576,14 @@ Collected from the plan's phase notes; none of these is started.
   the item is now; Health's quiet check relies on the hook counts
   ainetd reports per agent (an agent without them is never called quiet); the explorer is not folded or
   driven by keys.
+- **Conversation view:** Codex seats show a notice only (ainet does not
+  read Codex's own session log); Markdown beyond fenced code (no
+  headings, lists or inline code styling: inline backticks show as
+  typed); thinking blocks, images and subagents' threads are left out;
+  a tool call shows its first five lines, not the whole result or an
+  Edit's diff; no search; only the last 200 entries at first (older ones
+  are not fetched on scrolling up); an older ainetd's text is fetched
+  whole on every look.
 - **Inbox:** Markdown beyond headings,
   lists and fenced code, keyboard focus on single buttons.
 - **Comms:** a right-click menu on messages, a completion list while

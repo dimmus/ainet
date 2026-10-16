@@ -19,6 +19,7 @@ use ui::prelude::*;
 use super::Workspace;
 use crate::command_palette;
 use crate::comms::CommsItem;
+use crate::conversation::ConversationItem;
 use crate::inbox::InboxItem;
 use crate::item::{ItemHandle, Placeholder};
 use crate::map::{Camera, MapItem};
@@ -244,6 +245,8 @@ impl Workspace {
             let store = &self.fleet.read(cx).store;
             saved.retain(&|item| match item {
                 SavedItem::Terminal { agent } => store.agents.get(agent).is_some_and(|a| a.state.is_live()),
+                // Its transcript is still there to read once it is gone.
+                SavedItem::Conversation { agent } => store.agents.contains_key(agent),
                 SavedItem::Unknown => false,
                 SavedItem::Inbox
                 | SavedItem::Comms
@@ -339,6 +342,9 @@ impl Workspace {
         Some(match saved {
             SavedItem::Terminal { agent } => {
                 Box::new(cx.new(|cx| TerminalItem::new(fleet, agent, window, cx)))
+            }
+            SavedItem::Conversation { agent } => {
+                Box::new(cx.new(|cx| ConversationItem::new(fleet, agent, window, cx)))
             }
             SavedItem::Inbox => Box::new(cx.new(|cx| InboxItem::new(fleet, window, cx))),
             SavedItem::Comms => Box::new(cx.new(|cx| CommsItem::new(fleet, window, cx))),
@@ -647,6 +653,56 @@ mod tests {
             assert_eq!(t.shown().len(), 3, "the pod's seats");
         });
         assert_eq!(saved(&workspace, cx), left);
+    }
+
+    #[gpui::test]
+    async fn conversations_come_back_even_of_agents_gone(cx: &mut TestAppContext) {
+        init_test(cx);
+        let file = temp_file("conversation");
+        let (live, gone) = {
+            let (workspace, cx) = open(cx, &file, demo);
+            let ids = workspace.read_with(cx, |w, cx| {
+                let store = &w.fleet().read(cx).store;
+                let live = store.terminal_ids(Some("docs"))[0].clone();
+                let gone = store
+                    .agents
+                    .values()
+                    .find(|a| !a.state.is_live())
+                    .map(|a| a.id.clone())
+                    .expect("the demo has one gone");
+                (live, gone)
+            });
+            cx.update(|window, cx| {
+                workspace.update(cx, |w, cx| {
+                    w.open_conversation(&ids.1, window, cx);
+                    w.open_conversation(&ids.0, window, cx);
+                })
+            });
+            cx.run_until_parked();
+            workspace.update(cx, |w, cx| w.save_now(cx));
+            let left = saved(&workspace, cx);
+            let Some(SavedMember::Pane { items, .. }) = &left.center else {
+                panic!("one pane: {:?}", left.center)
+            };
+            assert_eq!(
+                items,
+                &[
+                    SavedItem::Conversation { agent: ids.1.clone() },
+                    SavedItem::Conversation { agent: ids.0.clone() }
+                ]
+            );
+            ids
+        };
+        let (workspace, cx) = open(cx, &file, demo);
+        let back: Vec<String> = workspace.read_with(cx, |w, cx| {
+            w.active_pane()
+                .read(cx)
+                .items()
+                .filter_map(|i| i.to_any().downcast::<ConversationItem>().ok())
+                .map(|c| c.read(cx).agent_id().to_string())
+                .collect()
+        });
+        assert_eq!(back, [gone, live], "a transcript stays to be read");
     }
 
     #[gpui::test]

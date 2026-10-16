@@ -25,8 +25,8 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
-use ainet_core::Request;
 use ainet_core::client::Client;
+use ainet_core::{Conversation, Request};
 use ainet_model::journal::{self, Happening};
 use ainet_model::{Backend, Change, Command, Link, Listing, Msg, Pump, Store, Tally, daemon};
 use futures::StreamExt;
@@ -55,6 +55,9 @@ pub type OnReply = Box<dyn FnOnce(Result<String, String>, &mut App)>;
 
 /// What hears the items of a request asked with [`FleetModel::list`].
 pub type OnListing = Box<dyn FnOnce(Result<Listing, String>, &mut App)>;
+
+/// What hears a conversation asked for with [`FleetModel::conversation`].
+pub type OnConversation = Box<dyn FnOnce(Result<Conversation, String>, &mut App)>;
 
 /// A request whose reply is long text to read whole (a transcript, a
 /// spec, a queue item): the workspace opens it as a report tab and asks
@@ -186,6 +189,8 @@ pub struct FleetModel {
     asked: HashMap<u64, OnReply>,
     /// Who hears the listings on their way, by token.
     listed: HashMap<u64, OnListing>,
+    /// Who hears the conversations on their way, by token.
+    conversations: HashMap<u64, OnConversation>,
     next_token: u64,
     /// What happened, the latest last, at most [`KEEP_EVENTS`].
     events: VecDeque<Rc<Happening>>,
@@ -214,9 +219,14 @@ pub struct FleetModel {
 impl FleetModel {
     /// The pretend fleet, moving on every [`TICK`].
     pub fn demo(cx: &mut Context<Self>) -> Self {
-        let (sink, rx) = sink::channel();
         // The full demo: the app asks it for more than the console does.
-        let (link, snapshot) = Link::new(Backend::Demo(Box::new(ainet_model::Demo::full())), sink);
+        Self::demo_with(ainet_model::Demo::full(), cx)
+    }
+
+    /// The pretend fleet `demo`, moving on every [`TICK`].
+    pub fn demo_with(demo: ainet_model::Demo, cx: &mut Context<Self>) -> Self {
+        let (sink, rx) = sink::channel();
+        let (link, snapshot) = Link::new(Backend::Demo(Box::new(demo)), sink);
         let mut model = FleetModel::empty(true);
         model.link = Some(link);
         if let Some(snapshot) = snapshot {
@@ -292,6 +302,7 @@ impl FleetModel {
             telling: None,
             asked: HashMap::new(),
             listed: HashMap::new(),
+            conversations: HashMap::new(),
             next_token: 0,
             events: VecDeque::new(),
             events_logged: 0,
@@ -464,6 +475,35 @@ impl FleetModel {
         self.next_token += 1;
         self.listed.insert(self.next_token, Box::new(on_listing));
         link.list(req, self.next_token);
+    }
+
+    /// Asks for `agent`'s conversation: the last `tail` entries, or those
+    /// after entry `after`; `on_reply` hears it (as plain text with a
+    /// notice from a daemon too old for entries), or the error. Nothing
+    /// else hears it.
+    pub fn conversation(
+        &mut self,
+        agent: &str,
+        after: Option<u64>,
+        tail: usize,
+        on_reply: impl FnOnce(Result<Conversation, String>, &mut App) + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        #[cfg(test)]
+        self.sent.push((
+            Request::Conversation {
+                agent: agent.to_string(),
+                tail,
+                after,
+            },
+            String::new(),
+        ));
+        let Some(link) = &mut self.link else {
+            return cx.defer(move |cx| on_reply(Err("ainetd is not running yet".into()), cx));
+        };
+        self.next_token += 1;
+        self.conversations.insert(self.next_token, Box::new(on_reply));
+        link.conversation(agent, after, tail, self.next_token);
     }
 
     /// A request only ainetd acts on (keystrokes, resizes), sent quietly.
@@ -741,7 +781,9 @@ impl FleetModel {
                 | Change::Output(_)
                 | Change::Term(_)
                 | Change::History(_)
-                | Change::Detached { .. } => false,
+                | Change::Detached { .. }
+                // Only its asker hears it; a poll redraws nothing else.
+                | Change::Conversation { .. } => false,
                 Change::Flash(text, _) => !text.is_empty(),
                 _ => true,
             };
@@ -759,6 +801,11 @@ impl FleetModel {
                 Change::Listing { token, listing } => {
                     if let Some(on_listing) = self.listed.remove(&token) {
                         on_listing(listing, cx);
+                    }
+                }
+                Change::Conversation { token, reply } => {
+                    if let Some(on_reply) = self.conversations.remove(&token) {
+                        on_reply(reply, cx);
                     }
                 }
                 Change::Connected(up) => {
