@@ -726,6 +726,139 @@ pub fn complete(store: &Store, input: &str) -> Option<String> {
     ))
 }
 
+/// A `/command` of the console: its name, what follows it and what it
+/// does, for help and completion. [`parse`] understands every one, and a
+/// few short aliases besides (`/q`, `/kill`, `/new`, …).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CommandInfo {
+    pub name: &'static str,
+    /// What follows the name (`<rig>`, `[dir]`); empty for nothing.
+    pub args: &'static str,
+    pub about: &'static str,
+}
+
+impl CommandInfo {
+    /// `/name args`, as a usage error says it.
+    pub fn usage(&self) -> String {
+        if self.args.is_empty() {
+            format!("/{}", self.name)
+        } else {
+            format!("/{} {}", self.name, self.args)
+        }
+    }
+}
+
+const fn info(name: &'static str, args: &'static str, about: &'static str) -> CommandInfo {
+    CommandInfo { name, args, about }
+}
+
+/// Every `/command`, by name.
+pub const COMMANDS: &[CommandInfo] = &[
+    info(
+        "adopt",
+        "<id> <rig> <pod> <member>",
+        "take an agent from outside ainet into a seat",
+    ),
+    info("allow", "", "allow the request waiting on you"),
+    info("always", "", "allow it, and others like it"),
+    info("answer", "<text>", "answer the question waiting on you"),
+    info("broadcast", "<text>", "message every seat of the rig"),
+    info("capture", "<agent>", "the last lines of an agent's terminal"),
+    info("chat", "<text>", "post in the rig's chatroom"),
+    info("close", "[name]", "close an agent: its process ends"),
+    info(
+        "cols",
+        "[n]",
+        "the Terminals grid's columns (none: from its shape)",
+    ),
+    info("continue", "<seat>", "nudge a seat to carry on"),
+    info("critters", "", "critters small or large"),
+    info("deny", "", "deny the request waiting on you"),
+    info("discover", "", "agents running outside ainet"),
+    info("down", "<rig>", "stop a rig, taking a snapshot"),
+    info("export", "<rig>", "a rig as a RigSpec"),
+    info("grow", "<pod> <member> [runtime] [ROLE]", "add a seat to the rig"),
+    info(
+        "guard",
+        "<seat> on|off",
+        "hold automatic messages while you type there",
+    ),
+    info("help", "", "keys and commands"),
+    info("launch", "<seat>", "start a seat's agent"),
+    info(
+        "plan",
+        "<spec file | library name | rig>",
+        "what /up would launch",
+    ),
+    info("ps", "", "the rigs"),
+    info("queue", "<seat> <summary>", "give work an owner"),
+    info("quit", "", "quit"),
+    info("relaunch", "<seat>", "start a seat's agent afresh"),
+    info("remove", "<seat>", "take a seat out of its rig"),
+    info("restore", "<rig>", "bring a rig back from a snapshot"),
+    info("shrink", "<pod>", "take a pod out of the rig"),
+    info("snapshot", "<rig>", "take a snapshot of a rig"),
+    info("snapshots", "<rig>", "a rig's snapshots"),
+    info(
+        "spawn",
+        "[claude-code|codex|terminal] [dir] [ROLE]",
+        "one agent outside any rig",
+    ),
+    info("spec", "<name>", "a spec from the library"),
+    info("specs", "", "the spec library"),
+    info("up", "<spec file | library name | rig>", "launch a team"),
+    info(
+        "view",
+        "[terminals | rig:NAME | comms | inbox | map]",
+        "open a view",
+    ),
+    info("watchdog", "<seat> <minutes>", "wake a seat every few minutes"),
+    info("whoami", "", "who the selected agent is"),
+];
+
+/// The commands whose name starts with `partial` (no `/`), by name.
+pub fn commands_starting(partial: &str) -> impl Iterator<Item = &'static CommandInfo> + '_ {
+    COMMANDS.iter().filter(move |c| c.name.starts_with(partial))
+}
+
+/// The command a `/command` line names, once its name is typed whole.
+pub fn command_named(line: &str) -> Option<&'static CommandInfo> {
+    let name = line.strip_prefix('/')?.split_whitespace().next()?;
+    COMMANDS.iter().find(|c| c.name == name)
+}
+
+/// Tab after `/gr`: the name completed (`/grow `), or, when several
+/// names start so, as far as they agree (`/snap` to `/snapshot`).
+/// `None` when nothing is added: no such name, or one already typed.
+pub fn complete_command(input: &str) -> Option<String> {
+    let partial = input.strip_prefix('/').filter(|p| !p.contains(' '))?;
+    let mut names = commands_starting(partial).map(|c| c.name);
+    let first = names.next()?;
+    let (common, only) = names.fold((first, true), |(common, _), name| {
+        let len = common
+            .bytes()
+            .zip(name.bytes())
+            .take_while(|(a, b)| a == b)
+            .count();
+        (&common[..len], false)
+    });
+    let done = if only {
+        format!("/{common} ")
+    } else {
+        format!("/{common}")
+    };
+    (done != input).then_some(done)
+}
+
+/// Tab on a line typed to the console: an `@name` ([`complete`]) or a
+/// `/command` name ([`complete_command`]).
+pub fn complete_line(store: &Store, input: &str) -> Option<String> {
+    match input.starts_with('/') {
+        true => complete_command(input),
+        false => complete(store, input),
+    }
+}
+
 /// `~/x` as `$HOME/x`.
 pub fn expand(p: &str) -> PathBuf {
     match p.strip_prefix("~/") {
@@ -743,8 +876,9 @@ mod tests {
     use ainet_core::QState;
 
     use super::{
-        AgentCommand, Command, Context, QueueCommand, answer_choices, chat, comms, complete, down, for_agent,
-        grow, message, message_to, parse, queue, restore, spawn, up,
+        AgentCommand, COMMANDS, Command, Context, QueueCommand, answer_choices, chat, command_named,
+        commands_starting, comms, complete, complete_command, complete_line, down, for_agent, grow, message,
+        message_to, parse, queue, restore, spawn, up,
     };
     use crate::demo::Demo;
     use crate::link::{Backend, Link, Listing, Msg};
@@ -1362,6 +1496,65 @@ mod tests {
         assert_eq!(complete(&store, "@orch-l").as_deref(), Some("@orch-lead@docs "));
         assert_eq!(complete(&store, "@orch-lead hi"), None);
         assert_eq!(complete(&store, "orch"), None);
+    }
+
+    #[test]
+    fn every_listed_command_is_understood_and_named_once() {
+        let store = demo();
+        let names: Vec<&str> = COMMANDS.iter().map(|c| c.name).collect();
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(names, sorted, "by name, each once");
+        for c in COMMANDS {
+            match run(&Store::new(), None, c.name) {
+                Command::Error(e) if e.starts_with("no command") => panic!("/{} is not understood", c.name),
+                // A usage error for the command itself is its usage.
+                Command::Error(e)
+                    if e == format!("/{}", c.name) || e.starts_with(&format!("/{} ", c.name)) =>
+                {
+                    assert_eq!(e, c.usage());
+                }
+                _ => {}
+            }
+            assert!(!matches!(run(&store, None, c.name), Command::Error(e) if e.starts_with("no command")));
+        }
+        assert_eq!(
+            command_named("/grow dev x").map(|c| c.usage()).as_deref(),
+            Some("/grow <pod> <member> [runtime] [ROLE]")
+        );
+        assert_eq!(command_named("/ps").map(|c| c.usage()).as_deref(), Some("/ps"));
+        assert_eq!(command_named("/gro"), None);
+        assert_eq!(command_named("grow"), None);
+    }
+
+    #[test]
+    fn command_names_complete() {
+        assert_eq!(complete_command("/gr").as_deref(), Some("/grow "));
+        assert_eq!(complete_command("/"), None, "nothing in common");
+        // Several names: as far as they agree; then nothing more to add.
+        assert_eq!(complete_command("/snap").as_deref(), Some("/snapshot"));
+        assert_eq!(complete_command("/snapshot"), None);
+        assert_eq!(complete_command("/snapshots").as_deref(), Some("/snapshots "));
+        assert_eq!(
+            complete_command("/re").as_deref(),
+            None,
+            "relaunch, remove, restore"
+        );
+        assert_eq!(complete_command("/rel").as_deref(), Some("/relaunch "));
+        assert_eq!(complete_command("/nope"), None);
+        assert_eq!(complete_command("/grow dev"), None, "only the name");
+        assert_eq!(complete_command("grow"), None);
+        let names: Vec<_> = commands_starting("sp").map(|c| c.name).collect();
+        assert_eq!(names, ["spawn", "spec", "specs"]);
+        // Either kind, by its first character.
+        let store = demo();
+        assert_eq!(complete_line(&store, "/gro").as_deref(), Some("/grow "));
+        assert_eq!(
+            complete_line(&store, "@orch-l").as_deref(),
+            Some("@orch-lead@docs ")
+        );
+        assert_eq!(complete_line(&store, "hello"), None);
     }
 
     #[test]
