@@ -86,3 +86,99 @@ fn daemon_errors_exit_nonzero() {
     assert_eq!(out.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&out.stderr).contains("not running"));
 }
+
+/// `ainet install-hooks` against a Claude Code config directory of its
+/// own: prints by default, writes, checks and removes only when told, and
+/// keeps a backup of what it changes.
+#[test]
+fn install_hooks_only_writes_when_told() {
+    let dir = std::env::temp_dir().join(format!("ainet-test-{}-hooks", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let claude = dir.join("claude");
+    let config = dir.join("config");
+    std::fs::create_dir_all(&claude).unwrap();
+    std::fs::create_dir_all(config.join("ainet")).unwrap();
+    let settings = claude.join("settings.json");
+    std::fs::write(&settings, r#"{"model":"opus"}"#).unwrap();
+    let run = |args: &[&str]| {
+        let out = Command::new(exe())
+            .args(args)
+            .env("AINET_SOCKET", no_daemon())
+            .env("CLAUDE_CONFIG_DIR", &claude)
+            .env("XDG_CONFIG_HOME", &config)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let printed: serde_json::Value = serde_json::from_str(&run(&["install-hooks"])).unwrap();
+    assert_eq!(printed["hooks"]["PreToolUse"][0]["matcher"], "AskUserQuestion");
+    assert_eq!(
+        printed["hooks"]["PermissionRequest"][0]["hooks"][0]["timeout"],
+        600
+    );
+    assert_eq!(
+        std::fs::read_to_string(&settings).unwrap(),
+        r#"{"model":"opus"}"#,
+        "printing writes nothing"
+    );
+    assert!(run(&["install-hooks", "--status"]).starts_with("not installed in"));
+
+    assert!(run(&["install-hooks", "--write"]).contains("installed ainet's hooks"));
+    let written: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+    assert_eq!(written["model"], "opus");
+    assert_eq!(
+        written["hooks"], printed["hooks"],
+        "what was printed is what is written"
+    );
+    let backups = std::fs::read_dir(&claude)
+        .unwrap()
+        .filter(|e| {
+            e.as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains(".bak.ainet.")
+        })
+        .count();
+    assert_eq!(backups, 1);
+    assert!(run(&["install-hooks", "--status"]).starts_with("installed in"));
+
+    // A longer hold in settings.json makes the installed hooks outdated.
+    std::fs::write(
+        config.join("ainet/settings.json"),
+        r#"{ "permissions": { "hold_secs": 900, } }"#,
+    )
+    .unwrap();
+    let st: serde_json::Value = serde_json::from_str(&run(&["--json", "install-hooks", "--status"])).unwrap();
+    assert_eq!(
+        (st["installed"].as_bool(), st["current"].as_bool()),
+        (Some(true), Some(false))
+    );
+    run(&["install-hooks", "--write"]);
+    assert!(run(&["install-hooks", "--status"]).starts_with("installed in"));
+    // Each change kept its own backup, the first one the file as it was.
+    let mut backups: Vec<PathBuf> = std::fs::read_dir(&claude)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.to_string_lossy().contains(".bak.ainet."))
+        .collect();
+    backups.sort();
+    assert_eq!(backups.len(), 2);
+    assert!(
+        backups
+            .iter()
+            .any(|b| std::fs::read_to_string(b).unwrap() == r#"{"model":"opus"}"#)
+    );
+
+    assert!(run(&["install-hooks", "--remove"]).contains("removed"));
+    let left: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+    assert_eq!(left, serde_json::json!({"model": "opus"}));
+    assert!(run(&["install-hooks", "--remove"]).starts_with("no ainet hooks"));
+    let _ = std::fs::remove_dir_all(&dir);
+}

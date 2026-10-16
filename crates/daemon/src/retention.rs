@@ -20,6 +20,7 @@ impl Daemon {
         self.trim_chat();
         self.trim_inbox();
         self.prune();
+        self.always_settings_changed();
     }
 
     /// Prunes logged events and expires inbox items, as far as asked.

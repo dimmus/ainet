@@ -14,6 +14,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use ainet_claude::hooks::Decision as ClaudeDecision;
 use ainet_claude::question::{self, Question};
@@ -22,7 +23,7 @@ use ainet_core::{AgentState, Decision, InboxItem, InboxKind, Response, Runtime, 
 use serde_json::Value;
 
 use crate::agents::new_agent;
-use crate::{Daemon, PERMISSION_HOLD, Shared, err, lock};
+use crate::{Daemon, Shared, err, lock};
 
 /// What a held hook is sent when you answer.
 pub(crate) enum HookAnswer {
@@ -218,12 +219,9 @@ pub(crate) async fn handle(
                 let tool = text(&payload, "tool_name").unwrap_or_default();
                 let input = payload.get("tool_input").cloned().unwrap_or(Value::Null);
                 let input_raw = input.to_string();
-                // An earlier /always covers it: allow without asking.
-                let covered = d
-                    .always
-                    .get(&id)
-                    .is_some_and(|rules| rules.iter().any(|r| r.matches(&tool, &input, &cwd)));
-                if covered {
+                // An earlier /always, or a global rule, covers it: allow
+                // without asking.
+                if d.always_covering(&id, &tool, &input, &cwd).is_some() {
                     let decision = ClaudeDecision::Allow {
                         message: ainet_claude::hooks::ALWAYS_MESSAGE.into(),
                     };
@@ -272,7 +270,8 @@ pub(crate) async fn handle(
                     },
                 );
                 d.set_state(&id, AgentState::NeedsYou);
-                held = Some((item_id, rx, tool, input_raw));
+                let hold = Duration::from_secs(d.settings().permissions.hold_secs);
+                held = Some((item_id, rx, tool, input_raw, hold));
             }
             "Stop" => {
                 d.release_held(&id);
@@ -309,7 +308,7 @@ pub(crate) async fn handle(
             }
             "SessionEnd" => {
                 d.release_held(&id);
-                d.always.remove(&id);
+                d.always_session_end(&id);
                 if !d.panes.contains_key(&id) {
                     d.set_state(&id, AgentState::Gone);
                 }
@@ -320,12 +319,13 @@ pub(crate) async fn handle(
         held
     };
 
-    let Some((item, rx, tool, input_raw)) = held else {
+    let Some((item, rx, tool, input_raw, hold)) = held else {
         return Response::HookReply { output: None };
     };
-    // Hold the hook open until you answer; on timeout or release, print
-    // nothing and Claude Code's own dialog stays in charge.
-    let answer = match tokio::time::timeout(PERMISSION_HOLD, rx).await {
+    // Hold the hook open until you answer (`permissions.hold_secs`); on
+    // timeout or release, print nothing and Claude Code's own dialog stays
+    // in charge.
+    let answer = match tokio::time::timeout(hold, rx).await {
         Ok(Ok(a)) => a,
         _ => {
             let mut g = lock(d);
@@ -369,13 +369,7 @@ pub(crate) fn answer(d: &Shared, item: u64, decision: Decision, message: Option<
     let mut note = None;
     if decision == Decision::Always {
         let input: Value = serde_json::from_str(&held.input_raw).unwrap_or(Value::Null);
-        match ainet_claude::always::derive(&held.tool, &input, &held.cwd) {
-            Ok(rule) => {
-                note = Some(format!("always allowing {} for this session", rule.scope()));
-                g.always.entry(held.agent.clone()).or_default().push(rule);
-            }
-            Err(refusal) => note = Some(format!("allowed once; no always rule: {refusal:?}")),
-        }
+        note = Some(g.always_add(&held.agent, &held.tool, &input, &held.cwd));
     }
     g.resolve(item);
     let _ = held.tx.send(HookAnswer::Decide(decision, message));

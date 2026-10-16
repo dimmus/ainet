@@ -91,6 +91,7 @@
           "binary": null,
           "model": null,
           "effort": null,
+          "spec_effort": false,
           "permission_mode": null,
           "args": [],
           "env": {},
@@ -103,6 +104,7 @@
           "binary": null,
           "model": null,
           "effort": null,
+          "spec_effort": false,
           "permission_mode": null,
           "args": [],
           "env": {},
@@ -136,7 +138,8 @@
         "hold_secs": 580,
         "persist_always": false,
         "sensitive_paths": [],
-        "spec_policies": false
+        "spec_policies": false,
+        "global_rules": []
       }
     },
     "messaging": {
@@ -481,6 +484,7 @@
             "binary": null,
             "model": null,
             "effort": null,
+            "spec_effort": false,
             "permission_mode": null,
             "args": [],
             "env": {},
@@ -497,6 +501,7 @@
             "binary": null,
             "model": null,
             "effort": null,
+            "spec_effort": false,
             "permission_mode": null,
             "args": [],
             "env": {},
@@ -552,7 +557,7 @@
           "default": null
         },
         "effort": {
-          "description": "Reasoning effort of seats whose spec names none.",
+          "description": "Reasoning effort of every new seat (Claude Code's `--effort`,\nCodex's `model_reasoning_effort`). Unset, the agent's own default.",
           "anyOf": [
             {
               "$ref": "#/$defs/Effort"
@@ -563,8 +568,13 @@
           ],
           "default": null
         },
+        "spec_effort": {
+          "description": "Pass the effort a rig spec or a seat names on to the agent, over\n`effort`. Off, a spec's effort is read and dropped, as before.",
+          "type": "boolean",
+          "default": false
+        },
         "permission_mode": {
-          "description": "Claude Code's permission mode for new seats. Unset, Claude Code's\nown default. `acceptEdits`, `auto`, `dontAsk` and\n`bypassPermissions` let agents act without asking you;\n`bypassPermissions` skips every permission check.",
+          "description": "Claude Code only: its permission mode for new seats. Unset, Claude\nCode's own default. `acceptEdits`, `auto`, `dontAsk` and\n`bypassPermissions` let agents act without asking you;\n`bypassPermissions` skips every permission check.",
           "anyOf": [
             {
               "$ref": "#/$defs/PermissionMode"
@@ -576,7 +586,7 @@
           "default": null
         },
         "args": {
-          "description": "Further arguments for every seat of this runtime.",
+          "description": "Further arguments for every seat of this runtime, after ainet's.",
           "type": "array",
           "items": {
             "type": "string"
@@ -584,7 +594,7 @@
           "default": []
         },
         "env": {
-          "description": "Further environment variables for every seat of this runtime.",
+          "description": "Further environment variables for every seat of this runtime.\nainet's own (`AINET_*`, `OPENRIG_*`) cannot be set here.",
           "type": "object",
           "additionalProperties": {
             "type": "string"
@@ -592,7 +602,7 @@
           "default": {}
         },
         "allowed_tools": {
-          "description": "Tools allowed without asking, beyond ainet's own (`mcp__ainet`).\nEach one loosens safety: the agent no longer asks before using it.",
+          "description": "Claude Code only: tools allowed without asking, beyond ainet's own\n(`mcp__ainet`, always allowed). Less safe: the agent no longer asks\nbefore using them.",
           "type": "array",
           "items": {
             "type": "string"
@@ -600,7 +610,7 @@
           "default": []
         },
         "disallowed_tools": {
-          "description": "Tools the agent may not use.",
+          "description": "Claude Code only: tools the agent may not use.",
           "type": "array",
           "items": {
             "type": "string"
@@ -608,13 +618,13 @@
           "default": []
         },
         "mcp_servers": {
-          "description": "MCP servers given to every seat besides ainet's, by name, as\nClaude Code's `mcpServers` entries.",
+          "description": "MCP servers given to every seat besides ainet's, by name, as\nClaude Code's `mcpServers` entries (`{\"command\": …, \"args\": […],\n\"env\": {…}}` or `{\"type\": \"http\", \"url\": …}`).",
           "type": "object",
           "additionalProperties": true,
           "default": {}
         },
         "strict_mcp_config": {
-          "description": "Only ainet's MCP server and `mcp_servers`, none of your own.",
+          "description": "Claude Code only: only ainet's MCP server and `mcp_servers`, none\nof your own.",
           "type": "boolean",
           "default": false
         }
@@ -771,7 +781,7 @@
       "type": "object",
       "properties": {
         "hold_secs": {
-          "description": "How long a permission request waits for you in the Inbox before\nthe agent's own terminal dialog takes over, in seconds.",
+          "description": "How long a permission request waits for you in the Inbox before\nthe agent's own terminal dialog takes over, in seconds. Seats\nstarted after a change get a hook timeout to match; hooks you\ninstalled yourself take it when installed again.",
           "type": "integer",
           "format": "uint64",
           "minimum": 10,
@@ -779,12 +789,12 @@
           "default": 580
         },
         "persist_always": {
-          "description": "Keep `/always` rules after a session ends and across daemon\nrestarts. Less safe: an answer given once keeps allowing.",
+          "description": "Keep `/always` rules after a session ends and across daemon\nrestarts. Less safe: an answer given once keeps allowing. Turning\nit off forgets the rules kept so far.",
           "type": "boolean",
           "default": false
         },
         "sensitive_paths": {
-          "description": "Paths `/always` never covers, on top of ainet's own list (`.ssh`,\n`.git`, `.env`, …): names, or paths under your home.",
+          "description": "Paths `/always` never covers, on top of ainet's own list (`.ssh`,\n`.git`, `.env`, …): a name (`secrets.toml`, matched anywhere) or a\npath (`~/work/keys`, `/srv/private`) and everything under it.\nainet's own list always applies.",
           "type": "array",
           "items": {
             "type": "string"
@@ -792,11 +802,89 @@
           "default": []
         },
         "spec_policies": {
-          "description": "Apply a rig spec's `permission_policy` where Claude Code allows it.\nOff, it is reported and ignored, as before.",
+          "description": "Apply a rig spec's `permission_policy` to its Claude Code seats:\n`builtin:locked` plans only, `builtin:default` and\n`builtin:standard` are Claude Code's default, and `builtin:yolo`\nskips every permission check (unsafe). Off, a policy is reported\nand ignored, as before; unknown policies always are.",
           "type": "boolean",
           "default": false
+        },
+        "global_rules": {
+          "description": "Rules that allow a request from any agent without asking, as an\n`/always` answer would: `{\"command\": \"cargo test\"}`, `{\"tool\":\n\"WebSearch\"}`, `{\"fetch_host\": \"docs.rs\"}` or `{\"edits_under\":\n{\"tool\": \"Edit\", \"dir\": \"/work/app\"}}`. Less safe: nobody is asked.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/GlobalRule"
+          },
+          "default": []
         }
       }
+    },
+    "GlobalRule": {
+      "description": "A rule that allows a request from any agent without asking, of the\nsame kinds as an `/always` answer makes.",
+      "oneOf": [
+        {
+          "description": "`Bash` with exactly this command: one plain command, no shell\noperators.",
+          "type": "object",
+          "properties": {
+            "command": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "command"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "description": "Every call of this tool (an MCP tool by its full name,\n`mcp__server__tool`). Not `Bash`, `WebFetch` or the edit tools,\nwhich have their own kinds.",
+          "type": "object",
+          "properties": {
+            "tool": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "tool"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "description": "`WebFetch` of URLs on this host.",
+          "type": "object",
+          "properties": {
+            "fetch_host": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "fetch_host"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "description": "Edits by one edit tool of files under a directory, when the agent\nworks in exactly that directory; sensitive files never.",
+          "type": "object",
+          "properties": {
+            "edits_under": {
+              "type": "object",
+              "properties": {
+                "tool": {
+                  "type": "string"
+                },
+                "dir": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "tool",
+                "dir"
+              ]
+            }
+          },
+          "required": [
+            "edits_under"
+          ],
+          "additionalProperties": false
+        }
+      ]
     },
     "MessagingSettings": {
       "type": "object",
@@ -963,7 +1051,7 @@
       "type": "object",
       "properties": {
         "claude_settings": {
-          "description": "Claude Code's settings file that `ainet install-hooks` edits.\nUnset, `settings.json` in `$CLAUDE_CONFIG_DIR`, else `~/.claude`.\nNothing is written there without you asking.",
+          "description": "Claude Code's settings file that `ainet install-hooks --write`\nand `--remove` edit (a backup is kept). Unset, `settings.json` in\n`$CLAUDE_CONFIG_DIR`, else `~/.claude`. Nothing is written there\nwithout you asking; ainet's seats get their hooks without it.",
           "type": [
             "string",
             "null"

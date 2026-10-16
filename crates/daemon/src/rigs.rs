@@ -11,10 +11,10 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use ainet_core::protocol::{SeatSpec, UpSpec};
-use ainet_core::settings::RuntimeSettings;
+use ainet_core::settings::Settings;
 use ainet_core::{
-    Edge, EdgeKind, Event, Response, Rig, RigStatus, Seat, SeatStatus, SnapshotInfo, Transport, Whoami,
-    now_ms,
+    Edge, EdgeKind, Event, Response, Rig, RigStatus, Runtime, Seat, SeatStatus, SnapshotInfo, Transport,
+    Whoami, now_ms,
 };
 use serde::{Deserialize, Serialize};
 
@@ -256,7 +256,8 @@ impl Daemon {
 }
 
 /// What `up --plan` prints.
-fn describe(plan: &RigPlan, runtimes: &RuntimeSettings) -> String {
+fn describe(plan: &RigPlan, settings: &Settings) -> String {
+    let runtimes = &settings.runtimes;
     let mut out = format!(
         "rig {}  ({} seats, root {})\n",
         plan.name,
@@ -281,6 +282,17 @@ fn describe(plan: &RigPlan, runtimes: &RuntimeSettings) -> String {
             s.cwd.display(),
             installed
         ));
+        let mode = (s.runtime == Runtime::ClaudeCode)
+            .then(|| crate::runtimes::permission_mode(settings, &s.ask()))
+            .flatten();
+        if let Some(m) = mode {
+            let less_safe = if m.loosens() { ", less safe" } else { "" };
+            out.push_str(&format!(
+                "  {:<28} permission mode {}{less_safe}\n",
+                "",
+                m.as_str()
+            ));
+        }
     }
     if !plan.edges.is_empty() {
         out.push_str("\nedges:\n");
@@ -288,8 +300,29 @@ fn describe(plan: &RigPlan, runtimes: &RuntimeSettings) -> String {
             out.push_str(&format!("  {} {} {}\n", e.from, e.kind.label(), e.to));
         }
     }
-    for w in &plan.warnings {
+    for w in policy_warnings(plan, settings) {
         out.push_str(&format!("warning: {w}\n"));
+    }
+    out
+}
+
+/// The spec's warnings, with `permission_policy` told as it is applied
+/// when settings.json says to apply policies.
+fn policy_warnings(plan: &RigPlan, settings: &Settings) -> Vec<String> {
+    let mut out = plan.warnings.clone();
+    if !settings.permissions.spec_policies {
+        return out;
+    }
+    out.retain(|w| !w.ends_with("`permission_policy` is accepted but ainet ignores it"));
+    for s in plan.seats.iter().filter(|s| s.permission_policy.is_some()) {
+        match crate::runtimes::policy_mode(settings, &s.ask()) {
+            Err(why) => out.push(format!("seat {}: {why}", s.logical)),
+            Ok(_) if s.runtime == Runtime::Codex => out.push(format!(
+                "seat {}: permission_policy applies to Claude Code seats only; ignored",
+                s.logical
+            )),
+            Ok(_) => {}
+        }
     }
     out
 }
@@ -323,7 +356,7 @@ pub(crate) fn up(d: &Shared, spec: UpSpec) -> Response {
     let runtimes = lock(d).settings().runtimes.clone();
     if spec.plan {
         return Response::Text {
-            text: describe(&plan, &runtimes),
+            text: describe(&plan, &lock(d).settings().clone()),
         };
     }
     if let Some(missing) = plan
@@ -559,7 +592,7 @@ pub(crate) fn grow(d: &Shared, rig: &str, seats: Vec<SeatSpec>, edges: Vec<Edge>
         let mut plans = Vec::new();
         for spec in &seats {
             let seat = match ainet_spec::seat_from_spec(rig, &state.plan.root, spec) {
-                Ok(s) => SeatPlan::from(&s),
+                Ok(s) => SeatPlan::added(&s, spec),
                 Err(e) => return err(format!("{e:#}")),
             };
             if state.plan.seat(&seat.address).is_some()
@@ -669,7 +702,7 @@ pub(crate) fn create(d: &Shared, rig: &str, mut seat: SeatSpec) -> Response {
         root,
         spec_path: None,
         edges: vec![],
-        seats: vec![SeatPlan::from(&resolved)],
+        seats: vec![SeatPlan::added(&resolved, &seat)],
         warnings: vec![],
     };
     let program = program(&lock(d).settings().runtimes, plan.seats[0].runtime);

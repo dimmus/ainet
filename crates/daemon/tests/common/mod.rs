@@ -90,12 +90,8 @@ impl Daemon {
 
     pub fn spawn(&self, runtime: Runtime, args: Vec<String>) -> Agent {
         let spec = SpawnSpec {
-            runtime,
-            cwd: self.dir.clone(),
-            role: None,
-            task: None,
-            parent: None,
             args,
+            ..SpawnSpec::new(runtime, self.dir.clone())
         };
         match self.call(&Request::Spawn(spec)) {
             Response::Spawned { agent } => agent,

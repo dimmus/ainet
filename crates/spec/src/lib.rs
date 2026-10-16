@@ -69,6 +69,15 @@ pub struct ResolvedSeat {
     pub restore_send_text: Vec<String>,
     /// Skill directories (or files) to install for the seat.
     pub skills: Vec<PathBuf>,
+    /// OpenRig's `permission_policy` (the member's, else the rig's): read
+    /// and reported; ainetd applies it only when settings.json says to.
+    pub permission_policy: Option<String>,
+    /// Claude Code's permission mode, from a seat added outside a spec.
+    pub permission_mode: Option<ainet_core::settings::PermissionMode>,
+    /// More arguments for the agent CLI, from a seat added outside a spec.
+    pub args: Vec<String>,
+    /// More environment variables, from a seat added outside a spec.
+    pub env: std::collections::BTreeMap<String, String>,
 }
 
 /// A rig resolved from a spec.
@@ -223,6 +232,10 @@ pub fn seat_from_spec(rig: &str, root: &Path, spec: &SeatSpec) -> anyhow::Result
         role: spec.role.clone(),
         guidance: spec.guidance.clone(),
         first_message: spec.first_message.clone(),
+        effort: spec.effort.map(|e| e.as_str().to_string()),
+        permission_mode: spec.permission_mode,
+        args: spec.args.clone(),
+        env: spec.env.clone(),
         ..resolve::MemberIn::default()
     };
     let what = format!("seat {}.{}", spec.pod, spec.member);

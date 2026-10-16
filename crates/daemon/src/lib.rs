@@ -12,6 +12,7 @@
 //! those settings say (`retention`).
 
 mod agents;
+mod always;
 mod comms;
 mod config;
 mod discover;
@@ -20,6 +21,7 @@ mod launch;
 mod queue;
 mod retention;
 mod rigs;
+mod runtimes;
 mod store;
 mod stream;
 
@@ -38,10 +40,6 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Notify, broadcast, mpsc};
 
 pub use store::Store;
-
-/// How long a permission request is held for you before the agent's own
-/// terminal dialog takes over. Claude Code's hook timeout is set to 600 s.
-pub const PERMISSION_HOLD: Duration = Duration::from_secs(580);
 
 /// Activity sparkline: buckets of this width, this many of them.
 const ACTIVITY_BUCKET_MS: i64 = 30_000;
@@ -80,8 +78,9 @@ struct Daemon {
     next_item: u64,
     /// Held `PermissionRequest`s, by inbox item.
     held_req: HashMap<u64, hooks::Held>,
-    /// Den's `/always` rules, per agent, for the life of its session.
-    always: HashMap<String, Vec<ainet_claude::always::Rule>>,
+    /// Den's `/always` rules, per agent, for the life of its session or
+    /// kept (`permissions.persist_always`).
+    always: HashMap<String, Vec<always::Kept>>,
     activity: HashMap<String, VecDeque<i64>>,
     last_output: HashMap<String, Instant>,
     /// Agents whose terminal you are typing into right now.
@@ -165,6 +164,7 @@ impl Daemon {
             .map(|(_, w)| (w.id.clone(), w))
             .collect();
         self.next_watchdog = self.store.get("counter", "watchdog").unwrap_or(0);
+        self.always_load();
         were_running
     }
 }
@@ -511,6 +511,8 @@ async fn handle(req: Request, d: &Shared) -> Response {
             watchdogs: lock(d).watchdogs.values().cloned().collect(),
         },
         Request::WatchdogStop { id, reason } => queue::watchdog_stop(d, &id, reason),
+        Request::AlwaysList { agent } => always::list(d, agent),
+        Request::AlwaysRevoke { agent, rule } => always::revoke(d, &agent, rule),
     }
 }
 

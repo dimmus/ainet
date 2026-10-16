@@ -259,12 +259,8 @@ pub fn spawn(runtime: Runtime, cwd: Option<&str>, role: &str) -> Command {
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
     let role = role.trim();
     let spec = SpawnSpec {
-        runtime,
-        cwd,
         role: (!role.is_empty()).then(|| role.to_uppercase()),
-        task: None,
-        parent: None,
-        args: vec![],
+        ..SpawnSpec::new(runtime, cwd)
     };
     request(Request::Spawn(spec), "spawned".into())
 }

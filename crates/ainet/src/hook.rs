@@ -1,10 +1,12 @@
 //! `ainet hook`: Claude Code runs it for every hook event.
 
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 use std::time::Duration;
 
 use ainet_core::client::Client;
+use ainet_core::settings::Settings;
 use ainet_core::{Request, Response};
 use anyhow::Result;
 use serde_json::Value;
@@ -23,7 +25,7 @@ pub fn run(socket: &Path) -> Result<()> {
         return Ok(());
     };
     // A permission request may be held until you answer.
-    let _ = client.set_timeout(Some(ainet_daemon::PERMISSION_HOLD + Duration::from_secs(10)));
+    let _ = client.set_timeout(Some(hold_timeout()));
     let agent = crate::conn::me();
     let req = Request::Hook {
         agent,
@@ -36,6 +38,24 @@ pub fn run(socket: &Path) -> Result<()> {
     Ok(())
 }
 
+/// How long to wait for ainetd's answer: the hold settings.json sets
+/// (`permissions.hold_secs`) and a little more. Read silently: the hook
+/// prints only what Claude Code reads. A file that does not read gets
+/// the longest hold allowed, so a hold is never cut short here (Claude
+/// Code's own timeout still ends the hook).
+fn hold_timeout() -> Duration {
+    let path = ainet_core::paths::settings_file();
+    let secs = match ainet_core::settings::load(&path) {
+        Ok(loaded) => loaded
+            .unwrap_or_default()
+            .settings
+            .permissions
+            .client_timeout_secs(),
+        Err(_) => 3600 + 10,
+    };
+    Duration::from_secs(secs)
+}
+
 /// Parses the payload and tags it with `$AINET_HOOK_SOURCE`, so the daemon
 /// can tell its own per-seat hooks from your global ones.
 pub fn prepare(raw: &str, source: Option<String>) -> Option<Value> {
@@ -46,30 +66,89 @@ pub fn prepare(raw: &str, source: Option<String>) -> Option<Value> {
     Some(payload)
 }
 
-/// The hooks block for `~/.claude/settings.json`.
-pub fn print_hooks() {
-    let cmd = std::env::current_exe()
-        .ok()
-        .map(|p| format!("{} hook", p.display()))
-        .unwrap_or_else(|| "ainet hook".into());
-    let entry = |timeout: u32| serde_json::json!([{ "hooks": [{ "type": "command", "command": cmd, "timeout": timeout }] }]);
-    let hooks = serde_json::json!({
-        "hooks": {
-            "SessionStart": entry(10),
-            "SessionEnd": entry(10),
-            "UserPromptSubmit": entry(10),
-            "PreToolUse": entry(10),
-            "PostToolUse": entry(10),
-            "PostToolUseFailure": entry(10),
-            "Notification": entry(10),
-            "Stop": entry(10),
-            "StopFailure": entry(10),
-            // Held until you answer in ainet; must outlast PERMISSION_HOLD.
-            "PermissionRequest": entry(600),
+/// Claude Code's settings file the hooks go in: `hooks.claude_settings`,
+/// else `settings.json` in `$CLAUDE_CONFIG_DIR` or `~/.claude`.
+fn claude_settings(settings: &Settings) -> PathBuf {
+    match &settings.hooks.claude_settings {
+        Some(p) => ainet_core::paths::expand(p),
+        None => ainet_claude::hooks::settings_path(),
+    }
+}
+
+/// The hook command for this binary: `<path> hook`.
+fn command() -> String {
+    std::env::current_exe()
+        .map(|p| ainet_claude::hooks::hook_command(&p))
+        .unwrap_or_else(|_| "ainet hook".into())
+}
+
+/// `ainet install-hooks`: prints the block to merge (nothing written),
+/// or with `write`, `remove` or `status` installs, removes or checks
+/// ainet's hooks in Claude Code's settings. Writing keeps a backup.
+pub fn install_hooks(json: bool, write: bool, remove: bool, status: bool) -> Result<ExitCode> {
+    let settings = crate::settings::get();
+    let path = claude_settings(settings);
+    let cmd = command();
+    let timeout = settings.permissions.hook_timeout_secs();
+    if status {
+        let st = ainet_claude::hooks::status(&path, &cmd, timeout);
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "settings_path": st.settings_path,
+                    "exists": st.exists,
+                    "error": st.error,
+                    "installed": st.ours > 0,
+                    "current": st.current(),
+                    "missing": st.missing,
+                    "stale": st.stale,
+                })
+            );
+        } else {
+            println!("{}", st.summary());
         }
-    });
-    eprintln!("Merge this into ~/.claude/settings.json (ainet does not edit it for you yet):\n");
-    println!("{}", serde_json::to_string_pretty(&hooks).unwrap_or_default());
+        return Ok(ExitCode::SUCCESS);
+    }
+    if write {
+        let r = ainet_claude::hooks::install_with(&path, &cmd, timeout)?;
+        let backup = r
+            .backup
+            .map(|b| format!("; the old file is {}", b.display()))
+            .unwrap_or_default();
+        println!(
+            "installed ainet's hooks in {} ({} events{}){backup}",
+            r.settings_path.display(),
+            r.added,
+            if r.replaced > 0 {
+                format!(", {} old entries replaced", r.replaced)
+            } else {
+                String::new()
+            }
+        );
+        println!("They apply to Claude Code sessions started from now on.");
+        return Ok(ExitCode::SUCCESS);
+    }
+    if remove {
+        let r = ainet_claude::hooks::uninstall(&path, "")?;
+        match r.backup {
+            Some(b) if r.removed > 0 => println!(
+                "removed {} ainet hook entries from {}; the old file is {}",
+                r.removed,
+                r.settings_path.display(),
+                b.display()
+            ),
+            _ => println!("no ainet hooks in {}", r.settings_path.display()),
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
+    let block = ainet_claude::hooks::hooks_block(&cmd, timeout);
+    eprintln!(
+        "Merge this into {}, or run `ainet install-hooks --write` to have ainet do it (it keeps a backup):\n",
+        path.display()
+    );
+    println!("{}", serde_json::to_string_pretty(&block).unwrap_or_default());
+    Ok(ExitCode::SUCCESS)
 }
 
 #[cfg(test)]

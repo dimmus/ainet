@@ -1447,7 +1447,10 @@ The same file has the sections ainetd and the console read (`daemon`,
 `hooks`, `retention`, `cost`; README, "Configuration"). The app ignores
 them, even when one does not read (ainetd reports that in its log), and
 keeps them as written when it saves the theme. Its autostart of ainetd
-follows `daemon.autostart` and `daemon.log`, as the console's does.
+follows `daemon.autostart` and `daemon.log`, as the console's does. The
+published schema describes them too (composed from `ainet_core::settings`),
+so an editor completes `runtimes.claude.permission_mode` or
+`permissions.global_rules` and shows which settings loosen safety.
 
 Themes: Zed's One, Ayu and Gruvbox families, **Deepharness** (the TUI's
 palette, `crates/gui/assets/themes/deepharness/deepharness.json`), and

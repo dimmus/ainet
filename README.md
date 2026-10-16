@@ -184,7 +184,24 @@ default.
   "discovery": { "claude_sessions": true, "tmux": true, "interval_ms": 3000 },
   "retention": { "messages_in_memory": 5000, "inbox_items": 200, "scrollback_lines": 5000,
                  "events_max_age_days": null, "inbox_expiry_mins": null },
-  "cost": { "context_windows": { "claude-opus-5": 1000000 } }
+  "cost": { "context_windows": { "claude-opus-5": 1000000 } },
+  "runtimes": {
+    "claude": {
+      "model": "sonnet", "effort": "high",
+      "permission_mode": null,          // "acceptEdits", "bypassPermissions", … loosen safety
+      "allowed_tools": [], "disallowed_tools": ["WebFetch"],
+      "mcp_servers": { "docs": { "command": "docs-mcp", "args": ["--stdio"] } },
+      "args": [], "env": {}
+    },
+    "shell": { "binary": "/bin/bash", "args": ["-l"] }
+  },
+  "permissions": {
+    "hold_secs": 580,                   // then Claude Code's own dialog takes over
+    "persist_always": false,            // keep /always answers across sessions and restarts
+    "sensitive_paths": ["secrets.toml", "~/work/keys"],
+    "spec_policies": false,             // apply a spec's permission_policy
+    "global_rules": [ { "command": "cargo test" } ]
+  }
 }
 ```
 
@@ -197,13 +214,28 @@ default.
 | `discovery` | track every Claude Code session (`claude_sessions`), scan tmux, how often | at once |
 | `retention` | in-memory caps for messages, chat, inbox and scrollback; logged events pruned by age or count and answered inbox items expired (opt-in) | at once (scrollback: new terminals) |
 | `cost` | context windows and prices by model-id prefix | at once |
-| `runtimes` | the program of each runtime (`binary`), readiness timings; model, effort, permission mode, tools, MCP servers and more are being wired | new seats |
-| `permissions`, `hooks` | how long requests are held, `/always` persistence, Claude Code's settings file | being wired |
+| `runtimes` | per runtime (`claude`, `codex`, `shell`): the program, default model and effort, Claude Code's permission mode, more arguments and environment, tools allowed without asking (`mcp__ainet` always is) and refused, more MCP servers (merged with ainet's), `--strict-mcp-config`; `readiness` timings. A spec's `effort` is passed with `spec_effort` | new seats |
+| `permissions` | how long a request is held (`hold_secs`; seats' hook timeout follows), `/always` rules kept across sessions and restarts (`persist_always`), more `sensitive_paths` `/always` never covers, a spec's `permission_policy` applied (`spec_policies`), `global_rules` that allow without asking | at once (hold: new seats' hook timeout) |
+| `hooks` | which Claude Code settings file `ainet install-hooks --write` edits | at once |
 
 Settings that loosen safety (permission modes such as `bypassPermissions`,
-tools allowed without asking, persisted `/always` rules) are off unless
-set, say so in their descriptions, and take only values from a closed
-list, so a typo is an error, not a looser agent.
+tools allowed without asking, persisted `/always` rules, global rules,
+`builtin:yolo` from a spec) are off unless set, say so in their
+descriptions, and take only values from a closed list, so a typo is an
+error, not a looser agent. Codex has no permission modes or tool lists:
+setting them for `runtimes.codex` is an error rather than a restriction
+that does nothing. With `spec_policies` on, `builtin:locked` starts Claude
+Code seats in `plan` mode, `builtin:default` and `builtin:standard` in its
+default, `builtin:yolo` with `bypassPermissions`; other policies are
+reported and ignored. `ainet up <spec> --plan` shows each seat's mode.
+
+ainet's hooks reach the seats it starts on their own command line; for
+Claude Code sessions you start yourself, `ainet install-hooks` prints the
+block to merge into Claude Code's settings, `--write` merges it (keeping a
+backup of the file), `--status` says whether it is there and up to date
+(after a change of `hold_secs`, write it again), and `--remove` takes it
+out. ainet never writes Claude Code's settings unless you run one of
+these.
 
 Environment variables that meant something before still win over the
 file: `AINET_SOCKET` over `daemon.socket`, `AINET_LOG` over

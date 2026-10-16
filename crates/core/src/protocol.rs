@@ -7,6 +7,7 @@
 //! an agent's shell) carry that agent's id from `AINET_AGENT_ID` in their
 //! `from` / `by` / `sender` fields; `None` means you, the operator.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -16,6 +17,7 @@ use crate::agent::{Agent, Decision, InboxItem, Runtime};
 use crate::comms::{ChatMessage, Message, QItem, QState, Watchdog};
 use crate::conversation::Conversation;
 use crate::rig::{Discovered, Edge, Rig, SnapshotInfo, Whoami};
+use crate::settings::{Effort, PermissionMode};
 
 /// Bumped on any incompatible change.
 pub const VERSION: u32 = 2;
@@ -355,6 +357,22 @@ pub enum Request {
     SeatContinue {
         seat: String,
     },
+
+    // ---- permissions -------------------------------------------------------
+    /// `/always` rules in force: an agent's (by any name `find_agent`
+    /// takes), or every agent's and the global ones from settings.json.
+    /// Daemons from before it answer "bad request".
+    AlwaysList {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<String>,
+    },
+    /// Revokes an agent's `/always` rule by its key (`AlwaysRule::key`),
+    /// or all of its rules. Global rules are revoked in settings.json.
+    AlwaysRevoke {
+        agent: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rule: Option<String>,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -367,6 +385,34 @@ pub struct SpawnSpec {
     /// Extra arguments for the agent CLI.
     #[serde(default)]
     pub args: Vec<String>,
+    /// Reasoning effort, over `runtimes.<runtime>.effort`. Older daemons
+    /// ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<Effort>,
+    /// Claude Code's permission mode, over
+    /// `runtimes.claude.permission_mode`. Older daemons ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<PermissionMode>,
+    /// More environment variables for the agent (not ainet's own).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
+}
+
+impl SpawnSpec {
+    /// An agent of `runtime` in `cwd`, with nothing else asked for.
+    pub fn new(runtime: Runtime, cwd: PathBuf) -> SpawnSpec {
+        SpawnSpec {
+            runtime,
+            cwd,
+            role: None,
+            task: None,
+            parent: None,
+            args: Vec::new(),
+            effort: None,
+            permission_mode: None,
+            env: BTreeMap::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -401,6 +447,39 @@ pub struct SeatSpec {
     pub guidance: Option<String>,
     /// Typed into the seat once it is ready.
     pub first_message: Option<String>,
+    /// Reasoning effort. Older daemons ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<Effort>,
+    /// Claude Code's permission mode, over the runtime's and a spec
+    /// policy. Older daemons ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<PermissionMode>,
+    /// More arguments for the agent CLI, after ainet's and the runtime's.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    /// More environment variables (not ainet's own).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
+}
+
+/// An `/always` rule in force (`Request::AlwaysList`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AlwaysRule {
+    /// The agent it allows for; `None` for a global rule from
+    /// settings.json (`permissions.global_rules`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// What names it: `Bash:<command>`, `<tool>:under:<dir>`,
+    /// `WebFetch:<host>` or a tool name.
+    pub key: String,
+    /// What it allows, in words.
+    pub scope: String,
+    /// When it was made (ms since the epoch); 0 for a global rule.
+    #[serde(default)]
+    pub created: i64,
+    /// Kept across sessions and restarts (`permissions.persist_always`).
+    #[serde(default)]
+    pub kept: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -530,6 +609,10 @@ pub enum Response {
     /// An agent's conversation (`Request::Conversation`).
     Conversation {
         conversation: Conversation,
+    },
+    /// `/always` rules (`Request::AlwaysList`).
+    AlwaysRules {
+        rules: Vec<AlwaysRule>,
     },
 }
 
@@ -758,5 +841,63 @@ mod tests {
         let t: Runtime = serde_json::from_str("\"terminal\"").unwrap();
         assert_eq!(t, Runtime::Shell);
         assert_eq!("codex".parse::<Runtime>().unwrap(), Runtime::Codex);
+    }
+
+    #[test]
+    fn seat_and_spawn_options_are_additive() {
+        // Unset, the lines are what they always were.
+        let seat = SeatSpec {
+            pod: "p".into(),
+            member: "m".into(),
+            ..SeatSpec::default()
+        };
+        let line = String::from_utf8(encode(&seat)).unwrap();
+        assert!(!line.contains("effort") && !line.contains("permission_mode") && !line.contains("env"));
+        let spawn = SpawnSpec::new(Runtime::Shell, "/w".into());
+        assert_eq!(
+            String::from_utf8(encode(&spawn)).unwrap(),
+            "{\"runtime\":\"shell\",\"cwd\":\"/w\",\"role\":null,\"task\":null,\"parent\":null,\"args\":[]}\n"
+        );
+        // Old lines read; new ones carry their options.
+        let old: SeatSpec = serde_json::from_str(r#"{"pod":"p","member":"m","runtime":null,"role":null,"label":null,"model":null,"cwd":null,"agent_ref":null,"guidance":null,"first_message":null}"#).unwrap();
+        assert_eq!(old.effort, None);
+        assert!(old.args.is_empty() && old.env.is_empty());
+        let new: SeatSpec = serde_json::from_str(
+            r#"{"pod":"p","member":"m","effort":"high","permission_mode":"acceptEdits","args":["--verbose"],"env":{"A":"1"}}"#,
+        )
+        .unwrap();
+        assert_eq!(new.effort, Some(Effort::High));
+        assert_eq!(new.permission_mode, Some(PermissionMode::AcceptEdits));
+        assert_eq!(new.args, vec!["--verbose".to_string()]);
+        // A misspelt mode is refused, never taken as some mode.
+        assert!(
+            serde_json::from_str::<SeatSpec>(r#"{"pod":"p","member":"m","permission_mode":"bypass"}"#)
+                .is_err()
+        );
+        let old_spawn: SpawnSpec =
+            serde_json::from_str(r#"{"runtime":"codex","cwd":"/w","role":null,"task":null,"parent":null}"#)
+                .unwrap();
+        assert_eq!((old_spawn.effort, old_spawn.permission_mode), (None, None));
+    }
+
+    #[test]
+    fn always_rules_round_trip() {
+        let line = encode(&Request::AlwaysList { agent: None });
+        assert_eq!(std::str::from_utf8(&line).unwrap(), "{\"op\":\"always_list\"}\n");
+        let revoke: Request = serde_json::from_str(r#"{"op":"always_revoke","agent":"a1"}"#).unwrap();
+        assert!(matches!(revoke, Request::AlwaysRevoke { rule: None, .. }));
+        let reply = Response::AlwaysRules {
+            rules: vec![AlwaysRule {
+                agent: Some("a1".into()),
+                key: "Bash:cargo test".into(),
+                scope: "this exact command, cargo test".into(),
+                created: 5,
+                kept: true,
+            }],
+        };
+        let back: Response = serde_json::from_slice(&encode(&reply)).unwrap();
+        assert!(
+            matches!(back, Response::AlwaysRules { rules } if rules[0].kept && rules[0].key == "Bash:cargo test")
+        );
     }
 }

@@ -126,7 +126,27 @@ pub fn human(resp: &Response) -> String {
         Response::Watchdogs { watchdogs } => watchdogs_table(watchdogs, now),
         // The console never asks for entries; said plainly all the same.
         Response::Conversation { conversation } => conversation_text(conversation),
+        Response::AlwaysRules { rules } => always_table(rules),
     }
+}
+
+/// `/always` rules, one line each: whose (or global), the key and what it
+/// allows.
+fn always_table(rules: &[ainet_core::protocol::AlwaysRule]) -> String {
+    if rules.is_empty() {
+        return "no /always rules\n".into();
+    }
+    rules
+        .iter()
+        .map(|r| {
+            let who = r
+                .agent
+                .as_deref()
+                .map(|a| a.chars().take(8).collect::<String>())
+                .unwrap_or_else(|| "global".into());
+            format!("{who:<8}  {}  ({})\n", r.key, r.scope)
+        })
+        .collect()
 }
 
 /// A conversation's entries, one "who: words" line each, as `ainet

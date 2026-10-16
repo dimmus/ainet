@@ -16,9 +16,13 @@
 //! prompt (`--allowedTools` takes a list, so a prompt after it would be read
 //! as one more tool).
 //!
-//! Not confirmed from Den's source: `--session-id <uuid>` and `--effort
-//! <level>` (Den never passes them; Den strips `CLAUDE_EFFORT` from a
-//! child's environment, and hook payloads carry `effort: {level}`).
+//! Not confirmed from Den's source: `--session-id <uuid>` (ainetd has
+//! started every seat with it since its first release), `--disallowedTools
+//! <comma list>` (Claude Code's documented counterpart of
+//! `--allowedTools`) and `--effort <level>` (Den never passes it; Den strips
+//! `CLAUDE_EFFORT` from a child's environment, and hook payloads carry
+//! `effort: {level}`), so ainetd passes an effort only when settings.json
+//! asks for one.
 //!
 //! A new session started from inside another one must not inherit the
 //! parent's session variables, or it takes itself for a child session and
@@ -55,6 +59,8 @@ pub struct LaunchOptions {
     pub strict_mcp_config: bool,
     /// `--allowedTools`, comma-joined.
     pub allowed_tools: Vec<String>,
+    /// `--disallowedTools`, comma-joined: tools the session may not use.
+    pub disallowed_tools: Vec<String>,
     /// `--tools`, comma-joined: the only built-in tools available.
     pub tools: Vec<String>,
     /// `--name`: the session's name, which peers message it by.
@@ -127,6 +133,9 @@ pub fn args(o: &LaunchOptions) -> Vec<String> {
     }
     if !o.allowed_tools.is_empty() {
         push(&mut a, "--allowedTools", &o.allowed_tools.join(","));
+    }
+    if !o.disallowed_tools.is_empty() {
+        push(&mut a, "--disallowedTools", &o.disallowed_tools.join(","));
     }
     a.extend(o.extra.iter().cloned());
     if resume.is_none()
@@ -426,6 +435,7 @@ mod tests {
             mcp_config: Some(json!({"mcpServers": {}})),
             strict_mcp_config: true,
             tools: s(&["ListAgents", "SendMessage"]),
+            disallowed_tools: s(&["WebFetch", "Bash(rm:*)"]),
             extra: s(&["--verbose"]),
             ..Default::default()
         };
@@ -445,6 +455,8 @@ mod tests {
                 "--strict-mcp-config",
                 "--tools",
                 "ListAgents,SendMessage",
+                "--disallowedTools",
+                "WebFetch,Bash(rm:*)",
                 "--verbose",
             ])
         );

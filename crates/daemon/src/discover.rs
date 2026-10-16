@@ -411,7 +411,7 @@ pub(crate) fn adopt(d: &Shared, id: &str, rig: &str, spec: SeatSpec) -> Response
         Ok(s) => s,
         Err(e) => return err(format!("{e:#}")),
     };
-    let plan = SeatPlan::from(&resolved);
+    let plan = SeatPlan::added(&resolved, &spec);
     if !g.rigs.contains_key(rig) {
         let rp = crate::launch::RigPlan {
             name: rig.to_string(),

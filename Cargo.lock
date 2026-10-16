@@ -15,6 +15,7 @@ dependencies = [
 name = "ainet"
 version = "0.1.0"
 dependencies = [
+ "ainet-claude",
  "ainet-core",
  "ainet-critter",
  "ainet-daemon",

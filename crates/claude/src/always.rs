@@ -31,6 +31,7 @@
 
 use std::path::Path;
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{sanitize, util};
@@ -88,8 +89,10 @@ pub const SHELL_OPERATORS: &[&str] = &[";", "&", "|", "$(", "`", "<", ">", "\n",
 /// The tool Claude Code asks with when a plan is ready.
 const PLAN_TOOL: &str = "ExitPlanMode";
 
-/// An `/always` rule.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// An `/always` rule. As JSON: `{"command": …}`, `{"edits_under": {"tool":
+/// …, "dir": …}}`, `{"fetch_host": …}` or `{"tool": …}`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Rule {
     /// `Bash` with exactly this command.
     Command(String),
@@ -126,7 +129,18 @@ impl Rule {
 
     /// [`Rule::matches`] with an explicit home directory.
     pub fn matches_with_home(&self, tool: &str, input: &Value, cwd: &str, home: &str) -> bool {
-        allow_key(tool, input, cwd, home, false).as_ref() == Some(self)
+        self.matches_extra(tool, input, cwd, home, &[])
+    }
+
+    /// [`Rule::matches_with_home`] with more sensitive paths than the
+    /// built-in ones (see [`sensitive_extra`]).
+    pub fn matches_extra(&self, tool: &str, input: &Value, cwd: &str, home: &str, extra: &[String]) -> bool {
+        allow_key_extra(tool, input, cwd, home, false, extra).as_ref() == Some(self)
+    }
+
+    /// [`Rule::matches`] with more sensitive paths. Uses `$HOME`.
+    pub fn matches_in(&self, tool: &str, input: &Value, cwd: &str, extra: &[String]) -> bool {
+        self.matches_extra(tool, input, cwd, &home(), extra)
     }
 
     /// What the rule allows from now on, for the line that confirms it.
@@ -195,10 +209,19 @@ impl std::error::Error for Refusal {}
 /// `input` from a session on this machine in `cwd`, or why it makes none.
 /// Uses `$HOME`.
 pub fn derive(tool: &str, input: &Value, cwd: &str) -> Result<Rule, Refusal> {
-    let home = util::home_dir()
+    derive_with(tool, input, cwd, &home(), None)
+}
+
+/// [`derive`] with more sensitive paths than the built-in ones (see
+/// [`sensitive_extra`]). Uses `$HOME`.
+pub fn derive_in(tool: &str, input: &Value, cwd: &str, extra: &[String]) -> Result<Rule, Refusal> {
+    derive_extra(tool, input, cwd, &home(), None, extra)
+}
+
+fn home() -> String {
+    util::home_dir()
         .map(|h| h.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    derive_with(tool, input, cwd, &home, None)
+        .unwrap_or_default()
 }
 
 /// [`derive`] with an explicit home directory, and the remote host the agent
@@ -209,6 +232,18 @@ pub fn derive_with(
     cwd: &str,
     home: &str,
     host: Option<&str>,
+) -> Result<Rule, Refusal> {
+    derive_extra(tool, input, cwd, home, host, &[])
+}
+
+/// [`derive_with`] with more sensitive paths than the built-in ones.
+pub fn derive_extra(
+    tool: &str,
+    input: &Value,
+    cwd: &str,
+    home: &str,
+    host: Option<&str>,
+    extra: &[String],
 ) -> Result<Rule, Refusal> {
     if tool == PLAN_TOOL {
         return Err(Refusal::Plan);
@@ -221,7 +256,7 @@ pub fn derive_with(
     if let (true, Some(h)) = (is_edit, host) {
         return Err(Refusal::RemoteEdit(h.to_string()));
     }
-    let Some(rule) = allow_key(tool, input, cwd, home, host.is_some()) else {
+    let Some(rule) = allow_key_extra(tool, input, cwd, home, host.is_some(), extra) else {
         return Err(if is_edit {
             Refusal::EditOutOfScope
         } else {
@@ -250,12 +285,24 @@ pub fn derive_with(
 /// simply never equals an approved plain one. `remote` is true for an agent
 /// on another host: edits there take no rule.
 pub fn allow_key(tool: &str, input: &Value, cwd: &str, home: &str, remote: bool) -> Option<Rule> {
+    allow_key_extra(tool, input, cwd, home, remote, &[])
+}
+
+/// [`allow_key`] with more sensitive paths than the built-in ones.
+pub fn allow_key_extra(
+    tool: &str,
+    input: &Value,
+    cwd: &str,
+    home: &str,
+    remote: bool,
+    extra: &[String],
+) -> Option<Rule> {
     if let Some(field) = edit_field(tool) {
         if remote {
             return None;
         }
         let path = input.get(field).and_then(Value::as_str).unwrap_or("");
-        if !edit_real_in_scope(path, cwd, home) {
+        if !edit_real_in_scope_extra(path, cwd, home, extra) {
             return None;
         }
         return Some(Rule::EditsUnder {
@@ -292,6 +339,11 @@ pub fn mcp_tool(tool: &str) -> Option<(&str, &str)> {
 /// `..` part refuses. The path must lie strictly under cwd and not be
 /// sensitive; a cwd that is home or above it takes no rule at all.
 pub fn edit_in_scope(path: &str, cwd: &str, home: &str) -> bool {
+    edit_in_scope_extra(path, cwd, home, &[])
+}
+
+/// [`edit_in_scope`] with more sensitive paths than the built-in ones.
+pub fn edit_in_scope_extra(path: &str, cwd: &str, home: &str, extra: &[String]) -> bool {
     let Some(p) = edit_path(path, cwd, home) else {
         return false;
     };
@@ -303,7 +355,7 @@ pub fn edit_in_scope(path: &str, cwd: &str, home: &str) -> bool {
     if h.starts_with('/') && (h == dir || h.starts_with(&format!("{dir}/"))) {
         return false;
     }
-    !sensitive_path(&p, home)
+    !sensitive_path(&p, home) && !sensitive_extra(&p, home, extra)
 }
 
 /// [`edit_in_scope`] checked again with symlinks resolved: the deepest part
@@ -311,7 +363,13 @@ pub fn edit_in_scope(path: &str, cwd: &str, home: &str) -> bool {
 /// pointing at `~/.ssh` does not pass, nor does a dangling symlink (a write
 /// would create its target, wherever that is).
 pub fn edit_real_in_scope(path: &str, cwd: &str, home: &str) -> bool {
-    if !edit_in_scope(path, cwd, home) {
+    edit_real_in_scope_extra(path, cwd, home, &[])
+}
+
+/// [`edit_real_in_scope`] with more sensitive paths than the built-in
+/// ones.
+pub fn edit_real_in_scope_extra(path: &str, cwd: &str, home: &str, extra: &[String]) -> bool {
+    if !edit_in_scope_extra(path, cwd, home, extra) {
         return false;
     }
     let Some(p) = edit_path(path, cwd, home) else {
@@ -342,7 +400,9 @@ pub fn edit_real_in_scope(path: &str, cwd: &str, home: &str) -> bool {
         rest = util::join(&[&util::base(&cur), &rest]);
         cur = parent;
     }
-    edit_in_scope(&cur, &real_cwd, &real_home) && !sensitive_path(&cur, home)
+    edit_in_scope_extra(&cur, &real_cwd, &real_home, extra)
+        && !sensitive_path(&cur, home)
+        && !sensitive_extra(&cur, home, extra)
 }
 
 fn real(p: &str) -> Option<String> {
@@ -393,6 +453,31 @@ pub fn sensitive_path(p: &str, home: &str) -> bool {
     }
     lp.split('/')
         .any(|part| SENSITIVE_PARTS.contains(&part) || SENSITIVE_NAMES.contains(&part))
+}
+
+/// Whether the cleaned absolute path `p` is one of `extra`, the
+/// sensitive paths you added: a name (no `/`) matches any part of a path;
+/// a path (absolute, `~/…`, or relative to `home`) matches itself and
+/// everything under it. Without regard to case, as the built-in lists:
+/// refusing too much is the safe side. They only ever add to the built-in
+/// lists ([`sensitive_path`]).
+pub fn sensitive_extra(p: &str, home: &str, extra: &[String]) -> bool {
+    let lp = p.to_lowercase();
+    extra.iter().map(|e| e.trim()).filter(|e| !e.is_empty()).any(|e| {
+        if !e.contains('/') {
+            let name = e.to_lowercase();
+            return lp.split('/').any(|part| part == name);
+        }
+        let base = if e == "~" || e.starts_with("~/") {
+            util::join(&[home, &e[1..]])
+        } else if e.starts_with('/') {
+            e.to_string()
+        } else {
+            util::join(&[home, e])
+        };
+        let base = util::clean(&base).to_lowercase();
+        base.starts_with('/') && base != "/" && (lp == base || lp.starts_with(&format!("{base}/")))
+    })
 }
 
 /// The host a URL names, lower-cased; `None` when it has none or does not
@@ -770,5 +855,77 @@ mod tests {
         assert_eq!(fetch_host(""), None);
         assert_eq!(mcp_tool("mcp__srv__tool"), Some(("srv", "tool")));
         assert_eq!(mcp_tool("mcp____x"), None);
+    }
+
+    #[test]
+    fn sensitive_paths_you_add_only_add() {
+        let home = "/home/user";
+        let extra: Vec<String> = ["secrets.toml", "~/work/keys", "/srv/private", "Notes/"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        for p in [
+            "/home/user/proj/secrets.toml",
+            "/home/user/proj/SECRETS.TOML",
+            "/home/user/work/keys",
+            "/home/user/work/keys/id",
+            "/srv/private/a",
+            "/home/user/notes/x",
+        ] {
+            assert!(sensitive_extra(p, home, &extra), "{p}");
+        }
+        for p in [
+            "/home/user/proj/secrets.toml.txt",
+            "/home/user/work/keysx",
+            "/srv/privately",
+        ] {
+            assert!(!sensitive_extra(p, home, &extra), "{p}");
+        }
+        // Nothing added: only the built-in lists; added: never fewer.
+        assert!(!sensitive_extra("/home/user/proj/a", home, &[]));
+        assert!(!edit_in_scope_extra(
+            "/home/user/proj/.git/x",
+            "/home/user/proj",
+            home,
+            &extra
+        ));
+        assert!(edit_in_scope_extra(
+            "/home/user/proj/a.rs",
+            "/home/user/proj",
+            home,
+            &extra
+        ));
+        assert!(!edit_in_scope_extra(
+            "/home/user/proj/secrets.toml",
+            "/home/user/proj",
+            home,
+            &extra
+        ));
+        // A rule made before the path was added stops matching it.
+        let rule = Rule::EditsUnder {
+            tool: "Edit".into(),
+            dir: "/home/user/proj".into(),
+        };
+        let call = json!({"file_path": "/home/user/proj/secrets.toml"});
+        assert!(!rule.matches_extra("Edit", &call, "/home/user/proj", home, &extra));
+    }
+
+    #[test]
+    fn rules_keep_as_json() {
+        for (rule, text) in [
+            (Rule::Command("cargo test".into()), r#"{"command":"cargo test"}"#),
+            (Rule::Tool("WebSearch".into()), r#"{"tool":"WebSearch"}"#),
+            (Rule::FetchHost("docs.rs".into()), r#"{"fetch_host":"docs.rs"}"#),
+            (
+                Rule::EditsUnder {
+                    tool: "Edit".into(),
+                    dir: "/w".into(),
+                },
+                r#"{"edits_under":{"tool":"Edit","dir":"/w"}}"#,
+            ),
+        ] {
+            assert_eq!(serde_json::to_string(&rule).unwrap(), text);
+            assert_eq!(serde_json::from_str::<Rule>(text).unwrap(), rule);
+        }
     }
 }

@@ -48,12 +48,8 @@ impl Daemon {
     /// A shell agent running `script`, once it printed `ready`.
     fn shell(&self, script: &str) -> String {
         let spec = SpawnSpec {
-            runtime: Runtime::Shell,
-            cwd: self.dir.clone(),
-            role: None,
-            task: None,
-            parent: None,
             args: vec!["-c".into(), script.into()],
+            ..SpawnSpec::new(Runtime::Shell, self.dir.clone())
         };
         let Response::Spawned { agent } = self.call(&Request::Spawn(spec)) else {
             panic!("no agent");

@@ -94,6 +94,10 @@ fn fake(logical: &str) -> ResolvedSeat {
         send_text: Vec::new(),
         restore_send_text: Vec::new(),
         skills: Vec::new(),
+        permission_policy: None,
+        permission_mode: None,
+        args: Vec::new(),
+        env: Default::default(),
     }
 }
 
@@ -461,6 +465,59 @@ pods:
     }
     assert!(!w.contains("docs"), "{w}");
     assert!(validate(&dir).is_ok());
+}
+
+#[test]
+fn permission_policies_are_read_and_still_reported() {
+    let dir = scratch("policies");
+    write(
+        &dir,
+        "rig.yaml",
+        r#"
+version: "0.2"
+name: pol
+permission_policy: builtin:locked
+pods:
+  - id: p
+    label: P
+    members:
+      - id: a
+        runtime: claude-code
+        cwd: "."
+        permission_policy: builtin:yolo
+      - id: b
+        runtime: claude-code
+        cwd: "."
+      - id: t
+        agent_ref: builtin:terminal
+        profile: none
+        runtime: terminal
+        cwd: "."
+"#,
+    );
+    let rig = load(&dir).unwrap();
+    let policy = |m: &str| {
+        rig.seats
+            .iter()
+            .find(|s| s.member == m)
+            .unwrap()
+            .permission_policy
+            .clone()
+    };
+    assert_eq!(policy("a").as_deref(), Some("builtin:yolo"), "the member's own");
+    assert_eq!(policy("b").as_deref(), Some("builtin:locked"), "else the rig's");
+    assert_eq!(policy("t"), None, "a terminal has no permissions to set");
+    // ainet itself still says it ignores them: ainetd applies them only
+    // when settings.json says to.
+    let w = rig.warnings.join("\n");
+    assert!(
+        w.contains("rig: `permission_policy` is accepted but ainet ignores it"),
+        "{w}"
+    );
+    assert!(
+        w.contains("member p.a: `permission_policy` is accepted but ainet ignores it"),
+        "{w}"
+    );
 }
 
 #[test]

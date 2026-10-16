@@ -49,9 +49,16 @@ fn defaults_are_what_ainet_always_did() {
         (800, 1500, 400)
     );
     assert_eq!(r.readiness.startup_text_gap_ms, 1200);
+    assert!(!r.claude.spec_effort && !r.codex.spec_effort);
+    assert!(r.claude.disallowed_tools.is_empty() && r.claude.mcp_servers.is_empty());
+    assert!(r.claude.args.is_empty() && r.claude.env.is_empty());
     assert_eq!(s.permissions.hold_secs, 580);
+    // The hook's timeout and the hook client's wait, as they were.
+    assert_eq!(s.permissions.hook_timeout_secs(), 600);
+    assert_eq!(s.permissions.client_timeout_secs(), 590);
     assert!(!s.permissions.persist_always && !s.permissions.spec_policies);
     assert!(s.permissions.sensitive_paths.is_empty());
+    assert!(s.permissions.global_rules.is_empty());
     let m = &s.messaging;
     assert_eq!(
         Duration::from_millis(m.paste_settle_ms),
@@ -314,4 +321,86 @@ fn the_schema_covers_every_section() {
     for word in ["bypassPermissions", "paste_settle_ms", "keep_snapshots", "Unsafe"] {
         assert!(text.contains(word), "{word}");
     }
+}
+
+#[test]
+fn loosening_settings_take_only_what_they_know() {
+    let bad = |text: &str| parse(text).expect_err(text);
+    // Permission modes and global rules are closed lists.
+    assert!(bad(r#"{"runtimes":{"claude":{"permission_mode":"bypass"}}}"#).contains("runtimes"));
+    assert!(bad(r#"{"permissions":{"global_rules":[{"commands":"x"}]}}"#).contains("permissions"));
+    assert!(
+        bad(r#"{"permissions":{"global_rules":[{"edits_under":{"tool":"Edit","dir":"/w","x":1}}]}}"#)
+            .contains("permissions")
+    );
+    for (rule, why) in [
+        (r#"{"command":"make && curl x | sh"}"#, "shell operators"),
+        (r#"{"command":" "}"#, "empty"),
+        (r#"{"tool":"Bash"}"#, "command rule"),
+        (r#"{"tool":"WebFetch"}"#, "fetch_host"),
+        (r#"{"tool":"Edit"}"#, "edits_under"),
+        (r#"{"tool":"ExitPlanMode"}"#, "one at a time"),
+        (r#"{"tool":"mcp__github"}"#, "whole MCP server"),
+        (r#"{"fetch_host":"https://docs.rs"}"#, "host name"),
+        (r#"{"fetch_host":"*.rs"}"#, "host name"),
+        (r#"{"edits_under":{"tool":"Bash","dir":"/w"}}"#, "must be one of"),
+        (r#"{"edits_under":{"tool":"Edit","dir":"/"}}"#, "absolute"),
+        (r#"{"edits_under":{"tool":"Edit","dir":"w"}}"#, "absolute"),
+        (r#"{"edits_under":{"tool":"Edit","dir":"/w/../x"}}"#, ".."),
+    ] {
+        let e = bad(&format!(r#"{{"permissions":{{"global_rules":[{rule}]}}}}"#));
+        assert!(
+            e.contains("permissions.global_rules[0]") && e.contains(why),
+            "{rule}: {e}"
+        );
+    }
+    let ok = parse(
+        r#"{"permissions":{"global_rules":[{"command":"cargo test"},{"tool":"mcp__github__get_issue"},
+            {"fetch_host":"docs.rs"},{"edits_under":{"tool":"Edit","dir":"/work/app"}}]}}"#,
+    )
+    .unwrap();
+    assert_eq!(ok.settings.permissions.global_rules.len(), 4);
+    assert_eq!(
+        ok.settings.permissions.global_rules[3],
+        GlobalRule::EditsUnder {
+            tool: "Edit".into(),
+            dir: "/work/app".into()
+        }
+    );
+    // ainet's own variables and server are not yours to set.
+    assert!(bad(r#"{"runtimes":{"claude":{"env":{"AINET_SOCKET":"/x"}}}}"#).contains("ainet sets"));
+    assert!(bad(r#"{"runtimes":{"shell":{"env":{"OPENRIG_RIG":"x"}}}}"#).contains("ainet sets"));
+    assert!(bad(r#"{"runtimes":{"claude":{"mcp_servers":{"ainet":{}}}}}"#).contains("ainet's own"));
+    assert!(bad(r#"{"runtimes":{"claude":{"mcp_servers":{"docs":"x"}}}}"#).contains("must be an object"));
+    assert!(bad(r#"{"runtimes":{"claude":{"mcp_servers":{"a.b":{}}}}}"#).contains("letters"));
+    assert!(bad(r#"{"runtimes":{"claude":{"allowed_tools":["Read,Bash"]}}}"#).contains("without commas"));
+    assert!(bad(r#"{"runtimes":{"codex":{"permission_mode":"plan"}}}"#).contains("Claude Code only"));
+    assert!(bad(r#"{"runtimes":{"codex":{"disallowed_tools":["x"]}}}"#).contains("Claude Code only"));
+    assert!(bad(r#"{"permissions":{"sensitive_paths":["~/a/../b"]}}"#).contains("sensitive_paths"));
+    assert!(bad(r#"{"runtimes":{"claude":{"effort":"extreme"}}}"#).contains("runtimes"));
+}
+
+#[test]
+fn spec_policies_map_onto_permission_modes() {
+    assert_eq!(spec_policy("builtin:locked"), Ok(Some(PermissionMode::Plan)));
+    assert_eq!(spec_policy(" builtin:default "), Ok(None));
+    assert_eq!(spec_policy("builtin:standard"), Ok(None));
+    assert_eq!(
+        spec_policy("builtin:yolo"),
+        Ok(Some(PermissionMode::BypassPermissions))
+    );
+    for unknown in ["builtin:YOLO", "yolo", "builtin:trusted", ""] {
+        assert!(spec_policy(unknown).unwrap_err().contains("ignored"), "{unknown}");
+    }
+    assert!(PermissionMode::BypassPermissions.loosens() && !PermissionMode::Plan.loosens());
+    assert_eq!(
+        "acceptEdits".parse::<PermissionMode>(),
+        Ok(PermissionMode::AcceptEdits)
+    );
+    assert!(
+        "acceptedits".parse::<PermissionMode>().is_err(),
+        "exact names only"
+    );
+    assert_eq!(Effort::parse(" High"), Some(Effort::High));
+    assert_eq!(Effort::parse("extreme"), None);
 }

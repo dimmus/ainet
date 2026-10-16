@@ -119,9 +119,12 @@ pub fn run(cli: Cli, socket: PathBuf) -> Result<ExitCode> {
         Cmd::Gui { demo } => return gui(*demo),
         Cmd::Hook => return crate::hook::run(&conn.socket).map(|_| ExitCode::SUCCESS),
         Cmd::Mcp => return crate::mcp::run(conn).map(|_| ExitCode::SUCCESS),
-        Cmd::InstallHooks => {
-            crate::hook::print_hooks();
-            return Ok(ExitCode::SUCCESS);
+        Cmd::InstallHooks {
+            write,
+            remove,
+            status,
+        } => {
+            return crate::hook::install_hooks(out.json, *write, *remove, *status);
         }
         Cmd::Critter { ids, octant } => {
             critter(ids, *octant);
@@ -140,7 +143,7 @@ pub fn run(cli: Cli, socket: PathBuf) -> Result<ExitCode> {
         | Cmd::Gui { .. }
         | Cmd::Hook
         | Cmd::Mcp
-        | Cmd::InstallHooks
+        | Cmd::InstallHooks { .. }
         | Cmd::Critter { .. }
         | Cmd::Shutdown => {
             unreachable!("handled above")
@@ -477,12 +480,10 @@ pub fn run(cli: Cli, socket: PathBuf) -> Result<ExitCode> {
                 None => crate::settings::default_cwd(crate::settings::get())?,
             };
             let req = Request::Spawn(SpawnSpec {
-                runtime: runtime.into(),
-                cwd,
                 role,
                 task,
-                parent: None,
                 args,
+                ..SpawnSpec::new(runtime.into(), cwd)
             });
             out.show(&conn.ok(&req)?);
         }

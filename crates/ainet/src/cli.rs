@@ -286,8 +286,21 @@ pub enum Cmd {
         #[arg(long)]
         octant: bool,
     },
-    /// Print the hooks block for ~/.claude/settings.json.
-    InstallHooks,
+    /// ainet's hooks in Claude Code's settings (`hooks.claude_settings`,
+    /// else ~/.claude/settings.json): prints the block to merge by hand,
+    /// or with a flag writes it (a backup is kept), removes it or checks
+    /// it. ainet's own seats get their hooks without it.
+    InstallHooks {
+        /// Install (or repair) them in Claude Code's settings file.
+        #[arg(long, conflicts_with_all = ["remove", "status"])]
+        write: bool,
+        /// Remove every ainet hook from Claude Code's settings file.
+        #[arg(long, conflicts_with = "status")]
+        remove: bool,
+        /// Say whether they are installed and up to date; changes nothing.
+        #[arg(long)]
+        status: bool,
+    },
     /// Stop ainetd and the agents it owns.
     Shutdown,
     /// Run ainetd in the foreground.

@@ -17,6 +17,7 @@
 
 mod effective;
 mod load;
+mod policy;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -27,6 +28,7 @@ use serde_json::Value;
 
 pub use effective::{Effective, Source, effective, env_overrides, unknown_keys};
 pub use load::{Follower, Loaded, load, parse, schema};
+pub use policy::{GlobalRule, SPEC_POLICIES, spec_policy};
 
 /// The top-level keys this module owns; the rest of the file is the
 /// desktop app's.
@@ -155,26 +157,34 @@ pub struct AgentRuntime {
     pub binary: Option<String>,
     /// The model of seats whose spec names none.
     pub model: Option<String>,
-    /// Reasoning effort of seats whose spec names none.
+    /// Reasoning effort of every new seat (Claude Code's `--effort`,
+    /// Codex's `model_reasoning_effort`). Unset, the agent's own default.
     pub effort: Option<Effort>,
-    /// Claude Code's permission mode for new seats. Unset, Claude Code's
-    /// own default. `acceptEdits`, `auto`, `dontAsk` and
+    /// Pass the effort a rig spec or a seat names on to the agent, over
+    /// `effort`. Off, a spec's effort is read and dropped, as before.
+    pub spec_effort: bool,
+    /// Claude Code only: its permission mode for new seats. Unset, Claude
+    /// Code's own default. `acceptEdits`, `auto`, `dontAsk` and
     /// `bypassPermissions` let agents act without asking you;
     /// `bypassPermissions` skips every permission check.
     pub permission_mode: Option<PermissionMode>,
-    /// Further arguments for every seat of this runtime.
+    /// Further arguments for every seat of this runtime, after ainet's.
     pub args: Vec<String>,
     /// Further environment variables for every seat of this runtime.
+    /// ainet's own (`AINET_*`, `OPENRIG_*`) cannot be set here.
     pub env: BTreeMap<String, String>,
-    /// Tools allowed without asking, beyond ainet's own (`mcp__ainet`).
-    /// Each one loosens safety: the agent no longer asks before using it.
+    /// Claude Code only: tools allowed without asking, beyond ainet's own
+    /// (`mcp__ainet`, always allowed). Less safe: the agent no longer asks
+    /// before using them.
     pub allowed_tools: Vec<String>,
-    /// Tools the agent may not use.
+    /// Claude Code only: tools the agent may not use.
     pub disallowed_tools: Vec<String>,
     /// MCP servers given to every seat besides ainet's, by name, as
-    /// Claude Code's `mcpServers` entries.
+    /// Claude Code's `mcpServers` entries (`{"command": …, "args": […],
+    /// "env": {…}}` or `{"type": "http", "url": …}`).
     pub mcp_servers: BTreeMap<String, Value>,
-    /// Only ainet's MCP server and `mcp_servers`, none of your own.
+    /// Claude Code only: only ainet's MCP server and `mcp_servers`, none
+    /// of your own.
     pub strict_mcp_config: bool,
 }
 
@@ -187,6 +197,33 @@ pub enum Effort {
     High,
     Xhigh,
     Max,
+}
+
+impl Effort {
+    pub const ALL: [Effort; 5] = [
+        Effort::Low,
+        Effort::Medium,
+        Effort::High,
+        Effort::Xhigh,
+        Effort::Max,
+    ];
+
+    /// The name Claude Code takes.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Effort::Low => "low",
+            Effort::Medium => "medium",
+            Effort::High => "high",
+            Effort::Xhigh => "xhigh",
+            Effort::Max => "max",
+        }
+    }
+
+    /// A spec's `effort:`, by name; anything else is `None`.
+    pub fn parse(s: &str) -> Option<Effort> {
+        let s = s.trim().to_ascii_lowercase();
+        Effort::ALL.into_iter().find(|e| e.as_str() == s)
+    }
 }
 
 /// Claude Code's `--permission-mode` values.
@@ -210,6 +247,51 @@ pub enum PermissionMode {
     /// Unsafe: no permission checks at all.
     #[serde(rename = "bypassPermissions")]
     BypassPermissions,
+}
+
+impl PermissionMode {
+    pub const ALL: [PermissionMode; 6] = [
+        PermissionMode::Default,
+        PermissionMode::Plan,
+        PermissionMode::AcceptEdits,
+        PermissionMode::Auto,
+        PermissionMode::DontAsk,
+        PermissionMode::BypassPermissions,
+    ];
+
+    /// The name Claude Code takes (`--permission-mode`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PermissionMode::Default => "default",
+            PermissionMode::Plan => "plan",
+            PermissionMode::AcceptEdits => "acceptEdits",
+            PermissionMode::Auto => "auto",
+            PermissionMode::DontAsk => "dontAsk",
+            PermissionMode::BypassPermissions => "bypassPermissions",
+        }
+    }
+
+    /// Whether agents in this mode do things without asking you that
+    /// Claude Code's default would ask about.
+    pub fn loosens(self) -> bool {
+        !matches!(self, PermissionMode::Default | PermissionMode::Plan)
+    }
+}
+
+impl std::str::FromStr for PermissionMode {
+    type Err = String;
+
+    /// Exactly Claude Code's names: a typo is an error, never a mode.
+    fn from_str(s: &str) -> Result<Self, String> {
+        PermissionMode::ALL
+            .into_iter()
+            .find(|m| m.as_str() == s)
+            .ok_or_else(|| {
+                format!(
+                    "unknown permission mode {s:?}: use default, plan, acceptEdits, auto, dontAsk or bypassPermissions"
+                )
+            })
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -284,18 +366,31 @@ impl Default for QuietMs {
 #[serde(default)]
 pub struct PermissionSettings {
     /// How long a permission request waits for you in the Inbox before
-    /// the agent's own terminal dialog takes over, in seconds.
+    /// the agent's own terminal dialog takes over, in seconds. Seats
+    /// started after a change get a hook timeout to match; hooks you
+    /// installed yourself take it when installed again.
     #[schemars(range(min = 10, max = 3600))]
     pub hold_secs: u64,
     /// Keep `/always` rules after a session ends and across daemon
-    /// restarts. Less safe: an answer given once keeps allowing.
+    /// restarts. Less safe: an answer given once keeps allowing. Turning
+    /// it off forgets the rules kept so far.
     pub persist_always: bool,
     /// Paths `/always` never covers, on top of ainet's own list (`.ssh`,
-    /// `.git`, `.env`, …): names, or paths under your home.
+    /// `.git`, `.env`, …): a name (`secrets.toml`, matched anywhere) or a
+    /// path (`~/work/keys`, `/srv/private`) and everything under it.
+    /// ainet's own list always applies.
     pub sensitive_paths: Vec<String>,
-    /// Apply a rig spec's `permission_policy` where Claude Code allows it.
-    /// Off, it is reported and ignored, as before.
+    /// Apply a rig spec's `permission_policy` to its Claude Code seats:
+    /// `builtin:locked` plans only, `builtin:default` and
+    /// `builtin:standard` are Claude Code's default, and `builtin:yolo`
+    /// skips every permission check (unsafe). Off, a policy is reported
+    /// and ignored, as before; unknown policies always are.
     pub spec_policies: bool,
+    /// Rules that allow a request from any agent without asking, as an
+    /// `/always` answer would: `{"command": "cargo test"}`, `{"tool":
+    /// "WebSearch"}`, `{"fetch_host": "docs.rs"}` or `{"edits_under":
+    /// {"tool": "Edit", "dir": "/work/app"}}`. Less safe: nobody is asked.
+    pub global_rules: Vec<GlobalRule>,
 }
 
 impl Default for PermissionSettings {
@@ -305,7 +400,23 @@ impl Default for PermissionSettings {
             persist_always: false,
             sensitive_paths: Vec::new(),
             spec_policies: false,
+            global_rules: Vec::new(),
         }
+    }
+}
+
+impl PermissionSettings {
+    /// The `PermissionRequest` hook's timeout in Claude Code's settings:
+    /// longer than the hold, so ainet lets go before Claude Code ends the
+    /// hook (600 s by default, as before).
+    pub fn hook_timeout_secs(&self) -> u64 {
+        self.hold_secs + 20
+    }
+
+    /// How long `ainet hook` waits for ainetd's answer: the hold and a
+    /// little more, inside the hook's timeout.
+    pub fn client_timeout_secs(&self) -> u64 {
+        self.hold_secs + 10
     }
 }
 
@@ -467,9 +578,10 @@ impl Default for DiscoverySettings {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct HookSettings {
-    /// Claude Code's settings file that `ainet install-hooks` edits.
-    /// Unset, `settings.json` in `$CLAUDE_CONFIG_DIR`, else `~/.claude`.
-    /// Nothing is written there without you asking.
+    /// Claude Code's settings file that `ainet install-hooks --write`
+    /// and `--remove` edit (a backup is kept). Unset, `settings.json` in
+    /// `$CLAUDE_CONFIG_DIR`, else `~/.claude`. Nothing is written there
+    /// without you asking; ainet's seats get their hooks without it.
     pub claude_settings: Option<PathBuf>,
 }
 
@@ -648,6 +760,65 @@ impl Settings {
             if rt.binary.as_deref().is_some_and(|b| b.trim().is_empty()) {
                 out.push(format!("runtimes.{key}.binary is empty"));
             }
+            env_problems(&format!("runtimes.{key}.env"), &rt.env, &mut out);
+            for (list, tools) in [
+                ("allowed_tools", &rt.allowed_tools),
+                ("disallowed_tools", &rt.disallowed_tools),
+            ] {
+                for t in tools {
+                    if t.trim().is_empty() || t.contains(',') {
+                        out.push(format!(
+                            "runtimes.{key}.{list} has {t:?}; each entry is one tool or pattern, without commas"
+                        ));
+                    }
+                }
+            }
+            for (name, server) in &rt.mcp_servers {
+                if name == "ainet" {
+                    out.push(format!(
+                        "runtimes.{key}.mcp_servers.ainet is ainet's own server; give yours another name"
+                    ));
+                } else if name.is_empty()
+                    || !name
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                {
+                    out.push(format!(
+                        "runtimes.{key}.mcp_servers: {name:?} may use only letters, digits, - and _"
+                    ));
+                }
+                if !server.is_object() {
+                    out.push(format!(
+                        "runtimes.{key}.mcp_servers.{name} must be an object ({{\"command\": …}})"
+                    ));
+                }
+            }
+        }
+        // Codex has none of these; a setting that did nothing would leave
+        // you thinking a seat was more restricted than it is.
+        let codex = &self.runtimes.codex;
+        for (set, name) in [
+            (codex.permission_mode.is_some(), "permission_mode"),
+            (!codex.allowed_tools.is_empty(), "allowed_tools"),
+            (!codex.disallowed_tools.is_empty(), "disallowed_tools"),
+            (codex.strict_mcp_config, "strict_mcp_config"),
+        ] {
+            if set {
+                out.push(format!("runtimes.codex.{name} applies to Claude Code only"));
+            }
+        }
+        env_problems("runtimes.shell.env", &self.runtimes.shell.env, &mut out);
+        for p in &self.permissions.sensitive_paths {
+            if p.trim().is_empty() || p.split('/').any(|part| part == "..") {
+                out.push(format!(
+                    "permissions.sensitive_paths has {p:?}; give a name or a path without `..`"
+                ));
+            }
+        }
+        for (i, rule) in self.permissions.global_rules.iter().enumerate() {
+            if let Some(why) = rule.problem() {
+                out.push(format!("permissions.global_rules[{i}]: {why}"));
+            }
         }
         if self
             .runtimes
@@ -670,6 +841,22 @@ impl Settings {
             }
         }
         out
+    }
+}
+
+/// Environment variables a setting may not set: ainet's own, which tell
+/// an agent who it is and where ainetd lives.
+pub fn reserved_env(name: &str) -> bool {
+    name.starts_with("AINET_") || name.starts_with("OPENRIG_")
+}
+
+fn env_problems(key: &str, env: &BTreeMap<String, String>, out: &mut Vec<String>) {
+    for name in env.keys() {
+        if name.is_empty() || name.contains('=') || name.contains('\0') {
+            out.push(format!("{key} has a bad variable name {name:?}"));
+        } else if reserved_env(name) {
+            out.push(format!("{key}.{name}: ainet sets {name} itself"));
+        }
     }
 }
 

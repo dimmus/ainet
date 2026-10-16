@@ -13,7 +13,7 @@ limits noted; **not yet** is planned; **won't** is out of scope.
 | OpenRig | ainet | Status |
 |---|---|---|
 | RigSpec 0.2 YAML (pods, members, edges, culture, startup files and actions) | `crates/spec`, parses OpenRig's own shipped rigs unchanged | done |
-| AgentSpec (`agent.yaml`: defaults, profiles, guidance, skills, startup, imports) | resolved into each seat's system prompt and startup texts | done (plugins, subagents, runtime resources are warned and skipped) |
+| AgentSpec (`agent.yaml`: defaults, profiles, guidance, skills, startup, imports) | resolved into each seat's system prompt and startup texts | done (plugins, subagents, runtime resources are warned and skipped; skills are resolved but not installed: Claude Code has no confirmed way to load them without writing your files) |
 | `rig up <spec\|library\|rig>`, `--cwd`, `--plan` | `ainet up …` | done |
 | Launch order from `delegates_to` / `spawned_by`, cycle errors | dependency levels, each level at once | done |
 | Startup `send_text`, `slash_command`, `guidance_merge`, `applies_on` | system prompt (`--append-system-prompt`, no files touched) and typed after readiness | done |
@@ -29,7 +29,7 @@ limits noted; **not yet** is planned; **won't** is out of scope.
 | `restore_policy` (`resume_if_possible`, `relaunch_fresh`, `checkpoint_only`) | resume or fresh | partial (checkpoint artifacts not yet) |
 | Bundles (`rig bundle create/inspect/install`, SHA-256) | | not yet |
 | Services (Docker Compose), managed apps, `rig env` | warned and ignored | not yet |
-| Permission policies (`builtin:locked` … `yolo`) | warned and ignored; approvals go through the Inbox | not yet |
+| Permission policies (`builtin:locked` … `yolo`) | with `permissions.spec_policies` in settings.json, Claude Code seats start in `plan` (`locked`), the default (`default`, `standard`) or `bypassPermissions` (`yolo`); otherwise, and for other policies or Codex seats, warned and ignored; approvals go through the Inbox | partial (opt-in; only these names) |
 | Pi / Oh My Pi runtimes, `stub` | rejected with a clear error | won't (for now) |
 
 ## Agents talking

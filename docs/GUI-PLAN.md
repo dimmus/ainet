@@ -779,6 +779,48 @@ only `binary` and `readiness`. Left for part two: the rest of
 seats it kills as stopped (their exits came after the save), so
 `restore_rigs` sees what was running.
 
+**Done: item 2, part two** (`runtimes`, `permissions`, `hooks`). Seats'
+command lines are built in one pure place (`ainet_daemon::runtimes`, on
+`ainet_claude::launch::LaunchOptions`, which gained
+`--disallowedTools`); a test keeps the old builder word for word and
+checks that with nothing set every runtime gets exactly its old
+arguments. Wired: per runtime the model, effort (`--effort`; Codex
+`model_reasoning_effort`), Claude Code's permission mode, more arguments
+and environment (ainet's own variables refused), allowed tools
+(`mcp__ainet` always first) and disallowed tools, more MCP servers merged
+into `--mcp-config` (Codex: `-c mcp_servers.<name>.<key>=…`) with
+`--strict-mcp-config`, and the shell's arguments and environment. Codex
+has no permission modes or tool lists, so setting them for Codex is an
+error. A spec's `effort` is still dropped unless `runtimes.<rt>.spec_effort`
+is on: `--effort` is not confirmed for Claude Code 2.1.289 and an unknown
+flag would stop the seat; an effort set in settings.json or asked for in a
+request is passed. `SeatSpec` and `SpawnSpec` gained `effort`,
+`permission_mode`, `env` (and `SeatSpec` `args`), skipped on the wire when
+unset; OpenRig defines none of them on members, so only
+`permission_policy` maps from a spec. `permissions.hold_secs` sets the hold,
+the seats' `PermissionRequest` hook timeout (hold + 20, 600 by default) and
+`ainet hook`'s wait (hold + 10). `/always` rules are kept per agent in the
+database with `persist_always` (turning it off forgets them), listed and
+revoked with the additive `Request::AlwaysList` / `AlwaysRevoke`
+(`Response::AlwaysRules`; an old daemon answers "bad request"), and
+`global_rules` (the same four kinds, checked strictly) cover every agent.
+`sensitive_paths` add names or paths `/always` and global rules never
+cover; the built-in lists always apply. With `spec_policies`,
+`builtin:locked` is `plan`, `builtin:default` and `builtin:standard`
+Claude Code's default, `builtin:yolo` `bypassPermissions`; others are
+reported and ignored, and `up --plan` shows each seat's mode. `ainet
+install-hooks` prints the block made from the installer's `SPECS` (it
+used to differ: no `AskUserQuestion` matcher, other timeouts), and
+`--write`, `--status`, `--remove` install, check and remove it in Claude
+Code's settings (`hooks.claude_settings`), keeping a backup of each
+change. Not done: installing a spec's skills. Claude Code reads skills
+only from `~/.claude/skills`, a project's `.claude/skills` or a plugin;
+`--plugin-dir` with a generated plugin would avoid your files but is not
+confirmed for 2.1.289, so skills stay resolved and unused. Left for the
+protocol step: reading and setting values, paths, and hook status and
+install over the socket (the console's `install-hooks` already does the
+last two locally).
+
 ## 6. Risks
 
 | Risk | Mitigation |

@@ -15,6 +15,7 @@ name = "ainet"
 path = "src/main.rs"
 
 [dependencies]
+ainet-claude = { path = "../claude" }
 ainet-core.workspace = true
 ainet-critter.workspace = true
 ainet-daemon.workspace = true

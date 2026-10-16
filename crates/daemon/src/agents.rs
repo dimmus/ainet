@@ -257,7 +257,13 @@ pub(crate) fn spawn_loose(d: &Shared, spec: SpawnSpec) -> Result<Agent> {
     agent.role = spec.role;
     agent.task = spec.task;
     agent.parent = spec.parent;
-    let cmd = crate::launch::loose_command(&d, &agent, &spec.args);
+    let ask = crate::runtimes::Ask {
+        effort_asked: spec.effort,
+        permission_mode: spec.permission_mode,
+        env: Some(&spec.env),
+        ..Default::default()
+    };
+    let cmd = crate::launch::loose_command(&d, &agent, &ask, &spec.args);
     d.start_pane(agent, &cmd)
 }
 
