@@ -19,6 +19,7 @@ pub mod popup;
 pub mod sample;
 pub mod store;
 pub mod terminal;
+pub mod topology;
 
 pub use command::{AgentCommand, Command, Context, QueueCommand};
 pub use demo::Demo;

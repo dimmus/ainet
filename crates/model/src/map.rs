@@ -159,13 +159,21 @@ impl Layout {
 
 /// Lays the fleet's live agents out in a `width` × `height` box.
 pub fn layout(store: &Store, width: f32, height: f32) -> Layout {
+    layout_where(store, |_| true, width, height)
+}
+
+/// [`layout`] of the live agents `keep` says yes to: one rig or pod of
+/// it (the Topology view's Graph), the rest as if they were not there.
+pub fn layout_where(store: &Store, keep: impl Fn(&Agent) -> bool, width: f32, height: f32) -> Layout {
     // The clusters: each rig with live agents, then the loose ones.
+    let live = |a: &&Agent| a.state.is_live() && keep(a);
     let mut members: Vec<(Option<String>, Vec<&Agent>)> = Vec::new();
     for name in store.rigs.keys() {
         let agents: Vec<&Agent> = store
             .agents
             .values()
-            .filter(|a| a.state.is_live() && a.rig.as_deref() == Some(name))
+            .filter(live)
+            .filter(|a| a.rig.as_deref() == Some(name))
             .collect();
         if !agents.is_empty() {
             members.push((Some(name.clone()), agents));
@@ -174,7 +182,8 @@ pub fn layout(store: &Store, width: f32, height: f32) -> Layout {
     let loose: Vec<&Agent> = store
         .agents
         .values()
-        .filter(|a| a.state.is_live() && a.rig.as_ref().is_none_or(|r| !store.rigs.contains_key(r)))
+        .filter(live)
+        .filter(|a| a.rig.as_ref().is_none_or(|r| !store.rigs.contains_key(r)))
         .collect();
     if !loose.is_empty() {
         members.push((None, loose));
@@ -555,6 +564,26 @@ mod tests {
         for seat in ["ops-data@infra", "ops-sre@infra"] {
             assert_eq!(node(seat).group, 1);
         }
+    }
+
+    #[test]
+    fn a_layout_can_hold_one_rig_or_pod() {
+        let store = demo();
+        let docs = layout_where(&store, |a| a.rig.as_deref() == Some("docs"), 900.0, 600.0);
+        assert_eq!(docs.groups.len(), 1);
+        assert_eq!(docs.groups[0].rig.as_deref(), Some("docs"));
+        assert_eq!(docs.nodes.len(), 5);
+        assert_eq!(docs.edges.len(), 3, "the lead's three");
+        assert_sound(&docs, 900.0, 600.0);
+        // Only the reviewer: no edges to agents left out.
+        let rev = layout_where(
+            &store,
+            |a| a.seat.as_deref() == Some("rev-review@docs"),
+            900.0,
+            600.0,
+        );
+        assert_eq!((rev.nodes.len(), rev.edges.len()), (1, 0));
+        assert!(layout_where(&store, |_| false, 900.0, 600.0).nodes.is_empty());
     }
 
     #[test]
