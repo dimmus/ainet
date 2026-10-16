@@ -17,8 +17,8 @@ limits noted; **not yet** is planned; **won't** is out of scope.
 | `rig up <spec\|library\|rig>`, `--cwd`, `--plan` | `ainet up …` | done |
 | Launch order from `delegates_to` / `spawned_by`, cycle errors | dependency levels, each level at once | done |
 | Startup `send_text`, `slash_command`, `guidance_merge`, `applies_on` | system prompt (`--append-system-prompt`, no files touched) and typed after readiness | done |
-| `rig down` with snapshot, `rig snapshot create/list`, `rig restore` | snapshots in SQLite; restore resumes every Claude conversation (`--resume`) | done |
-| `rig start` (restore what was running) | `ainet start` | done |
+| `rig down` with snapshot, `rig snapshot create/list`, `rig restore` | snapshots in SQLite; restore resumes every Claude conversation (`--resume`); `rigs.snapshot_on_down` and `rigs.keep_snapshots` (pruning) in settings.json | done |
+| `rig start` (restore what was running) | `ainet start`, or ainetd itself on start with `daemon.restore_rigs` | done |
 | `rig grow` / `add` / `expand` / `shrink` / `remove` / `launch` / `create` | same names | done |
 | `rig export` / `import` | YAML round trip | done (pod labels and non-built-in agent refs are not recovered) |
 | `rig specs ls/preview`, built-in teams | `ainet specs`, `specs show`; built-ins `starter`, `workshop`, `factory`, `code-review`, `research`, `pm`, `operator` | done (own content) |

@@ -153,6 +153,64 @@ agent's terminal, or its seat has a typing guard, they are held and
 delivered after. Watchdogs (`ainet watchdog register`) wake idle seats to
 check their queue.
 
+## Configuration
+
+Everything is optional: with no settings file ainet does what it always
+did. `~/.config/ainet/settings.json` (`$XDG_CONFIG_HOME` respected) is JSON
+with comments and trailing commas. The desktop app reads its own keys
+(`theme`, `terminal`, …) and ainetd and the console read theirs; each
+ignores the other's sections and keeps them when it writes. ainetd follows
+the file while it runs (checked every second) and applies a change at
+once where it can; a file that does not read, or says something out of
+range, is reported in ainetd's log and the last good settings stay.
+Unknown keys in ainet's sections are reported and ignored. The schema
+(`crates/gui/assets/settings-schema.json`) describes every key with its
+default.
+
+```jsonc
+{
+  "daemon": {
+    "autostart": true,          // off: the console and the app ask you to run `ainet daemon`
+    "restore_rigs": false,      // start again the rigs that were running when ainetd stopped
+    "log": { "level": "info", "append": false, "max_size_mb": 0, "keep": 1 }
+  },
+  "messaging": {
+    "paste_settle_ms": 60, "flush_gap_ms": 400,
+    "hold_while_interacting": true, "typing_guard": false,
+    "message_note": "(Answer with the ainet tool reply_message id={id} — …)"
+  },
+  "queue": { "nudge": true, "watchdog": { "min_interval_secs": 30, "default_interval_secs": 600 } },
+  "rigs": { "spec_dirs": [], "default_cwd": null, "snapshot_on_down": true, "keep_snapshots": null },
+  "discovery": { "claude_sessions": true, "tmux": true, "interval_ms": 3000 },
+  "retention": { "messages_in_memory": 5000, "inbox_items": 200, "scrollback_lines": 5000,
+                 "events_max_age_days": null, "inbox_expiry_mins": null },
+  "cost": { "context_windows": { "claude-opus-5": 1000000 } }
+}
+```
+
+| Section | What it sets | When it applies |
+|---|---|---|
+| `daemon` | `autostart` (console and app), `socket`, `restore_rigs`, `log` (`level`, `file`, `append`, `max_size_mb` rotation, `keep`) | autostart at once; the rest when ainetd next starts |
+| `messaging` | pause between paste and Enter, between held messages; holding while you type; typing guard of new seats; the note that ends a delivered message or mention | at once (typing guard: new seats) |
+| `queue` | `nudge` default; watchdogs' `default_interval_secs`, `min_interval_secs`, `message`, `tick_secs` | at once |
+| `rigs` | more spec directories, `default_cwd` for `create`/`spawn`, `snapshot_on_down` for `ainet down`, `keep_snapshots` (pruning, opt-in) | at once |
+| `discovery` | track every Claude Code session (`claude_sessions`), scan tmux, how often | at once |
+| `retention` | in-memory caps for messages, chat, inbox and scrollback; logged events pruned by age or count and answered inbox items expired (opt-in) | at once (scrollback: new terminals) |
+| `cost` | context windows and prices by model-id prefix | at once |
+| `runtimes` | the program of each runtime (`binary`), readiness timings; model, effort, permission mode, tools, MCP servers and more are being wired | new seats |
+| `permissions`, `hooks` | how long requests are held, `/always` persistence, Claude Code's settings file | being wired |
+
+Settings that loosen safety (permission modes such as `bypassPermissions`,
+tools allowed without asking, persisted `/always` rules) are off unless
+set, say so in their descriptions, and take only values from a closed
+list, so a typo is an error, not a looser agent.
+
+Environment variables that meant something before still win over the
+file: `AINET_SOCKET` over `daemon.socket`, `AINET_LOG` over
+`daemon.log.level` (environment, then file, then default). The others
+(`AINET_BIN`, `AINET_AGENT_ID`, `CLAUDE_CONFIG_DIR`, `SHELL`, `AINET_VIEW`,
+`AINET_WINDOW_DECORATIONS`, `XDG_*`) work as before.
+
 ## How it works
 
 ```

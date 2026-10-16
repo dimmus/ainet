@@ -66,6 +66,151 @@
       "description": "Ask before quitting.",
       "type": "boolean",
       "default": false
+    },
+    "daemon": {
+      "description": "ainetd itself: starting it, its log, its socket.",
+      "$ref": "#/$defs/DaemonSettings",
+      "default": {
+        "autostart": true,
+        "socket": null,
+        "restore_rigs": false,
+        "log": {
+          "level": "info",
+          "file": null,
+          "append": false,
+          "max_size_mb": 0,
+          "keep": 1
+        }
+      }
+    },
+    "runtimes": {
+      "description": "How Claude Code, Codex and shells are started in seats.",
+      "$ref": "#/$defs/RuntimeSettings",
+      "default": {
+        "claude": {
+          "binary": null,
+          "model": null,
+          "effort": null,
+          "permission_mode": null,
+          "args": [],
+          "env": {},
+          "allowed_tools": [],
+          "disallowed_tools": [],
+          "mcp_servers": {},
+          "strict_mcp_config": false
+        },
+        "codex": {
+          "binary": null,
+          "model": null,
+          "effort": null,
+          "permission_mode": null,
+          "args": [],
+          "env": {},
+          "allowed_tools": [],
+          "disallowed_tools": [],
+          "mcp_servers": {},
+          "strict_mcp_config": false
+        },
+        "shell": {
+          "binary": null,
+          "args": [],
+          "env": {}
+        },
+        "readiness": {
+          "timeout_secs": 60,
+          "trust_timeout_secs": 600,
+          "poll_ms": 300,
+          "quiet_ms": {
+            "claude": 800,
+            "codex": 1500,
+            "shell": 400
+          },
+          "startup_text_gap_ms": 1200
+        }
+      }
+    },
+    "permissions": {
+      "description": "Permission requests held for you, and `/always` rules.",
+      "$ref": "#/$defs/PermissionSettings",
+      "default": {
+        "hold_secs": 580,
+        "persist_always": false,
+        "sensitive_paths": [],
+        "spec_policies": false
+      }
+    },
+    "messaging": {
+      "description": "Messages typed into agents' terminals.",
+      "$ref": "#/$defs/MessagingSettings",
+      "default": {
+        "paste_settle_ms": 60,
+        "flush_gap_ms": 400,
+        "hold_while_interacting": true,
+        "typing_guard": false,
+        "message_note": "(Answer with the ainet tool reply_message id={id} — or on the shell: ainet msg reply {id} \"…\". Do not answer in this chat; the sender cannot see it.)",
+        "mention_note": "(Answer with the ainet tool chat_send, or read more with chat_read.)"
+      }
+    },
+    "queue": {
+      "description": "Queue items and watchdogs.",
+      "$ref": "#/$defs/QueueSettings",
+      "default": {
+        "nudge": true,
+        "watchdog": {
+          "default_interval_secs": 600,
+          "min_interval_secs": 30,
+          "message": "[ainet] watchdog wake: check your queue (queue_list mine=true / ainet queue list --mine) and carry on with what you own.",
+          "tick_secs": 5
+        }
+      }
+    },
+    "rigs": {
+      "description": "Rigs, their specs and snapshots.",
+      "$ref": "#/$defs/RigSettings",
+      "default": {
+        "spec_dirs": [],
+        "default_cwd": null,
+        "snapshot_on_down": true,
+        "keep_snapshots": null
+      }
+    },
+    "discovery": {
+      "description": "Agents ainet did not start.",
+      "$ref": "#/$defs/DiscoverySettings",
+      "default": {
+        "claude_sessions": true,
+        "tmux": true,
+        "interval_ms": 3000,
+        "transcripts_ms": 6000
+      }
+    },
+    "hooks": {
+      "description": "ainet's hooks in Claude Code's settings.",
+      "$ref": "#/$defs/HookSettings",
+      "default": {
+        "claude_settings": null
+      }
+    },
+    "retention": {
+      "description": "What ainetd keeps, and for how long.",
+      "$ref": "#/$defs/RetentionSettings",
+      "default": {
+        "messages_in_memory": 5000,
+        "chat_in_memory": 5000,
+        "inbox_items": 200,
+        "scrollback_lines": 5000,
+        "events_max_age_days": null,
+        "events_max_count": null,
+        "inbox_expiry_mins": null
+      }
+    },
+    "cost": {
+      "description": "Token prices and context windows.",
+      "$ref": "#/$defs/CostSettings",
+      "default": {
+        "prices": {},
+        "context_windows": {}
+      }
     }
   },
   "$defs": {
@@ -251,6 +396,704 @@
       "enum": [
         "small",
         "large"
+      ]
+    },
+    "DaemonSettings": {
+      "type": "object",
+      "properties": {
+        "autostart": {
+          "description": "Start ainetd in the background when the console or the desktop app\nneeds it and it is not running. Off, they say so and you start it\nyourself (`ainet daemon`).",
+          "type": "boolean",
+          "default": true
+        },
+        "socket": {
+          "description": "The daemon's socket. `$AINET_SOCKET` wins; unset, it is\n`$XDG_RUNTIME_DIR/ainet.sock`. After a daemon restart.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "restore_rigs": {
+          "description": "Start again the seats of rigs that were running when ainetd last\nstopped. Off, they come back stopped and `ainet up <rig>` restores\nthem.",
+          "type": "boolean",
+          "default": false
+        },
+        "log": {
+          "description": "ainetd's log. After a daemon restart.",
+          "$ref": "#/$defs/LogSettings",
+          "default": {
+            "level": "info",
+            "file": null,
+            "append": false,
+            "max_size_mb": 0,
+            "keep": 1
+          }
+        }
+      }
+    },
+    "LogSettings": {
+      "type": "object",
+      "properties": {
+        "level": {
+          "description": "What to log: `error`, `warn`, `info`, `debug`, `trace`, or a\ntracing filter (`info,ainet_daemon=debug`). `$AINET_LOG` wins.",
+          "type": "string",
+          "default": "info"
+        },
+        "file": {
+          "description": "Where an autostarted ainetd writes its log. Unset, it is\n`ainetd.log` in ainet's state directory.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "append": {
+          "description": "Add to the log instead of starting it afresh on each autostart.",
+          "type": "boolean",
+          "default": false
+        },
+        "max_size_mb": {
+          "description": "Once the log is this many megabytes, it is moved aside\n(`ainetd.log.1`, …) when ainetd next starts. 0 never rotates.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "maximum": 10000,
+          "default": 0
+        },
+        "keep": {
+          "description": "How many rotated logs to keep.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 1,
+          "maximum": 20,
+          "default": 1
+        }
+      }
+    },
+    "RuntimeSettings": {
+      "type": "object",
+      "properties": {
+        "claude": {
+          "description": "Claude Code seats.",
+          "$ref": "#/$defs/AgentRuntime",
+          "default": {
+            "binary": null,
+            "model": null,
+            "effort": null,
+            "permission_mode": null,
+            "args": [],
+            "env": {},
+            "allowed_tools": [],
+            "disallowed_tools": [],
+            "mcp_servers": {},
+            "strict_mcp_config": false
+          }
+        },
+        "codex": {
+          "description": "Codex seats.",
+          "$ref": "#/$defs/AgentRuntime",
+          "default": {
+            "binary": null,
+            "model": null,
+            "effort": null,
+            "permission_mode": null,
+            "args": [],
+            "env": {},
+            "allowed_tools": [],
+            "disallowed_tools": [],
+            "mcp_servers": {},
+            "strict_mcp_config": false
+          }
+        },
+        "shell": {
+          "description": "Shell seats (OpenRig's `terminal` nodes).",
+          "$ref": "#/$defs/ShellRuntime",
+          "default": {
+            "binary": null,
+            "args": [],
+            "env": {}
+          }
+        },
+        "readiness": {
+          "description": "When a new seat counts as ready for its first message.",
+          "$ref": "#/$defs/Readiness",
+          "default": {
+            "timeout_secs": 60,
+            "trust_timeout_secs": 600,
+            "poll_ms": 300,
+            "quiet_ms": {
+              "claude": 800,
+              "codex": 1500,
+              "shell": 400
+            },
+            "startup_text_gap_ms": 1200
+          }
+        }
+      }
+    },
+    "AgentRuntime": {
+      "type": "object",
+      "properties": {
+        "binary": {
+          "description": "The program: a name on `PATH` or a path. Unset, `claude` or\n`codex`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "model": {
+          "description": "The model of seats whose spec names none.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "effort": {
+          "description": "Reasoning effort of seats whose spec names none.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Effort"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "permission_mode": {
+          "description": "Claude Code's permission mode for new seats. Unset, Claude Code's\nown default. `acceptEdits`, `auto`, `dontAsk` and\n`bypassPermissions` let agents act without asking you;\n`bypassPermissions` skips every permission check.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PermissionMode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "args": {
+          "description": "Further arguments for every seat of this runtime.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "env": {
+          "description": "Further environment variables for every seat of this runtime.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "allowed_tools": {
+          "description": "Tools allowed without asking, beyond ainet's own (`mcp__ainet`).\nEach one loosens safety: the agent no longer asks before using it.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "disallowed_tools": {
+          "description": "Tools the agent may not use.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "mcp_servers": {
+          "description": "MCP servers given to every seat besides ainet's, by name, as\nClaude Code's `mcpServers` entries.",
+          "type": "object",
+          "additionalProperties": true,
+          "default": {}
+        },
+        "strict_mcp_config": {
+          "description": "Only ainet's MCP server and `mcp_servers`, none of your own.",
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "Effort": {
+      "description": "Claude Code's `--effort` levels.",
+      "type": "string",
+      "enum": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ]
+    },
+    "PermissionMode": {
+      "description": "Claude Code's `--permission-mode` values.",
+      "oneOf": [
+        {
+          "description": "Ask before anything risky (Claude Code's default).",
+          "type": "string",
+          "const": "default"
+        },
+        {
+          "description": "Plan only; change nothing.",
+          "type": "string",
+          "const": "plan"
+        },
+        {
+          "description": "Less safe: file edits without asking.",
+          "type": "string",
+          "const": "acceptEdits"
+        },
+        {
+          "description": "Less safe: Claude Code decides what needs asking.",
+          "type": "string",
+          "const": "auto"
+        },
+        {
+          "description": "Less safe: never ask; what would need asking is refused.",
+          "type": "string",
+          "const": "dontAsk"
+        },
+        {
+          "description": "Unsafe: no permission checks at all.",
+          "type": "string",
+          "const": "bypassPermissions"
+        }
+      ]
+    },
+    "ShellRuntime": {
+      "type": "object",
+      "properties": {
+        "binary": {
+          "description": "The shell. Unset, `$SHELL`, else `/bin/sh`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "args": {
+          "description": "Further arguments for every shell seat.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "env": {
+          "description": "Further environment variables for every shell seat.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        }
+      }
+    },
+    "Readiness": {
+      "type": "object",
+      "properties": {
+        "timeout_secs": {
+          "description": "How long to wait for a new seat to be ready before typing its\nstartup texts anyway, in seconds.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1,
+          "maximum": 3600,
+          "default": 60
+        },
+        "trust_timeout_secs": {
+          "description": "The same once Claude Code asks whether to trust the folder (you\nanswer that), in seconds.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1,
+          "maximum": 86400,
+          "default": 600
+        },
+        "poll_ms": {
+          "description": "How often the screen is checked, in milliseconds.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 50,
+          "maximum": 10000,
+          "default": 300
+        },
+        "quiet_ms": {
+          "description": "Quiet time after the last output before a seat counts as ready,\nin milliseconds, per runtime.",
+          "$ref": "#/$defs/QuietMs",
+          "default": {
+            "claude": 800,
+            "codex": 1500,
+            "shell": 400
+          }
+        },
+        "startup_text_gap_ms": {
+          "description": "Pause between a seat's startup texts, in milliseconds.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "maximum": 60000,
+          "default": 1200
+        }
+      }
+    },
+    "QuietMs": {
+      "type": "object",
+      "properties": {
+        "claude": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "maximum": 60000,
+          "default": 800
+        },
+        "codex": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "maximum": 60000,
+          "default": 1500
+        },
+        "shell": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "maximum": 60000,
+          "default": 400
+        }
+      }
+    },
+    "PermissionSettings": {
+      "type": "object",
+      "properties": {
+        "hold_secs": {
+          "description": "How long a permission request waits for you in the Inbox before\nthe agent's own terminal dialog takes over, in seconds.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 10,
+          "maximum": 3600,
+          "default": 580
+        },
+        "persist_always": {
+          "description": "Keep `/always` rules after a session ends and across daemon\nrestarts. Less safe: an answer given once keeps allowing.",
+          "type": "boolean",
+          "default": false
+        },
+        "sensitive_paths": {
+          "description": "Paths `/always` never covers, on top of ainet's own list (`.ssh`,\n`.git`, `.env`, …): names, or paths under your home.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "spec_policies": {
+          "description": "Apply a rig spec's `permission_policy` where Claude Code allows it.\nOff, it is reported and ignored, as before.",
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "MessagingSettings": {
+      "type": "object",
+      "properties": {
+        "paste_settle_ms": {
+          "description": "Between pasting a message into a terminal and pressing Enter, in\nmilliseconds: the agent's input box needs a moment to take it.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "maximum": 5000,
+          "default": 60
+        },
+        "flush_gap_ms": {
+          "description": "Between held messages delivered one after another, in\nmilliseconds.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "maximum": 60000,
+          "default": 400
+        },
+        "hold_while_interacting": {
+          "description": "Hold messages while you are at an agent's terminal, and deliver\nthem when you leave it.",
+          "type": "boolean",
+          "default": true
+        },
+        "typing_guard": {
+          "description": "New seats start with their typing guard on: messages are held\nuntil it is turned off.",
+          "type": "boolean",
+          "default": false
+        },
+        "message_note": {
+          "description": "The last line typed with a message, telling the agent how to\nanswer. `{id}` is the message's number.",
+          "type": "string",
+          "default": "(Answer with the ainet tool reply_message id={id} — or on the shell: ainet msg reply {id} \"…\". Do not answer in this chat; the sender cannot see it.)"
+        },
+        "mention_note": {
+          "description": "The last line typed with a chatroom mention.",
+          "type": "string",
+          "default": "(Answer with the ainet tool chat_send, or read more with chat_read.)"
+        }
+      }
+    },
+    "QueueSettings": {
+      "type": "object",
+      "properties": {
+        "nudge": {
+          "description": "Tell a queue item's destination about it right away, unless the\nrequest says otherwise (`--no-nudge`).",
+          "type": "boolean",
+          "default": true
+        },
+        "watchdog": {
+          "description": "Watchdogs: reminders typed into a seat every so often.",
+          "$ref": "#/$defs/WatchdogSettings",
+          "default": {
+            "default_interval_secs": 600,
+            "min_interval_secs": 30,
+            "message": "[ainet] watchdog wake: check your queue (queue_list mine=true / ainet queue list --mine) and carry on with what you own.",
+            "tick_secs": 5
+          }
+        }
+      }
+    },
+    "WatchdogSettings": {
+      "type": "object",
+      "properties": {
+        "default_interval_secs": {
+          "description": "The interval of a watchdog registered without one, in seconds.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1,
+          "default": 600
+        },
+        "min_interval_secs": {
+          "description": "The shortest interval allowed, in seconds.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1,
+          "maximum": 86400,
+          "default": 30
+        },
+        "message": {
+          "description": "What a watchdog registered without a message types.",
+          "type": "string",
+          "default": "[ainet] watchdog wake: check your queue (queue_list mine=true / ainet queue list --mine) and carry on with what you own."
+        },
+        "tick_secs": {
+          "description": "How often due watchdogs and blocked items' wakes are checked, in\nseconds.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1,
+          "maximum": 60,
+          "default": 5
+        }
+      }
+    },
+    "RigSettings": {
+      "type": "object",
+      "properties": {
+        "spec_dirs": {
+          "description": "More directories of your own specs, searched after\n`~/.config/ainet/specs` (the first one with a name wins).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "default_cwd": {
+          "description": "Where a rig created from one seat, or a loose agent, runs when no\ndirectory is given. Unset, the console's current directory, else\nyour home.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "snapshot_on_down": {
+          "description": "`ainet down` takes a snapshot first unless told `--no-snapshot`.",
+          "type": "boolean",
+          "default": true
+        },
+        "keep_snapshots": {
+          "description": "Keep only this many snapshots per rig, the newest; older ones are\ndeleted. Unset, every snapshot is kept.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 1,
+          "default": null
+        }
+      }
+    },
+    "DiscoverySettings": {
+      "type": "object",
+      "properties": {
+        "claude_sessions": {
+          "description": "Show every Claude Code session on this machine in the Fleet, from\n`~/.claude/sessions`. Off, only agents ainet started or adopted,\nand sessions that report through ainet's hooks.",
+          "type": "boolean",
+          "default": true
+        },
+        "tmux": {
+          "description": "Look for agents in tmux panes when asked to discover.",
+          "type": "boolean",
+          "default": true
+        },
+        "interval_ms": {
+          "description": "How often Claude Code's sessions are checked, in milliseconds.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 500,
+          "maximum": 600000,
+          "default": 3000
+        },
+        "transcripts_ms": {
+          "description": "How often context use, model and last tool are read from\ntranscripts, in milliseconds.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 500,
+          "maximum": 600000,
+          "default": 6000
+        }
+      }
+    },
+    "HookSettings": {
+      "type": "object",
+      "properties": {
+        "claude_settings": {
+          "description": "Claude Code's settings file that `ainet install-hooks` edits.\nUnset, `settings.json` in `$CLAUDE_CONFIG_DIR`, else `~/.claude`.\nNothing is written there without you asking.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      }
+    },
+    "RetentionSettings": {
+      "type": "object",
+      "properties": {
+        "messages_in_memory": {
+          "description": "Messages ainetd keeps in memory (all stay on disk).",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 100,
+          "maximum": 1000000,
+          "default": 5000
+        },
+        "chat_in_memory": {
+          "description": "Chatroom posts ainetd keeps in memory (all stay on disk).",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 100,
+          "maximum": 1000000,
+          "default": 5000
+        },
+        "inbox_items": {
+          "description": "Inbox items kept; answered ones go first, waiting ones never.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 10,
+          "maximum": 100000,
+          "default": 200
+        },
+        "scrollback_lines": {
+          "description": "Rows of scrollback each new terminal keeps.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0,
+          "maximum": 1000000,
+          "default": 5000
+        },
+        "events_max_age_days": {
+          "description": "Delete logged events older than this many days. Unset, kept.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 1,
+          "default": null
+        },
+        "events_max_count": {
+          "description": "Keep at most this many logged events, the newest. Unset, all.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 1000,
+          "default": null
+        },
+        "inbox_expiry_mins": {
+          "description": "Drop answered inbox items this many minutes old. Unset, they\nstay until the inbox is full.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 1,
+          "default": null
+        }
+      }
+    },
+    "CostSettings": {
+      "type": "object",
+      "properties": {
+        "prices": {
+          "description": "Prices by model-id prefix (`claude-opus-5`), over the built-in\ntable; the longest matching prefix wins.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/Price"
+          },
+          "default": {}
+        },
+        "context_windows": {
+          "description": "Context windows in tokens by model-id prefix, over ainet's guess\n(1M for a `[1m]` model, else 200k).",
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "default": {}
+        }
+      }
+    },
+    "Price": {
+      "description": "Dollars per million tokens.",
+      "type": "object",
+      "properties": {
+        "input": {
+          "type": "number",
+          "format": "double"
+        },
+        "output": {
+          "type": "number",
+          "format": "double"
+        },
+        "cache_write": {
+          "description": "Unset, 1.25 times `input`.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "cache_read": {
+          "description": "Unset, 0.1 times `input`.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "required": [
+        "input",
+        "output"
       ]
     }
   }

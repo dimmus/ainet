@@ -25,6 +25,8 @@ impl Daemon {
             socket: socket.clone(),
             database: dir.join("state.db"),
             exe: PathBuf::from("ainet"),
+            settings: None,
+            claude_sessions: dir.join("claude-sessions"),
         };
         std::thread::spawn(move || {
             let runtime = tokio::runtime::Runtime::new().unwrap();

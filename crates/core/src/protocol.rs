@@ -337,6 +337,10 @@ pub enum Request {
     },
     WatchdogRegister {
         target: String,
+        /// 0 (or left out): the daemon's default
+        /// (`queue.watchdog.default_interval_secs`). Daemons from before it
+        /// need one and refuse 0 as too short.
+        #[serde(default)]
         interval_secs: u64,
         message: Option<String>,
         registered_by: Option<String>,
@@ -411,13 +415,11 @@ pub struct QSpec {
     #[serde(default)]
     pub tags: Vec<String>,
     pub reply_to: Option<String>,
-    /// Tell the destination about it right away (default).
-    #[serde(default = "yes")]
-    pub nudge: bool,
-}
-
-fn yes() -> bool {
-    true
+    /// Tell the destination about it right away. Left out, the daemon's
+    /// default (`queue.nudge`, on unless settings.json says otherwise);
+    /// older daemons take a missing value as yes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nudge: Option<bool>,
 }
 
 /// A library entry.
@@ -622,6 +624,49 @@ mod tests {
             serde_json::from_str(r#"{"op":"answer","item":3,"decision":"deny","message":"use cargo"}"#)
                 .unwrap();
         assert!(matches!(why, Request::Answer { message: Some(ref m), .. } if m == "use cargo"));
+    }
+
+    #[test]
+    fn nudge_and_watchdog_intervals_may_be_left_to_the_daemon() {
+        // An old client's line: nudge said outright.
+        let old: Request = serde_json::from_str(
+            r#"{"op":"queue_create","rig":null,"source":null,"destination":"d","summary":"s","priority":null,"reply_to":null,"nudge":true}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            old,
+            Request::QueueCreate(QSpec {
+                nudge: Some(true),
+                ..
+            })
+        ));
+        // A new client leaving it to the daemon sends no nudge, which an
+        // old daemon reads as yes, its only default.
+        let line = encode(&Request::QueueCreate(QSpec {
+            destination: "d".into(),
+            summary: "s".into(),
+            ..QSpec::default()
+        }));
+        let text = std::str::from_utf8(&line).unwrap();
+        assert!(!text.contains("nudge"), "{text}");
+        let no = encode(&Request::QueueCreate(QSpec {
+            nudge: Some(false),
+            ..QSpec::default()
+        }));
+        assert!(std::str::from_utf8(&no).unwrap().contains(r#""nudge":false"#));
+        let dog: Request = serde_json::from_str(r#"{"op":"watchdog_register","target":"t"}"#).unwrap();
+        assert!(matches!(dog, Request::WatchdogRegister { interval_secs: 0, .. }));
+        let line = encode(&Request::WatchdogRegister {
+            target: "t".into(),
+            interval_secs: 600,
+            message: None,
+            registered_by: None,
+        });
+        assert!(
+            std::str::from_utf8(&line)
+                .unwrap()
+                .contains(r#""interval_secs":600"#)
+        );
     }
 
     #[test]

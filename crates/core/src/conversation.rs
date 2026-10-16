@@ -97,7 +97,13 @@ impl ConversationEntry {
     /// A prompt: a message ainetd delivered if it reads as one, else your
     /// words.
     pub fn prompt(id: u64, at: Option<i64>, text: &str) -> Self {
-        let mut entry = match parse_delivery(text) {
+        Self::prompt_with(id, at, text, &[])
+    }
+
+    /// [`ConversationEntry::prompt`] that also knows the `notes` messages
+    /// may end with (see [`parse_delivery_with`]).
+    pub fn prompt_with(id: u64, at: Option<i64>, text: &str, notes: &[&str]) -> Self {
+        let mut entry = match parse_delivery_with(text, notes) {
             Some(d) => ConversationEntry {
                 from: d.from,
                 message: d.id,
@@ -160,29 +166,50 @@ pub const NO_TRANSCRIPT: &str =
     "No transcript yet: Claude Code names it in its first hook, once the session has started.";
 
 /// How a message delivered into a terminal ends: what to answer with.
-const ANSWER_MESSAGE: &str = "(Answer with the ainet tool reply_message id=";
-/// How a chatroom mention ends.
-const ANSWER_MENTION: &str = "(Answer with the ainet tool chat_send, or read more with chat_read.)";
+/// `{id}` is the message's number. `messaging.message_note` in
+/// settings.json replaces it.
+pub const MESSAGE_NOTE: &str = "(Answer with the ainet tool reply_message id={id} — or on the shell: ainet msg reply {id} \"…\". Do not answer in this chat; the sender cannot see it.)";
+/// How a chatroom mention ends (`messaging.mention_note`).
+pub const MENTION_NOTE: &str = "(Answer with the ainet tool chat_send, or read more with chat_read.)";
+/// How every note of ainet's own starts, cut off or not.
+const ANSWER_START: &str = "(Answer with the ainet tool ";
 const PREFIX: &str = "[ainet] ";
 
 /// What ainetd types into an agent's terminal for message `id` from
 /// `from` (its label), answering `reply_to` if it does.
 pub fn delivery(id: u64, reply_to: Option<u64>, from: &str, body: &str) -> String {
+    delivery_with(MESSAGE_NOTE, id, reply_to, from, body)
+}
+
+/// [`delivery`] ending with `note` (`{id}` is the message's number). The
+/// first line stays as it is: ainet reads it back.
+pub fn delivery_with(note: &str, id: u64, reply_to: Option<u64>, from: &str, body: &str) -> String {
     let what = match reply_to {
         Some(r) => format!("reply #{id} to your message #{r}"),
         None => format!("message #{id}"),
     };
     format!(
-        "{PREFIX}{what} from {from}:\n{}\n{ANSWER_MESSAGE}{id} — or on the shell: ainet msg reply {id} \"…\". Do not answer in this chat; the sender cannot see it.)",
-        body.trim()
+        "{PREFIX}{what} from {from}:\n{}\n{}",
+        body.trim(),
+        note_for(note, id)
     )
+}
+
+fn note_for(note: &str, id: u64) -> String {
+    note.replace("{id}", &id.to_string())
 }
 
 /// What ainetd types into an agent's terminal when `sender` names it in
 /// `rig`'s chatroom (post `id` on `topic`).
 pub fn mention(sender: &str, rig: &str, id: u64, topic: &str, body: &str) -> String {
+    mention_with(MENTION_NOTE, sender, rig, id, topic, body)
+}
+
+/// [`mention`] ending with `note`.
+pub fn mention_with(note: &str, sender: &str, rig: &str, id: u64, topic: &str, body: &str) -> String {
     format!(
-        "{PREFIX}{sender} mentioned you in the {rig} chatroom (#{id}, topic {topic}):\n{body}\n{ANSWER_MENTION}"
+        "{PREFIX}{sender} mentioned you in the {rig} chatroom (#{id}, topic {topic}):\n{body}\n{}",
+        note_for(note, id)
     )
 }
 
@@ -202,16 +229,39 @@ pub struct Delivered {
 /// The trailer saying how to answer may be cut off (a long prompt kept
 /// in part); the body then runs to the end.
 pub fn parse_delivery(text: &str) -> Option<Delivered> {
+    parse_delivery_with(text, &[])
+}
+
+/// [`parse_delivery`] that also knows the `notes` a message may end with
+/// besides ainet's own (those set in settings.json).
+pub fn parse_delivery_with(text: &str, notes: &[&str]) -> Option<Delivered> {
     let rest = text.trim_start().strip_prefix(PREFIX)?;
     let (head, body) = rest.split_once('\n').unwrap_or((rest, ""));
     let head = head.trim_end().strip_suffix(':')?;
-    let body = match body.rfind("\n(Answer with the ainet tool ") {
-        Some(at) => &body[..at],
-        None if body.starts_with("(Answer with the ainet tool ") => "",
-        None => body,
+    let number = |s: &str| s.trim().strip_prefix('#').and_then(|n| n.parse::<u64>().ok());
+    let id = head
+        .split_whitespace()
+        .map(|w| w.trim_start_matches('('))
+        .find(|w| w.starts_with('#'))
+        .and_then(|w| number(w.trim_end_matches([',', ')'])));
+    let own = |body: &str| -> Option<usize> {
+        let id = id?;
+        notes
+            .iter()
+            .filter(|n| !n.trim().is_empty())
+            .map(|n| note_for(n, id))
+            .filter_map(|n| body.trim_end().strip_suffix(n.trim_end()).map(str::len))
+            .max()
+    };
+    let body = match own(body) {
+        Some(end) => &body[..end],
+        None => match body.rfind(&format!("\n{ANSWER_START}")) {
+            Some(at) => &body[..at],
+            None if body.starts_with(ANSWER_START) => "",
+            None => body,
+        },
     };
     let body = body.trim().to_string();
-    let number = |s: &str| s.trim().strip_prefix('#').and_then(|n| n.parse::<u64>().ok());
     if let Some(m) = head.strip_prefix("message ") {
         let (id, from) = m.split_once(" from ")?;
         return Some(Delivered {
@@ -287,6 +337,25 @@ mod tests {
         ] {
             assert_eq!(parse_delivery(text), None, "{text}");
         }
+        // A note of your own (settings.json) is known by what it says.
+        let note = "Reply with reply_message id={id}, please.";
+        let own = delivery_with(note, 12, None, "lead", "Ship it.");
+        assert_eq!(
+            own,
+            "[ainet] message #12 from lead:\nShip it.\nReply with reply_message id=12, please."
+        );
+        assert_eq!(parse_delivery_with(&own, &[note]).unwrap().body, "Ship it.");
+        assert_eq!(
+            parse_delivery(&own).unwrap().body,
+            own.split_once('\n').unwrap().1
+        );
+        let own_mention = mention_with("Use chat_send.", "lead", "docs", 4, "general", "@dev look");
+        assert_eq!(
+            parse_delivery_with(&own_mention, &["Use chat_send."])
+                .unwrap()
+                .body,
+            "@dev look"
+        );
         let entry = ConversationEntry::prompt(4, Some(10), &delivery(1, None, "lead", "go"));
         assert_eq!(
             (entry.kind, entry.from.as_str(), entry.text.as_str()),

@@ -4,6 +4,10 @@
 //! takes the app down: the last good settings stay, and the status bar says
 //! what is wrong until it is fixed.
 //!
+//! The same file holds the sections ainetd and the console read (`daemon`,
+//! `messaging`, …: `ainet_core::settings`); the app ignores them here and
+//! keeps them when it saves, and the published schema covers both.
+//!
 //! The settings also back the [`ThemeSettingsProvider`] that Zed's `theme`
 //! and `ui` crates read fonts, sizes and density from.
 
@@ -16,11 +20,11 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use theme::{Appearance, SystemAppearance, ThemeSettingsProvider, UiDensity};
 
-use crate::{json_edit, problems, themes, watch};
+use crate::{problems, themes, watch};
 
 /// Where the settings live: `$XDG_CONFIG_HOME/ainet/settings.json`.
 pub fn settings_file() -> PathBuf {
-    ainet_core::paths::config_dir().join("settings.json")
+    ainet_core::paths::settings_file()
 }
 
 /// What a new settings file starts as when opened from the app.
@@ -42,6 +46,12 @@ pub const TEMPLATE: &str = r#"// ainet desktop settings. Every field is optional
   // "critters": { "size": "large" },
   // "command_line": true, // the cmd line above the status bar
   // "confirm_quit": false,
+  //
+  // ainetd and the console read their own sections of this file:
+  // "daemon", "runtimes", "permissions", "messaging", "queue", "rigs",
+  // "discovery", "hooks", "retention" and "cost" (the schema has them all):
+  // "messaging": { "hold_while_interacting": true, "flush_gap_ms": 400 },
+  // "rigs": { "keep_snapshots": 20 },
 }
 "#;
 
@@ -457,7 +467,7 @@ pub fn with_theme(text: &str, name: &str, appearance: Appearance) -> Result<Stri
         _ => &["theme"],
     };
     let value = serde_json::to_string(name).map_err(|e| e.to_string())?;
-    let edited = json_edit::set(text, path, &value).map_err(|e| format!("settings.json: {e}"))?;
+    let edited = ainet_core::jsonc::set(text, path, &value).map_err(|e| format!("settings.json: {e}"))?;
     // What was written must read back as asked.
     match parse(&edited)?.theme {
         Some(theme) if theme.name(appearance) == name => Ok(edited),
@@ -608,10 +618,34 @@ mod tests {
     }
 
     /// The JSON schema for settings.json, as `assets/settings-schema.json`
-    /// holds it.
+    /// holds it: the app's keys and ainetd's sections in one.
     fn schema() -> String {
-        let schema = schemars::schema_for!(Settings);
+        let app = serde_json::to_value(schemars::schema_for!(Settings)).unwrap();
+        let schema = compose(app, ainet_core::settings::schema());
         serde_json::to_string_pretty(&schema).unwrap() + "\n"
+    }
+
+    /// `app`'s schema with `core`'s properties and definitions added.
+    fn compose(mut app: serde_json::Value, core: serde_json::Value) -> serde_json::Value {
+        for part in ["properties", "$defs"] {
+            let Some(from) = core.get(part).and_then(|v| v.as_object()).cloned() else {
+                continue;
+            };
+            let into = app
+                .as_object_mut()
+                .unwrap()
+                .entry(part)
+                .or_insert_with(|| serde_json::json!({}))
+                .as_object_mut()
+                .unwrap();
+            for (k, v) in from {
+                assert!(
+                    into.insert(k.clone(), v).is_none(),
+                    "{part}/{k} is in both schemas"
+                );
+            }
+        }
+        app
     }
 
     #[test]
@@ -637,7 +671,10 @@ mod tests {
             "critters",
             "command_line",
             "confirm_quit",
-        ] {
+        ]
+        .iter()
+        .chain(ainet_core::settings::SECTIONS)
+        {
             assert!(properties.get(field).is_some(), "{field} in the schema");
         }
         // The template points editors at it, where the repository keeps it.
@@ -683,6 +720,14 @@ mod tests {
         assert_eq!(s.critters.size, CritterSize::Small);
         assert!(!s.command_line);
         assert!(s.confirm_quit);
+    }
+
+    #[test]
+    fn the_daemons_sections_are_not_the_apps_and_stay_when_it_saves() {
+        let text = "{\n  // ainetd's\n  \"messaging\": { \"flush_gap_ms\": \"not a number\" },\n  \"ui_font_size\": 15\n}\n";
+        assert_eq!(parse(text).unwrap().ui_font_size, 15., "another reader's section");
+        let saved = with_theme(text, "One Dark", Appearance::Dark).unwrap();
+        assert!(saved.contains("// ainetd's\n  \"messaging\": { \"flush_gap_ms\": \"not a number\" }"));
     }
 
     #[test]

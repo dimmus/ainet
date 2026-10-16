@@ -179,7 +179,7 @@ pub fn run(cli: Cli, socket: PathBuf) -> Result<ExitCode> {
         } => {
             let req = Request::Down {
                 rig: rig.clone(),
-                snapshot: !no_snapshot,
+                snapshot: crate::settings::snapshot_on_down(crate::settings::get(), no_snapshot),
                 delete,
             };
             out.done(&conn.ok_for(&req, RIG_TIMEOUT)?, &format!("{rig} is down"));
@@ -283,7 +283,7 @@ pub fn run(cli: Cli, socket: PathBuf) -> Result<ExitCode> {
         } => {
             let cwd = match cwd {
                 Some(p) => absolute(&p)?,
-                None => std::env::current_dir()?,
+                None => crate::settings::default_cwd(crate::settings::get())?,
             };
             let req = Request::Create {
                 rig,
@@ -474,7 +474,7 @@ pub fn run(cli: Cli, socket: PathBuf) -> Result<ExitCode> {
         } => {
             let cwd = match cwd {
                 Some(p) => absolute(&p)?,
-                None => std::env::current_dir()?,
+                None => crate::settings::default_cwd(crate::settings::get())?,
             };
             let req = Request::Spawn(SpawnSpec {
                 runtime: runtime.into(),
@@ -563,10 +563,9 @@ fn gui_binary() -> Option<PathBuf> {
 }
 
 fn daemon() -> Result<()> {
+    let filter = crate::settings::log_filter(crate::settings::get(), std::env::var("AINET_LOG").ok());
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_env("AINET_LOG").unwrap_or_else(|_| "info".into()),
-        )
+        .with_env_filter(tracing_subscriber::EnvFilter::try_new(&filter).unwrap_or_else(|_| "info".into()))
         .with_writer(std::io::stderr)
         .init();
     let rt = tokio::runtime::Runtime::new()?;
@@ -939,7 +938,8 @@ fn queue(conn: &Conn, out: &Out, cmd: QueueCmd) -> Result<()> {
                 priority,
                 tags,
                 reply_to,
-                nudge: !no_nudge,
+                // Without --no-nudge, the daemon's default (`queue.nudge`).
+                nudge: no_nudge.then_some(false),
             }))?
         }
         QueueCmd::List {

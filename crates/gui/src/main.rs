@@ -22,7 +22,6 @@ mod fleet_panel;
 mod form;
 mod inbox;
 mod item;
-mod json_edit;
 mod keymap;
 mod map;
 mod message;

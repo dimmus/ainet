@@ -220,7 +220,9 @@ pub fn parse(cx: &Context, cmd: &str) -> Command {
             let spec = QSpec {
                 destination: dest.into(),
                 summary: rest(2),
-                nudge: true,
+                // The daemon's default (`queue.nudge`): on, unless
+                // settings.json says otherwise.
+                nudge: None,
                 ..Default::default()
             };
             req(Request::QueueCreate(spec), format!("queued for {dest}"))

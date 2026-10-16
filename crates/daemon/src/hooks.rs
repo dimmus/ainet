@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 
 use ainet_claude::hooks::Decision as ClaudeDecision;
 use ainet_claude::question::{self, Question};
+use ainet_core::settings::CostSettings;
 use ainet_core::{AgentState, Decision, InboxItem, InboxKind, Response, Runtime, now_ms};
 use serde_json::Value;
 
@@ -82,11 +83,18 @@ pub(crate) struct Summary {
     pub last_tool: Option<String>,
 }
 
-pub(crate) fn summarize(path: &Path) -> Option<Summary> {
+/// What the Fleet shows from a transcript; a context window set in
+/// settings.json (`cost.context_windows`) wins over ainet's guess.
+pub(crate) fn summarize(path: &Path, cost: &CostSettings) -> Option<Summary> {
     if !path.is_file() {
         return None;
     }
-    let usage = ainet_claude::transcript::read_usage(path);
+    let usage = ainet_claude::transcript::read_usage(path).map(|mut u| {
+        if let Some(window) = cost.context_window(&u.model) {
+            u.window = window as i64;
+        }
+        u
+    });
     let facts = ainet_claude::transcript::read_facts(path);
     let last_tool = ainet_claude::transcript::tail(path, 8)
         .into_iter()
@@ -431,6 +439,30 @@ impl Daemon {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn context_windows_from_settings_win_over_the_guess() {
+        let dir = std::env::temp_dir().join(format!("ainetd-window-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"type":"assistant","message":{"model":"claude-opus-5-5","usage":{"input_tokens":100000,"output_tokens":5}}}"#,
+        )
+        .unwrap();
+        let mut cost = CostSettings::default();
+        let guessed = summarize(&path, &cost).unwrap().context;
+        assert_eq!(guessed, Some(0.5), "200k by default");
+        cost.context_windows.insert("claude-opus-5".into(), 400_000);
+        assert_eq!(summarize(&path, &cost).unwrap().context, Some(0.25));
+        cost.context_windows = [("claude-sonnet".to_string(), 1_000_000)].into();
+        assert_eq!(
+            summarize(&path, &cost).unwrap().context,
+            Some(0.5),
+            "another model's"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn a_deny_says_why_when_you_did() {

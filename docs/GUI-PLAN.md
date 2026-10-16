@@ -756,6 +756,29 @@ what exists and what is hard-coded was taken on 2026-10-16; the plan:
    behaviour (daemon tests), protocol round trips and old-daemon
    fallback, GUI headless tests per category, comments preserved.
 
+**Done: items 1 and 2, part one.** `ainet_core::settings` (MIT) has the
+whole shape of the ten sections with serde defaults equal to the old
+constants (a test pins each), a JSON schema (`schemars`, composed into
+the GUI's published one), checks of ranges and closed lists, unknown keys
+reported, `Follower` (keep the last good file) and `effective` (each
+value with its default and source: default, file or an environment
+variable, which wins). `ainet_core::jsonc` reads JSON with comments and
+sets or removes one key in the text (the GUI's `json_edit`, moved).
+`paths::settings_file()`; `config_file()` (`config.toml`) is gone.
+ainetd loads the file at start, polls it every second on a blocking
+thread and puts a change in force at once; its log says what is set and
+from where. Wired: `daemon` (autostart in `ainet_model::daemon`, log
+level, file, append and size rotation for the autostarted daemon, socket,
+`restore_rigs`), `messaging` (all), `queue` (all; `QSpec.nudge` and a
+watchdog's interval may now be left to the daemon), `rigs` (all;
+`ainet down` reads `snapshot_on_down`), `discovery` (all), `retention`
+(all), `cost` (context windows in the Fleet; prices build an
+`ainet_claude::cost::Table`, which no view shows yet), and of `runtimes`
+only `binary` and `readiness`. Left for part two: the rest of
+`runtimes`, `permissions`, `hooks`. A shutdown no longer saves the
+seats it kills as stopped (their exits came after the save), so
+`restore_rigs` sees what was running.
+
 ## 6. Risks
 
 | Risk | Mitigation |

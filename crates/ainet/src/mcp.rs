@@ -741,7 +741,8 @@ pub fn tool_request(
             priority: opt_str(args, "priority")?,
             tags: vec![],
             reply_to: None,
-            nudge: true,
+            // The daemon's default (`queue.nudge` in settings.json).
+            nudge: None,
         }),
         "queue_list" => {
             let mine = opt_bool(args, "mine")?;
@@ -1283,7 +1284,7 @@ mod tests {
                     ("dev.impl", "fix", "")
                 );
                 assert_eq!(q.priority.as_deref(), Some("urgent"));
-                assert!(q.nudge);
+                assert_eq!(q.nudge, None, "left to the daemon");
             }
             other => panic!("{other:?}"),
         }

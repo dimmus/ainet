@@ -15,6 +15,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use ainet_core::settings::RuntimeSettings;
 use ainet_core::{Agent, AgentState, Edge, EdgeKind, InboxItem, InboxKind, Runtime, SeatStatus, now_ms};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -169,7 +170,17 @@ pub(crate) fn on_path(program: &str) -> bool {
         .unwrap_or(false)
 }
 
-pub(crate) fn program(runtime: Runtime) -> String {
+/// The program a runtime runs: `runtimes.<runtime>.binary` from
+/// settings.json, else `claude`, `codex` or `$SHELL` (else `/bin/sh`).
+pub(crate) fn program(runtimes: &RuntimeSettings, runtime: Runtime) -> String {
+    let configured = match runtime {
+        Runtime::ClaudeCode => &runtimes.claude.binary,
+        Runtime::Codex => &runtimes.codex.binary,
+        Runtime::Shell => &runtimes.shell.binary,
+    };
+    if let Some(b) = configured.as_deref().filter(|b| !b.trim().is_empty()) {
+        return ainet_core::paths::expand(Path::new(b)).display().to_string();
+    }
     match runtime {
         Runtime::ClaudeCode => "claude".into(),
         Runtime::Codex => "codex".into(),
@@ -383,7 +394,7 @@ Keep messages short and concrete; say what you need and by when. Do not wait in 
             Runtime::Shell => Vec::new(),
         };
         Command {
-            program: program(seat.runtime),
+            program: program(&self.settings().runtimes, seat.runtime),
             args,
             env,
         }
@@ -403,7 +414,7 @@ pub(crate) fn loose_command(d: &Daemon, agent: &Agent, extra: &[String]) -> Comm
         Runtime::Shell => extra.to_vec(),
     };
     Command {
-        program: program(agent.runtime),
+        program: program(&d.settings().runtimes, agent.runtime),
         args,
         env,
     }
@@ -417,7 +428,7 @@ pub(crate) async fn start_seat(
     address: String,
     fresh: bool,
 ) -> anyhow::Result<String> {
-    let (id, runtime, resume, texts) = {
+    let (id, runtime, resume, texts, gap) = {
         let mut g = lock(&d);
         let state = g.rigs.get(&rig).ok_or_else(|| anyhow::anyhow!("no rig {rig}"))?;
         let plan = state.plan.clone();
@@ -430,12 +441,10 @@ pub(crate) async fn start_seat(
             .seat(&address)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("no seat {address}"))?;
-        if !on_path(&program(seat_plan.runtime)) {
+        let program = program(&g.settings().runtimes, seat_plan.runtime);
+        if !on_path(&program) {
             g.set_seat_status(&rig, &address, SeatStatus::Failed);
-            anyhow::bail!(
-                "{} is not installed (needed by {address})",
-                program(seat_plan.runtime)
-            );
+            anyhow::bail!("{program} is not installed (needed by {address})");
         }
         let resume = !fresh
             && seat_plan.restore_policy == "resume_if_possible"
@@ -462,7 +471,8 @@ pub(crate) async fn start_seat(
         } else {
             seat_plan.send_text.clone()
         };
-        (id, seat_plan.runtime, resume, texts)
+        let gap = Duration::from_millis(g.settings().runtimes.readiness.startup_text_gap_ms);
+        (id, seat_plan.runtime, resume, texts, gap)
     };
     let ready = wait_ready(&d, &id, runtime).await;
     if !ready {
@@ -477,7 +487,7 @@ pub(crate) async fn start_seat(
         if let Err(e) = crate::comms::deliver_text(&d, &id, &text).await {
             tracing::warn!("startup text for {address}: {e:#}");
         }
-        tokio::time::sleep(Duration::from_millis(1200)).await;
+        tokio::time::sleep(gap).await;
     }
     let mut g = lock(&d);
     // Shells and Codex send no hooks: ready means idle.
@@ -495,14 +505,17 @@ pub(crate) async fn start_seat(
     Ok(id)
 }
 
-/// Waits until the agent in a fresh pane can take input.
+/// Waits until the agent in a fresh pane can take input
+/// (`runtimes.readiness` says how long and how quiet).
 async fn wait_ready(d: &Shared, id: &str, runtime: Runtime) -> bool {
     let started = Instant::now();
     let mut asked_trust = false;
-    let mut deadline = Duration::from_secs(60);
+    let mut deadline = Duration::from_secs(lock(d).settings().runtimes.readiness.timeout_secs);
     loop {
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        let poll = lock(d).settings().runtimes.readiness.poll_ms;
+        tokio::time::sleep(Duration::from_millis(poll)).await;
         let mut g = lock(d);
+        let r = g.settings().runtimes.readiness.clone();
         let Some(pane) = g.panes.get(id) else { return false };
         let screen = pane.rows().join("\n");
         let quiet = g
@@ -515,7 +528,7 @@ async fn wait_ready(d: &Shared, id: &str, runtime: Runtime) -> bool {
             // Your call, not ours: say so and wait for you.
             if !asked_trust {
                 asked_trust = true;
-                deadline = started.elapsed() + Duration::from_secs(600);
+                deadline = started.elapsed() + Duration::from_secs(r.trust_timeout_secs);
                 let cwd = g
                     .agents
                     .get(id)
@@ -543,10 +556,10 @@ async fn wait_ready(d: &Shared, id: &str, runtime: Runtime) -> bool {
                 let prompt = screen.contains("? for shortcuts")
                     || screen.contains("│ >")
                     || screen.lines().any(|l| l.trim_start().starts_with('>'));
-                (hooked || prompt) && quiet > Duration::from_millis(800)
+                (hooked || prompt) && quiet > Duration::from_millis(r.quiet_ms.claude)
             }
-            Runtime::Codex => printed && quiet > Duration::from_millis(1500),
-            Runtime::Shell => printed && quiet > Duration::from_millis(400),
+            Runtime::Codex => printed && quiet > Duration::from_millis(r.quiet_ms.codex),
+            Runtime::Shell => printed && quiet > Duration::from_millis(r.quiet_ms.shell),
         };
         if ready {
             return true;

@@ -1238,7 +1238,7 @@ All in the modal layer, on the picker and the text field above:
 | `seat_modals.rs` | `fleet::Spawn` (`s` in the Fleet): `SpawnModal`, the runtime (claude-code, codex, terminal), working directory (Browse…) and role, as `/spawn` (`command::spawn`). `fleet::Grow`: `GrowModal` for the selected agent's rig (else a rig picker): pod, member, runtime (or the rig's default), role, as `/grow` (`command::grow`); it says so when the pod or member is missing | — |
 | `form.rs` | what the forms share: Zed's `InputField`s (over `TextInput`) where enter moves to the next field and sends from the last, `tab`/`shift-tab` round the fields (`form::NextField`, `PreviousField`, context `Form`), Browse…, the runtime buttons, the frame (`ui::Modal`, `ModalHeader`, `Section`, `ModalFooter`) | — |
 | `theme_selector.rs` | `theme_selector::Toggle`: every registered theme, dark first, the one in use ticked and selected; moving previews it on the window, escape or a click outside puts the one in use back, picking it saves it (`settings::save_theme`) | `theme_selector` |
-| `json_edit.rs` | sets one value in settings.json's text (comments, order and the rest stay as written), as Zed's `settings_json` does with tree-sitter | `settings_json` |
+| `ainet_core::jsonc` (MIT, shared with ainetd and the console; was `json_edit.rs`) | sets or removes one value in settings.json's text (comments, order and the rest stay as written), as Zed's `settings_json` does with tree-sitter, and reads JSON with comments | `settings_json` |
 | `tab_switcher.rs` | `tab_switcher::Toggle` (`ctrl-tab`): the active pane's tabs, the latest used first (`Pane::items_by_recency`), the one before selected; with `ctrl` held, `ctrl-tab` again moves down and `ctrl-shift-tab` up, and letting go switches; opened from the palette, typing filters and enter switches | `tab_switcher` |
 
 The rig forms send exactly what the TUI's typed commands send: the
@@ -1281,8 +1281,8 @@ Keys (Linux; `cmd` for `ctrl` on macOS where Zed has it):
 `theme_selector::Toggle` have no default keys: the palette has them.
 
 Tests: pure ones for action names, queries, seat lists and editing
-settings.json's text (in place, a missing key, comments and strings
-hiding keys, what it cannot edit); headless ones for the palette (the
+settings.json's text (in `ainet-core`: in place, a missing key, removing
+one, comments and strings hiding keys, what it cannot edit); headless ones for the palette (the
 actions with their bindings, the one picked run where the keyboard was,
 lately used first, a usage error kept in the row, `/down` and `/view
 inbox` run, `/answer` answering the waiting question, `/view rig:infra`,
@@ -1378,8 +1378,10 @@ panes it asked for).
 
 **Settings schema.** `crates/gui/assets/settings-schema.json` is
 generated from the settings' types (`schemars`, already in the tree
-through Zed's crates; the field docs become its descriptions), and a test
-fails when it falls behind: regenerate with
+through Zed's crates; the field docs become its descriptions): the app's
+own and, composed into it, those of ainetd and the console
+(`ainet_core::settings::schema`, `daemon`, `messaging`, …; a key in both
+fails the test). A test fails when it falls behind: regenerate with
 `AINET_WRITE_SCHEMA=1 cargo test --manifest-path crates/gui/Cargo.toml settings_types`.
 The settings template (`ctrl-,` on a new file) names it in `"$schema"` by
 its URL in the repository; `just install-gui` also puts a copy in
@@ -1439,6 +1441,13 @@ settings stay and the status bar says what is wrong. `ctrl-,` opens it
 | `critters.size` | `"large"` | `"small"`; `ctrl-e` toggles it |
 | `command_line` | `true` | the command line above the status bar; `false` shows it only while it has the keyboard (`ctrl-;`) |
 | `confirm_quit` | `false` | ask before quitting |
+
+The same file has the sections ainetd and the console read (`daemon`,
+`runtimes`, `permissions`, `messaging`, `queue`, `rigs`, `discovery`,
+`hooks`, `retention`, `cost`; README, "Configuration"). The app ignores
+them, even when one does not read (ainetd reports that in its log), and
+keeps them as written when it saves the theme. Its autostart of ainetd
+follows `daemon.autostart` and `daemon.log`, as the console's does.
 
 Themes: Zed's One, Ayu and Gruvbox families, **Deepharness** (the TUI's
 palette, `crates/gui/assets/themes/deepharness/deepharness.json`), and

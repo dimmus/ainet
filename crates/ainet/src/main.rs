@@ -8,6 +8,7 @@ mod conn;
 mod hook;
 mod mcp;
 mod output;
+mod settings;
 
 use std::process::ExitCode;
 

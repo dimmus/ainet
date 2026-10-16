@@ -82,12 +82,22 @@ fn builtin(name: &str) -> Option<&'static str> {
 
 /// `$XDG_CONFIG_HOME/ainet/specs`.
 fn user_dir() -> PathBuf {
-    let config = ainet_core::paths::config_file();
-    config
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_default()
-        .join("specs")
+    ainet_core::paths::specs_dir()
+}
+
+/// The user's specs in `dirs`, by name, sorted; a name in an earlier
+/// directory hides the same name in a later one.
+fn user_specs_in(dirs: &[PathBuf]) -> Vec<(String, PathBuf)> {
+    let mut specs: Vec<(String, PathBuf)> = Vec::new();
+    for dir in dirs {
+        for (name, path) in user_specs(dir) {
+            if !specs.iter().any(|(n, _)| *n == name) {
+                specs.push((name, path));
+            }
+        }
+    }
+    specs.sort();
+    specs
 }
 
 /// The user's specs in `dir`, by name, sorted.
@@ -116,11 +126,11 @@ fn user_specs(dir: &Path) -> Vec<(String, PathBuf)> {
     specs
 }
 
-fn user_spec(dir: &Path, name: &str) -> Option<PathBuf> {
+fn user_spec(dirs: &[PathBuf], name: &str) -> Option<PathBuf> {
     if name.is_empty() || name.contains('/') || name.starts_with('.') {
         return None;
     }
-    user_specs(dir)
+    user_specs_in(dirs)
         .into_iter()
         .find(|(n, _)| n == name)
         .map(|(_, p)| p)
@@ -150,8 +160,8 @@ fn entry(name: &str, yaml: &str, source: String) -> SpecEntry {
     }
 }
 
-fn library_in(dir: &Path) -> Vec<SpecEntry> {
-    let users = user_specs(dir);
+fn library_in(dirs: &[PathBuf]) -> Vec<SpecEntry> {
+    let users = user_specs_in(dirs);
     let mut out: Vec<SpecEntry> = RIGS
         .iter()
         .filter(|(name, _)| !users.iter().any(|(n, _)| n == name))
@@ -166,7 +176,13 @@ fn library_in(dir: &Path) -> Vec<SpecEntry> {
 
 /// Built-in specs (source `builtin`) and the user's own (source: the file).
 pub fn library() -> Vec<SpecEntry> {
-    library_in(&user_dir())
+    library_in(&[user_dir()])
+}
+
+/// [`library`] with the user's specs in `dirs` (`~/.config/ainet/specs`
+/// and the directories settings.json adds), earlier ones first.
+pub fn library_from(dirs: &[PathBuf]) -> Vec<SpecEntry> {
+    library_in(dirs)
 }
 
 /// Resolves a built-in: files from the library, working directories from
@@ -186,12 +202,12 @@ fn resolve_builtin(name: &str, yaml: &str) -> anyhow::Result<resolve::Outcome> {
     ))
 }
 
-fn load_named_in(dir: &Path, name: &str) -> anyhow::Result<ResolvedRig> {
-    if let Some(path) = user_spec(dir, name) {
+fn load_named_in(dirs: &[PathBuf], name: &str) -> anyhow::Result<ResolvedRig> {
+    if let Some(path) = user_spec(dirs, name) {
         return crate::load(&path);
     }
     let Some(yaml) = builtin(name) else {
-        let names: Vec<String> = library_in(dir).into_iter().map(|e| e.name).collect();
+        let names: Vec<String> = library_in(dirs).into_iter().map(|e| e.name).collect();
         bail!(
             "no spec named {name:?} in the library (have: {})",
             names.join(", ")
@@ -203,12 +219,22 @@ fn load_named_in(dir: &Path, name: &str) -> anyhow::Result<ResolvedRig> {
 /// A library spec by name: the user's `<name>/rig.yaml` or `<name>.yaml`,
 /// else a built-in. Built-ins run in the current directory.
 pub fn load_named(name: &str) -> anyhow::Result<ResolvedRig> {
-    load_named_in(&user_dir(), name)
+    load_named_in(&[user_dir()], name)
+}
+
+/// [`load_named`] with the user's specs in `dirs`.
+pub fn load_named_from(dirs: &[PathBuf], name: &str) -> anyhow::Result<ResolvedRig> {
+    load_named_in(dirs, name)
 }
 
 /// The YAML of a library spec, for `specs show`.
 pub fn spec_yaml(name: &str) -> anyhow::Result<String> {
-    if let Some(path) = user_spec(&user_dir(), name) {
+    spec_yaml_from(&[user_dir()], name)
+}
+
+/// [`spec_yaml`] with the user's specs in `dirs`.
+pub fn spec_yaml_from(dirs: &[PathBuf], name: &str) -> anyhow::Result<String> {
+    if let Some(path) = user_spec(dirs, name) {
         return std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()));
     }
     builtin(name)
@@ -217,8 +243,8 @@ pub fn spec_yaml(name: &str) -> anyhow::Result<String> {
 }
 
 /// Validates a library spec by name, if there is one.
-pub(crate) fn validate_named(name: &str) -> Option<Report> {
-    if let Some(path) = user_spec(&user_dir(), name) {
+pub(crate) fn validate_named(dirs: &[PathBuf], name: &str) -> Option<Report> {
+    if let Some(path) = user_spec(dirs, name) {
         return Some(crate::validate(&path));
     }
     let yaml = builtin(name)?;
@@ -262,7 +288,7 @@ mod tests {
         .unwrap();
         std::fs::write(dir.join("notes.txt"), "not a spec").unwrap();
 
-        let lib = library_in(&dir);
+        let lib = library_in(std::slice::from_ref(&dir));
         let starters: Vec<_> = lib.iter().filter(|e| e.name == "starter").collect();
         assert_eq!(starters.len(), 1);
         assert!(starters[0].source.ends_with("starter.yaml"));
@@ -270,11 +296,32 @@ mod tests {
         assert_eq!((mine.seats, mine.summary.as_deref()), (1, Some("Mine")));
         assert!(lib.iter().any(|e| e.name == "factory" && e.source == "builtin"));
 
-        let rig = load_named_in(&dir, "mine").unwrap();
+        let dirs = std::slice::from_ref(&dir);
+        let rig = load_named_in(dirs, "mine").unwrap();
         assert_eq!(rig.seats[0].address, "dev-solo@mine");
         assert_eq!(rig.root, files::absolute(&dir.join("mine")));
-        assert_eq!(load_named_in(&dir, "starter").unwrap().seats.len(), 1);
-        assert!(load_named_in(&dir, "nope").is_err());
+        assert_eq!(load_named_in(dirs, "starter").unwrap().seats.len(), 1);
+        assert!(load_named_in(dirs, "nope").is_err());
+
+        // A second directory adds its specs; the first keeps its names.
+        let more = dir.with_extension("more");
+        let _ = std::fs::remove_dir_all(&more);
+        std::fs::create_dir_all(&more).unwrap();
+        std::fs::write(more.join("extra.yaml"), yaml.replace("name: mine", "name: extra")).unwrap();
+        std::fs::write(more.join("mine.yaml"), yaml.replace("Mine", "Other")).unwrap();
+        let both = [dir.clone(), more.clone()];
+        let lib = library_from(&both);
+        assert!(
+            lib.iter()
+                .any(|e| e.name == "extra" && e.source.ends_with("extra.yaml"))
+        );
+        let mines: Vec<_> = lib.iter().filter(|e| e.name == "mine").collect();
+        assert_eq!(mines.len(), 1);
+        assert_eq!(mines[0].summary.as_deref(), Some("Mine"));
+        assert_eq!(load_named_from(&both, "extra").unwrap().seats.len(), 1);
+        assert!(spec_yaml_from(&both, "extra").unwrap().contains("name: extra"));
+        assert!(validate_named(&both, "extra").is_some_and(|r| r.is_ok()));
+        let _ = std::fs::remove_dir_all(&more);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

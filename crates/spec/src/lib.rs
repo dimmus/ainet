@@ -28,7 +28,7 @@ use ainet_core::protocol::SeatSpec;
 use anyhow::{Context, bail};
 
 pub use export::to_yaml;
-pub use library::{library, load_named, spec_yaml};
+pub use library::{library, library_from, load_named, load_named_from, spec_yaml, spec_yaml_from};
 pub use order::launch_order;
 
 /// A piece of guidance for an agent's system prompt.
@@ -176,9 +176,14 @@ pub fn parse(yaml: &str, root: &Path, spec_path: Option<&Path>) -> anyhow::Resul
 /// Checks a spec without launching anything. Takes a path, or the name of a
 /// library spec when no such path exists.
 pub fn validate(path: &Path) -> Report {
+    validate_from(&[ainet_core::paths::specs_dir()], path)
+}
+
+/// [`validate`] with the user's specs in `dirs`.
+pub fn validate_from(dirs: &[PathBuf], path: &Path) -> Report {
     if !path.exists()
         && let Some(name) = path.to_str().filter(|n| !n.contains('/'))
-        && let Some(report) = library::validate_named(name)
+        && let Some(report) = library::validate_named(dirs, name)
     {
         return report;
     }
