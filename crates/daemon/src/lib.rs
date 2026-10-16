@@ -354,6 +354,7 @@ async fn handle(req: Request, d: &Shared) -> Response {
             lines,
         } => agents::capture(d, &targets, rig.as_deref(), pod.as_deref(), lines),
         Request::Transcript { agent, tail, grep } => agents::transcript(d, &agent, tail, grep.as_deref()),
+        Request::Conversation { agent, tail, after } => agents::conversation(d, &agent, tail, after),
 
         Request::Up(spec) => rigs::up(d, spec),
         Request::Down {

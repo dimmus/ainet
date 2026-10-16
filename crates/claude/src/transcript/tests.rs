@@ -560,3 +560,106 @@ fn transcript_path_lookup() {
         Vec::<PathBuf>::new()
     );
 }
+
+/// The transcript fixture: a session as Claude Code 2.1.289 writes it.
+fn fixture() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/transcript-2.1.289/session.jsonl")
+}
+
+#[test]
+fn a_thread_reads_the_fixture_as_a_conversation() {
+    let t = thread(&fixture(), None, 0);
+    let kinds: Vec<(EntryKind, &str)> = t.items.iter().map(|i| (i.kind, i.tool.as_str())).collect();
+    assert_eq!(
+        kinds,
+        [
+            (EntryKind::You, ""),
+            (EntryKind::Text, ""),
+            (EntryKind::Tool, "Bash"),
+            (EntryKind::Tool, "Bash"),
+            (EntryKind::Tool, "Read"),
+            (EntryKind::You, ""),
+            (EntryKind::Tool, "Edit"),
+            (EntryKind::Text, ""),
+            (EntryKind::Tool, "Bash"),
+        ]
+    );
+    let i = &t.items;
+    // The command echo and the meta line are not the human's words.
+    assert_eq!(
+        i[0].text,
+        "Make the API tests pass. The queue item is feature-001."
+    );
+    assert!(i[0].at_ms.is_some());
+    assert_eq!(
+        (i[2].text.as_str(), i[2].code.as_str()),
+        ("Show the queue item", "ainet queue show feature-001")
+    );
+    assert!(i[2].done && !i[2].failed);
+    assert_eq!(
+        i[2].output,
+        "feature-001  in-progress  make the API tests pass\nfrom orch-lead@docs to dev-app@docs"
+    );
+    // A failed call: its result block's text, first lines.
+    assert!(i[3].done && i[3].failed);
+    assert_eq!(
+        i[3].output,
+        "error: test failed, to rerun pass `-p api --test reconnect`\n\nfailures:\n    reconnect::times_out\n    reconnect::retries\n\ntest result: FAILED. 41 passed; 2 failed"
+    );
+    // Read: the file's first lines, as the result says them.
+    assert_eq!(i[4].code, "/work/web-app/api/tests/reconnect.rs");
+    assert!(i[4].output.starts_with("1\tuse api::ws;"), "{}", i[4].output);
+    assert!(i[4].output.ends_with('…'));
+    // What ainetd typed in is a prompt here; ainetd tells it apart.
+    assert!(i[5].text.starts_with("[ainet] message #4 from orch-lead@docs:"));
+    assert_eq!(
+        i[7].text,
+        "Raised the timeout to 5s.\n\nNow filing the follow-up and answering the lead."
+    );
+    // The last call is still waiting.
+    assert!(!i[8].done && i[8].output.is_empty());
+    // Positions grow along the file; two blocks of one message differ.
+    assert!(i.windows(2).all(|w| w[0].pos < w[1].pos));
+    assert_eq!(t.model.as_deref(), Some("Opus 5.5"));
+    assert_eq!(t.cwd.as_deref(), Some("/work/web-app"));
+    assert_eq!(t.permission_mode.as_deref(), Some("acceptEdits"));
+}
+
+#[test]
+fn a_thread_goes_on_from_where_it_was_read() {
+    let tmp = TempDir::new();
+    let p = tmp.join("s.jsonl");
+    let text = std::fs::read_to_string(fixture()).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    // The session as it was before its last two messages.
+    write(&p, &lines[..lines.len() - 4]);
+    let first = thread(&p, None, 0);
+    let last = first.items.last().unwrap().clone();
+    assert_eq!(last.tool, "Edit");
+    assert!(!last.done, "its result is not written yet");
+    // Nothing new: nothing after it.
+    assert!(thread(&p, Some(last.pos), 0).items.is_empty());
+    // Read again from the call still waiting: it now has its result, and
+    // what came after follows.
+    for l in &lines[lines.len() - 4..] {
+        append(&p, &format!("{l}\n"));
+    }
+    let more = thread(&p, Some(last.pos - 1), 0);
+    assert_eq!(more.items[0].pos, last.pos);
+    assert!(more.items[0].done);
+    assert_eq!(more.items.len(), 3);
+    assert!(more.items.iter().all(|i| i.pos >= last.pos));
+    // A line still being written is read next time, whole.
+    append(
+        &p,
+        r#"{"type":"assistant","message":{"content":[{"type":"text","text":"half"#,
+    );
+    assert_eq!(thread(&p, Some(more.items[2].pos), 0).items, vec![]);
+    append(&p, "\"}]}}\n");
+    let half = thread(&p, Some(more.items[2].pos), 0);
+    assert_eq!(half.items.len(), 1);
+    assert_eq!(half.items[0].text, "half");
+    // The tail, and a file that is not there.
+    assert_eq!(thread(&p, None, 2).items.len(), 2);
+    assert_eq!(thread(&tmp.join("none.jsonl"), None, 0), Thread::default());
+}

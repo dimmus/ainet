@@ -5,8 +5,8 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use ainet_core::{
-    Agent, AgentState, ChatMessage, Decision, Event, InboxItem, InboxKind, Message, QItem, QState, Request,
-    Response, Rig, Seat, SeatStatus,
+    Agent, AgentState, ChatMessage, Conversation, Decision, Event, InboxItem, InboxKind, Message, QItem,
+    QState, Request, Response, Rig, Seat, SeatStatus,
 };
 
 use crate::link::{Listing, Msg};
@@ -84,6 +84,12 @@ pub enum Change {
     Listing {
         token: u64,
         listing: Result<Listing, String>,
+    },
+    /// The conversation asked for with `Link::conversation`, for whoever
+    /// asked.
+    Conversation {
+        token: u64,
+        reply: Result<Conversation, String>,
     },
     /// The connection to ainetd came up or went down.
     Connected(bool),
@@ -194,6 +200,7 @@ impl Store {
             Msg::Popup(title, text) => Change::Popup(title, text),
             Msg::Reply { token, reply } => Change::Reply { token, reply },
             Msg::Listing { token, listing } => Change::Listing { token, listing },
+            Msg::Conversation { token, reply } => Change::Conversation { token, reply },
             Msg::Connected(up) => {
                 let was = std::mem::replace(&mut self.connected, up);
                 if was == up {
@@ -1293,6 +1300,16 @@ mod tests {
             Change::Listing {
                 token: 4,
                 listing: Ok(Listing::Specs(vec![]))
+            }
+        );
+        assert_eq!(
+            store.apply(Msg::Conversation {
+                token: 5,
+                reply: Err("no agent x".into())
+            }),
+            Change::Conversation {
+                token: 5,
+                reply: Err("no agent x".into())
             }
         );
     }

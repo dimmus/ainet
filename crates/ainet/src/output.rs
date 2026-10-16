@@ -124,7 +124,36 @@ pub fn human(resp: &Response) -> String {
         Response::QItems { items } => qitems_table(items),
         Response::QItem { item } => qitem_text(item, now),
         Response::Watchdogs { watchdogs } => watchdogs_table(watchdogs, now),
+        // The console never asks for entries; said plainly all the same.
+        Response::Conversation { conversation } => conversation_text(conversation),
     }
+}
+
+/// A conversation's entries, one "who: words" line each, as `ainet
+/// transcript` prints them.
+fn conversation_text(c: &ainet_core::Conversation) -> String {
+    use ainet_core::conversation::EntryKind;
+    let mut out = String::new();
+    if let Some(notice) = &c.notice {
+        out.push_str(&format!("{notice}\n"));
+    }
+    if let Some(plain) = &c.plain {
+        out.push_str(plain.trim_end());
+        out.push('\n');
+    }
+    for e in &c.entries {
+        let line = match e.kind {
+            EntryKind::You => format!("user: {}", e.text),
+            EntryKind::Reply => format!("assistant: {}", e.text),
+            EntryKind::Tool if e.code.is_empty() => format!("tool: {}", e.tool),
+            EntryKind::Tool => format!("tool: {}: {}", e.tool, first_line(&e.code, 100)),
+            EntryKind::Inbound => format!("message from {}: {}", e.from, e.text),
+            EntryKind::Other => continue,
+        };
+        out.push_str(&line);
+        out.push('\n');
+    }
+    out
 }
 
 pub fn agents_table(agents: &[Agent]) -> String {

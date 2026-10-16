@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use ainet_core::client::Client;
 use ainet_core::protocol::SpecEntry;
-use ainet_core::{Agent, Event, Request, Response, SnapshotInfo};
+use ainet_core::{Agent, Conversation, Event, Request, Response, SnapshotInfo};
 
 use crate::demo::Demo;
 
@@ -57,6 +57,13 @@ pub enum Msg {
     Listing {
         token: u64,
         listing: Result<Listing, String>,
+    },
+    /// The reply to [`Link::conversation`]: its token, and the
+    /// conversation (plain text with a notice from a daemon too old to
+    /// send entries), or the error.
+    Conversation {
+        token: u64,
+        reply: Result<Conversation, String>,
     },
     Connected(bool),
 }
@@ -257,6 +264,44 @@ impl<S: Sink> Link<S> {
         }
     }
 
+    /// Asks for `agent`'s conversation (`Request::Conversation`): the last
+    /// `tail` entries, or those after entry `after`. It comes back as
+    /// [`Msg::Conversation`] with `token`. A daemon from before the
+    /// request is asked for the transcript as text instead, which comes
+    /// back as the conversation's `plain` text with a notice saying why.
+    pub fn conversation(&mut self, agent: &str, after: Option<u64>, tail: usize, token: u64) {
+        let req = Request::Conversation {
+            agent: agent.to_string(),
+            tail,
+            after,
+        };
+        let plain = Request::Transcript {
+            agent: agent.to_string(),
+            tail,
+            grep: None,
+        };
+        match &mut self.backend {
+            Backend::Demo(demo) => {
+                let first = Ok(demo.respond(&req));
+                let reply =
+                    conversation_reply(first, || demo.handle(&plain).1.map(Option::unwrap_or_default));
+                self.sink.send(Msg::Conversation { token, reply });
+            }
+            Backend::Daemon(socket) => {
+                let (socket, tx) = (socket.clone(), self.sink.clone());
+                thread::spawn(move || {
+                    let timeout = Duration::from_secs(10);
+                    let first = call(&socket, &req, timeout).map_err(|e| format!("ainetd: {e}"));
+                    let reply = conversation_reply(first, || match call(&socket, &plain, timeout) {
+                        Ok(resp) => crate::popup::reply(&resp),
+                        Err(e) => Err(format!("ainetd: {e}")),
+                    });
+                    tx.send(Msg::Conversation { token, reply });
+                });
+            }
+        }
+    }
+
     /// A request only the daemon acts on (keystrokes, resizes), quietly and
     /// with a short timeout; the demo ignores it.
     pub fn quiet(&self, req: Request) {
@@ -447,6 +492,30 @@ impl StreamThread {
                 return;
             }
         }
+    }
+}
+
+/// Said with the transcript's text by a daemon too old to send entries.
+pub const OLD_DAEMON: &str = "This ainetd is older than the app and sends the transcript only as text; restart it (ainet shutdown) for the conversation view.";
+
+/// The conversation in the answer to `Request::Conversation`, or, from a
+/// daemon that does not know it (`bad request`), the text `transcript`
+/// fetches with [`OLD_DAEMON`] as the notice.
+pub fn conversation_reply(
+    answer: Result<Response, String>,
+    transcript: impl FnOnce() -> Result<String, String>,
+) -> Result<Conversation, String> {
+    match answer? {
+        Response::Conversation { conversation } => Ok(conversation),
+        Response::Error { message } if message.starts_with("bad request") => {
+            transcript().map(|text| Conversation {
+                notice: Some(OLD_DAEMON.into()),
+                plain: Some(text),
+                ..Conversation::default()
+            })
+        }
+        Response::Error { message } => Err(message),
+        _ => Err("ainetd answered with something else".into()),
     }
 }
 

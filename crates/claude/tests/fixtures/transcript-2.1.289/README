@@ -1,0 +1,8 @@
+A Claude Code session transcript (`<session id>.jsonl`) shaped like Claude
+Code 2.1.289 writes it: the record keys (parentUuid aside), a model
+attachment, a command echo and a meta line (neither the human's words),
+prompts with their permissionMode, assistant messages written once per
+content block, Bash, Read and Edit calls with their tool_result lines and
+toolUseResult objects (one failed, with is_error), a message ainetd typed
+into the terminal, and a last tool call still waiting for its result.
+Written for ainet; every value is neutral.

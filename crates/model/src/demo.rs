@@ -7,16 +7,20 @@
 
 use std::path::PathBuf;
 
+use ainet_core::conversation::{self, EntryKind};
 use ainet_core::protocol::SpecEntry;
 use ainet_core::{
-    Agent, AgentState, ChatMessage, Decision, Edge, EdgeKind, Event, InboxItem, InboxKind, Message, QBlock,
-    QItem, QNote, QState, Request, Response, Rig, RigStatus, Runtime, Seat, SeatStatus, SnapshotInfo,
-    Transport, now_ms,
+    Agent, AgentState, ChatMessage, Conversation, ConversationEntry, Decision, Edge, EdgeKind, Event,
+    InboxItem, InboxKind, Message, QBlock, QItem, QNote, QState, Request, Response, Rig, RigStatus, Runtime,
+    Seat, SeatStatus, SnapshotInfo, Transport, now_ms,
 };
 
 use crate::link::Listing;
 
 const MIN: i64 = 60_000;
+
+/// Conversation entries made from messages start here, past the script's.
+const MESSAGE_ENTRIES: u64 = 100;
 
 /// What the demo says to a request it does not carry out.
 const CANNOT: &str = "the demo cannot do that; run ainet without --demo";
@@ -224,6 +228,8 @@ pub struct Demo {
     /// (transcripts, specs, plans, queue requests, listings as popups,
     /// chat topics); the console's demo keeps its replies as they were.
     full: bool,
+    /// Answers `Request::Conversation` as a daemon from before it did.
+    old_daemon: bool,
 }
 
 impl Default for Demo {
@@ -247,6 +253,15 @@ impl Demo {
         }
     }
 
+    /// The full demo answering `Request::Conversation` as a daemon from
+    /// before it does (`bad request`), for the front ends' fallback.
+    pub fn without_conversations() -> Self {
+        Demo {
+            old_daemon: true,
+            ..Demo::full()
+        }
+    }
+
     /// Whether only the full demo answers `req` (the console's says it
     /// cannot do that).
     fn full_only(req: &Request) -> bool {
@@ -261,6 +276,7 @@ impl Demo {
                     | Request::QueueBlock { .. }
                     | Request::QueueShow { .. }
                     | Request::Transcript { .. }
+                    | Request::Conversation { .. }
                     | Request::SpecShow { .. }
                     | Request::Export { .. }
                     | Request::Specs
@@ -378,6 +394,7 @@ impl Demo {
             talk: 1,
             rng: 0x2545_f491_4f6c_dd1d,
             full: false,
+            old_daemon: false,
         };
         demo.push_item(
             4,
@@ -770,10 +787,12 @@ impl Demo {
                 Some(at) => self.queue_request(at, req),
                 None => (vec![], Err(format!("no queue item {id}"))),
             },
-            Request::Transcript { agent, .. } => match self.index(agent) {
-                Some(i) => (vec![], Ok(Some(self.transcript(&self.agents[i])))),
-                None => (vec![], Err(format!("no agent {agent}"))),
-            },
+            Request::Transcript { agent, .. } | Request::Conversation { agent, .. } => {
+                match self.index(agent) {
+                    Some(i) => (vec![], Ok(Some(self.transcript(&self.agents[i])))),
+                    None => (vec![], Err(format!("no agent {agent}"))),
+                }
+            }
             Request::SpecShow { name: rig } | Request::Export { rig } => {
                 match self.rigs.iter().find(|r| r.name == *rig) {
                     Some(r) => (vec![], Ok(Some(rig_yaml(r)))),
@@ -948,6 +967,217 @@ impl Demo {
             };
             out.push_str(&format!("\n{who}: {}\n", m.body));
         }
+        out
+    }
+
+    /// `req`'s answer as ainetd's reply line: a conversation as entries
+    /// (`Request::Conversation`), anything else as [`Demo::handle`] says
+    /// it (text, done, or the error). Events it makes are dropped.
+    pub fn respond(&mut self, req: &Request) -> Response {
+        if !self.full && Self::full_only(req) {
+            return Response::Error {
+                message: CANNOT.into(),
+            };
+        }
+        match req {
+            Request::Conversation { .. } if self.old_daemon => Response::Error {
+                message: "bad request: unknown variant `conversation`".into(),
+            },
+            Request::Conversation { agent, tail, after } => match self.index(agent) {
+                Some(i) => Response::Conversation {
+                    conversation: self.conversation(i, *after, *tail),
+                },
+                None => Response::Error {
+                    message: format!("no agent {agent}"),
+                },
+            },
+            _ => match self.handle(req).1 {
+                Ok(Some(text)) => Response::Text { text },
+                Ok(None) => Response::Ok,
+                Err(message) => Response::Error { message },
+            },
+        }
+    }
+
+    /// Agent `i`'s conversation, as ainetd reads it from a transcript: how
+    /// it was set to work (its task and queue item, a few tool calls and
+    /// words), then each message it got, as ainetd typed it in, and each
+    /// it sent, as the command it ran. So it grows as messages come.
+    fn conversation(&self, i: usize, after: Option<u64>, tail: usize) -> Conversation {
+        let agent = &self.agents[i];
+        if let Some(why) = conversation::unreadable(agent.runtime) {
+            return Conversation {
+                notice: Some(why.into()),
+                ..Conversation::default()
+            };
+        }
+        let mut entries = self.script(i);
+        for m in &self.messages {
+            if m.to == agent.id {
+                // As ainetd typed it in, read back as the transcript has it.
+                entries.push(ConversationEntry::prompt(
+                    MESSAGE_ENTRIES + 2 * m.id,
+                    Some(m.created),
+                    &conversation::delivery(m.id, m.reply_to, &m.from_label, &m.body),
+                ));
+            } else if m.from == agent.id {
+                let first = m.body.lines().next().unwrap_or("");
+                let code = match m.reply_to {
+                    Some(r) => format!("ainet msg reply {r} \"{first}\""),
+                    None => format!("ainet msg send {} \"{first}\"", m.to_label),
+                };
+                entries.push(ConversationEntry {
+                    at: Some(m.created),
+                    tool: "Bash".into(),
+                    code,
+                    output: format!("sent message #{} to {}", m.id, m.to_label),
+                    done: true,
+                    ..ConversationEntry::new(
+                        MESSAGE_ENTRIES + 2 * m.id + 1,
+                        EntryKind::Tool,
+                        format!("Message {}", m.to_label),
+                    )
+                });
+            }
+        }
+        if let Some(after) = after {
+            entries.retain(|e| e.id > after);
+        }
+        let tail = if tail == 0 { 200 } else { tail };
+        if entries.len() > tail {
+            entries.drain(..entries.len() - tail);
+        }
+        Conversation {
+            entries,
+            model: agent.model.clone(),
+            cwd: Some(agent.cwd.display().to_string()),
+            permission_mode: Some(
+                if agent.parent.is_some() {
+                    "acceptEdits"
+                } else {
+                    "default"
+                }
+                .into(),
+            ),
+            notice: None,
+            plain: None,
+        }
+    }
+
+    /// How agent `i` was set to work and got going: entries 1 to 6.
+    fn script(&self, i: usize) -> Vec<ConversationEntry> {
+        let agent = &self.agents[i];
+        let task = agent.task.clone().unwrap_or_default();
+        let at = |minutes: i64| Some(agent.started_at + minutes * MIN);
+        let item = agent
+            .seat
+            .as_ref()
+            .and_then(|seat| self.queue.iter().find(|q| &q.destination == seat));
+        let entry = |id, kind, minutes, text: String| ConversationEntry {
+            at: at(minutes),
+            ..ConversationEntry::new(id, kind, text)
+        };
+        let tool = |id, minutes, name: &str, desc: &str, code: String, output: String| ConversationEntry {
+            tool: name.into(),
+            code,
+            output,
+            done: true,
+            ..entry(id, EntryKind::Tool, minutes, desc.into())
+        };
+        let mut out = Vec::new();
+        let (ask, look) = match item {
+            Some(q) => (
+                format!(
+                    "Your task: {task}.\n\nPick up {} from the queue and tell orch-lead@docs when it is done.",
+                    q.id
+                ),
+                tool(
+                    3,
+                    1,
+                    "Bash",
+                    "Show the queue item",
+                    format!("ainet queue show {}", q.id),
+                    format!(
+                        "{}  {}  {}\nfrom {} to {}",
+                        q.id,
+                        q.state.label(),
+                        q.summary,
+                        q.source,
+                        q.destination
+                    ),
+                ),
+            ),
+            None => (
+                format!("Your task: {task}."),
+                tool(
+                    3,
+                    1,
+                    "Bash",
+                    "Who am I here",
+                    "ainet whoami".into(),
+                    format!(
+                        "{}  {}\n{}",
+                        agent.label(),
+                        agent.role.clone().unwrap_or_default(),
+                        agent
+                            .rig
+                            .as_deref()
+                            .map_or("no rig".into(), |r| format!("rig {r}"))
+                    ),
+                ),
+            ),
+        };
+        out.push(entry(1, EntryKind::You, 0, ask));
+        out.push(entry(
+            2,
+            EntryKind::Reply,
+            1,
+            "I'll start with what is asked of me, then look at the code.".into(),
+        ));
+        out.push(look);
+        let (name, code) = TOOLS[i % TOOLS.len()].split_once("  ").unwrap_or(("Bash", "ls"));
+        let output = match name {
+            "Bash" => "> build\n✓ 214 modules transformed.\nbuilt in 3.2s",
+            "Edit" => "Updated with 4 additions and 1 removal",
+            "Read" => "Read 120 lines",
+            "Grep" => "Found 6 files",
+            "WebFetch" => "Received 48.2KB (200 OK)",
+            _ => "File created successfully",
+        };
+        out.push(tool(4, 2, name, "", code.into(), output.into()));
+        out.push(entry(
+            5,
+            EntryKind::Reply,
+            3,
+            match item {
+                Some(q) => format!(
+                    "The first part of \"{task}\" is in.\n\nNext: the checks, then `ainet queue update {} --note \"checks green\"` so the lead sees it.",
+                    q.id
+                ),
+                None => format!(
+                    "The first part of \"{task}\" is in.\n\nNext: the checks, then a word to the rig with `ainet chatroom send \"checks green\"`."
+                ),
+            },
+        ));
+        let failed = agent.state == AgentState::NeedsYou;
+        let mut check = tool(
+            6,
+            4,
+            "Bash",
+            "Run the checks",
+            if agent.rig.as_deref() == Some("infra") {
+                "make check".into()
+            } else {
+                "npm test".into()
+            },
+            if failed {
+                "FAIL  tests/reconnect.test.ts\n  ✕ reconnects within the timeout (5012 ms)\nTests: 1 failed, 42 passed, 43 total".into()
+            } else {
+                "Tests: 43 passed, 43 total\nTime: 6.1 s".into()
+            },
+        );
+        check.failed = failed;
+        out.push(check);
         out
     }
 
@@ -1199,6 +1429,11 @@ mod tests {
                 tail: 0,
                 grep: None,
             },
+            Request::Conversation {
+                agent: SEEDS[0].id.into(),
+                tail: 0,
+                after: None,
+            },
             Request::SpecShow { name: "docs".into() },
             Request::Export { rig: "docs".into() },
             Request::Specs,
@@ -1222,5 +1457,69 @@ mod tests {
         };
         assert_eq!(topic(Demo::new()), "general");
         assert_eq!(topic(Demo::full()), "release");
+    }
+
+    /// The app's demo tells believable conversations as entries: a
+    /// prompt, words, tool calls with what they printed, the messages it
+    /// got as ainetd typed them in; and they grow as messages come.
+    #[test]
+    fn conversations_come_as_entries_and_grow() {
+        let mut demo = Demo::full();
+        let ask = |after| Request::Conversation {
+            agent: APP.into(),
+            tail: 0,
+            after,
+        };
+        let Response::Conversation { conversation: c } = demo.respond(&ask(None)) else {
+            panic!("a conversation");
+        };
+        let kinds: Vec<EntryKind> = c.entries.iter().map(|e| e.kind).collect();
+        use EntryKind::*;
+        assert_eq!(kinds, [You, Reply, Tool, Tool, Reply, Tool, Inbound, Tool]);
+        assert!(c.entries[0].text.contains("Pick up q-1 from the queue"));
+        assert_eq!(c.entries[2].code, "ainet queue show q-1");
+        assert!(c.entries[2].output.starts_with("q-1  in-progress"));
+        // dev.app needs you: its checks failed.
+        assert!(c.entries[5].failed);
+        let asked = &c.entries[6];
+        assert_eq!((asked.from.as_str(), asked.message), ("dev-ui@docs", Some(2)));
+        assert_eq!(
+            c.entries[7].code,
+            "ainet msg reply 2 \"Sorted, newest first, since this morning. The sidebar can render them as they come.\""
+        );
+        assert!(c.entries.windows(2).all(|w| w[0].id < w[1].id));
+        assert_eq!(c.model.as_deref(), Some("Sonnet 5.5"));
+        // A message to it: one entry more, after the last.
+        let last = c.entries.last().unwrap().id;
+        let _ = demo.handle(&Request::Message {
+            from: None,
+            to: vec![APP.into()],
+            rig: None,
+            pod: None,
+            body: "Raise the timeout to 5s.".into(),
+            reply_to: None,
+            force: true,
+        });
+        let Response::Conversation { conversation: more } = demo.respond(&ask(Some(last))) else {
+            panic!("a conversation");
+        };
+        assert_eq!(more.entries.len(), 1);
+        assert_eq!(more.entries[0].kind, Inbound);
+        assert_eq!(more.entries[0].from, "you (operator)");
+        assert_eq!(more.entries[0].text, "Raise the timeout to 5s.");
+        // Codex: a notice, no entries. The console's demo cannot.
+        let Response::Conversation { conversation: codex } = demo.respond(&Request::Conversation {
+            agent: DATA.into(),
+            tail: 0,
+            after: None,
+        }) else {
+            panic!("a conversation");
+        };
+        assert!(codex.entries.is_empty() && codex.notice.unwrap().starts_with("Codex keeps"));
+        assert!(matches!(Demo::new().respond(&ask(None)), Response::Error { .. }));
+        assert!(matches!(
+            Demo::without_conversations().respond(&ask(None)),
+            Response::Error { message } if message.starts_with("bad request")
+        ));
     }
 }

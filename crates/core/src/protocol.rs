@@ -14,6 +14,7 @@ use serde_json::Value;
 
 use crate::agent::{Agent, Decision, InboxItem, Runtime};
 use crate::comms::{ChatMessage, Message, QItem, QState, Watchdog};
+use crate::conversation::Conversation;
 use crate::rig::{Discovered, Edge, Rig, SnapshotInfo, Whoami};
 
 /// Bumped on any incompatible change.
@@ -124,6 +125,18 @@ pub enum Request {
         #[serde(default)]
         tail: usize,
         grep: Option<String>,
+    },
+    /// The conversation in an agent's transcript as entries
+    /// (`Response::Conversation`): the last `tail` (0: the daemon's
+    /// choice), or with `after` only those further on than that entry
+    /// id. Daemons from before it answer `bad request: unknown variant`;
+    /// clients then ask for `Transcript` and show its text.
+    Conversation {
+        agent: String,
+        #[serde(default)]
+        tail: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after: Option<u64>,
     },
 
     // ---- rigs ------------------------------------------------------------
@@ -512,6 +525,10 @@ pub enum Response {
     Watchdogs {
         watchdogs: Vec<Watchdog>,
     },
+    /// An agent's conversation (`Request::Conversation`).
+    Conversation {
+        conversation: Conversation,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -649,6 +666,44 @@ mod tests {
             std::str::from_utf8(&bytes).unwrap(),
             "{\"type\":\"event\",\"event\":{\"kind\":\"bytes\",\"agent\":\"a\",\"data\":\"\\u001b[1mhi\"}}\n"
         );
+    }
+
+    #[test]
+    fn conversations_are_an_addition_old_peers_can_ignore() {
+        let ask = Request::Conversation {
+            agent: "a".into(),
+            tail: 50,
+            after: None,
+        };
+        assert_eq!(
+            std::str::from_utf8(&encode(&ask)).unwrap(),
+            "{\"op\":\"conversation\",\"agent\":\"a\",\"tail\":50}\n"
+        );
+        let more: Request = serde_json::from_str(r#"{"op":"conversation","agent":"a","after":9}"#).unwrap();
+        assert!(matches!(
+            more,
+            Request::Conversation {
+                tail: 0,
+                after: Some(9),
+                ..
+            }
+        ));
+        let mut entry = crate::ConversationEntry::new(4, crate::conversation::EntryKind::You, "hi");
+        entry.at = Some(1);
+        let reply = Response::Conversation {
+            conversation: Conversation {
+                entries: vec![entry],
+                model: Some("Opus 5.5".into()),
+                ..Conversation::default()
+            },
+        };
+        let line = encode(&reply);
+        assert_eq!(
+            std::str::from_utf8(&line).unwrap(),
+            "{\"type\":\"conversation\",\"conversation\":{\"entries\":[{\"id\":4,\"kind\":\"you\",\"at\":1,\"text\":\"hi\"}],\"model\":\"Opus 5.5\"}}\n"
+        );
+        let back: Response = serde_json::from_slice(&line).unwrap();
+        assert!(matches!(back, Response::Conversation { conversation } if conversation.entries[0].id == 4));
     }
 
     #[test]
