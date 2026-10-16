@@ -3,13 +3,13 @@
 default:
     @just --list
 
-# The TUI against the pretend fleet: no daemon, no Claude Code needed.
-demo:
-    cargo run -- --demo
+# The pretend fleet, no daemon needed: `just demo` (TUI) or `just demo gui`.
+demo what="tui":
+    {{ if what == "tui" { "cargo run -- --demo" } else if what == "gui" { just_executable() + " gui-demo" } else { error("usage: just demo [tui|gui]") } }}
 
-# The real thing: starts ainetd in the background if it is not running.
-run:
-    cargo run
+# The real thing, starting ainetd if needed: `just run` (TUI) or `just run gui`.
+run what="tui":
+    {{ if what == "tui" { "cargo run" } else if what == "gui" { just_executable() + " gui" } else { error("usage: just run [tui|gui]") } }}
 
 # ainetd in the foreground, with debug logs.
 daemon:

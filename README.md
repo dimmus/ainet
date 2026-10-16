@@ -68,8 +68,8 @@ upgrade it, every part of the app and its keys, the tests, and the
 known gaps) is [docs/GUI.md](docs/GUI.md).
 
 ```bash
-just gui-demo                 # cargo run --manifest-path crates/gui/Cargo.toml -- --demo
-just gui                      # against ainetd, started through the console binary
+just demo gui                 # the pretend fleet (cargo run --manifest-path crates/gui/Cargo.toml -- --demo)
+just run gui                  # against ainetd, started through the console binary
 ainet gui [--demo]            # runs ainet-gui installed next to ainet or on PATH
 ainet-gui --socket PATH --view rig:docs
 ```
