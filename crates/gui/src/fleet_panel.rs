@@ -457,24 +457,32 @@ impl FleetPanel {
         let gone = a.state == AgentState::Gone;
         let hue = themes::agent_color(&a.id, cx).cursor;
 
+        // The name is who it is: it keeps its width, and the role gives
+        // way first when the panel is narrow.
         let mut first = h_flex().gap_1p5().min_w_0().child(
-            Label::new(a.name.clone())
-                .color(if gone { Color::Muted } else { Color::Default })
-                .when(selected, |l| l.weight(FontWeight::BOLD))
-                .truncate(),
+            div().flex_none().child(
+                Label::new(a.name.clone())
+                    .color(if gone { Color::Muted } else { Color::Default })
+                    .when(selected, |l| l.weight(FontWeight::BOLD)),
+            ),
         );
         if let Some(role) = &a.role {
-            first = first.child(Label::new(role.clone()).size(LabelSize::Small).color(if gone {
-                Color::Muted
-            } else {
-                Color::Custom(hue)
-            }));
+            first = first.child(
+                div().min_w_0().child(
+                    Label::new(role.clone())
+                        .size(LabelSize::Small)
+                        .color(if gone { Color::Muted } else { Color::Custom(hue) })
+                        .truncate(),
+                ),
+            );
         }
         if directs > 0 {
             first = first.child(
-                Label::new(format!("directs {directs}"))
-                    .size(LabelSize::XSmall)
-                    .color(Color::Muted),
+                div().flex_none().child(
+                    Label::new(format!("directs {directs}"))
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted),
+                ),
             );
         }
         let task = a.task.clone().unwrap_or_else(|| "no task yet".into());
@@ -506,44 +514,44 @@ impl FleetPanel {
                             .color(Color::Muted)
                             .truncate(),
                     )
-                    .child(
-                        Label::new(describe::meta(a))
-                            .size(LabelSize::XSmall)
-                            .color(Color::Placeholder)
-                            .truncate(),
-                    ),
-            )
-            .end_slot(
-                v_flex()
-                    .items_end()
-                    .gap_0p5()
+                    // The state leads the last line: an end slot is the
+                    // first thing a narrow panel cuts off.
                     .child(
                         h_flex()
                             .gap_1()
+                            .min_w_0()
                             .child(Indicator::dot().color(state_color(state)))
                             .child(
-                                Label::new(state.label())
-                                    .size(LabelSize::XSmall)
-                                    .color(state_color(state)),
-                            ),
-                    )
-                    .when(a.unread > 0, |el| {
-                        el.child(
-                            h_flex()
-                                .gap_0p5()
-                                .child(
-                                    Icon::new(IconName::Envelope)
-                                        .size(IconSize::XSmall)
-                                        .color(Color::Accent),
-                                )
-                                .child(
-                                    Label::new(a.unread.to_string())
+                                div().flex_none().child(
+                                    Label::new(state.label())
                                         .size(LabelSize::XSmall)
-                                        .color(Color::Accent),
+                                        .color(state_color(state)),
                                 ),
-                        )
-                    }),
+                            )
+                            .child(
+                                Label::new(describe::meta(a))
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Placeholder)
+                                    .truncate(),
+                            ),
+                    ),
             )
+            .end_slot(v_flex().items_end().gap_0p5().when(a.unread > 0, |el| {
+                el.child(
+                    h_flex()
+                        .gap_0p5()
+                        .child(
+                            Icon::new(IconName::Envelope)
+                                .size(IconSize::XSmall)
+                                .color(Color::Accent),
+                        )
+                        .child(
+                            Label::new(a.unread.to_string())
+                                .size(LabelSize::XSmall)
+                                .color(Color::Accent),
+                        ),
+                )
+            }))
             .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                 this.select(&id, window, cx);
                 if event.click_count() == 2 {

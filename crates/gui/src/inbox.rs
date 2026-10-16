@@ -662,6 +662,10 @@ impl InboxItem {
             .id(("inbox-card", id))
             .debug_selector(move || format!("INBOX-CARD-{id}"))
             .w_full()
+            // In the scrolling column a card keeps its height: let to
+            // shrink, cards that do not all fit were squeezed until
+            // their detail and buttons were cut off.
+            .flex_none()
             .rounded_md()
             .border_1()
             .when(item.kind == InboxKind::Failed, |el| el.border_dashed())
@@ -867,6 +871,7 @@ impl InboxItem {
         };
         div()
             .debug_selector(move || format!("INBOX-CARD-{id}"))
+            .flex_none()
             .child(
                 ListItem::new(("inbox-row", id))
                     .spacing(ListItemSpacing::Sparse)
@@ -904,6 +909,7 @@ impl InboxItem {
         let open = self.history_open;
         h_flex()
             .id("inbox-history")
+            .flex_none()
             .gap_1()
             .pt_1()
             .cursor_pointer()
@@ -1483,6 +1489,41 @@ mod tests {
         // A click gives the Inbox the keys, as a click on the card does.
         let focus = inbox.read_with(cx, |i, cx| i.focus_handle(cx));
         assert!(cx.update(|window, cx| focus.contains_focused(window, cx)));
+    }
+
+    #[gpui::test]
+    async fn cards_keep_their_buttons_when_they_do_not_all_fit(cx: &mut TestAppContext) {
+        let (w, cx) = demo(cx);
+        let fleet = fleet(&w, cx);
+        let lead = seat(&fleet, "orch-lead@docs", cx);
+        // More cards, each with a detail block, than a short window holds.
+        let ids: Vec<u64> = (910..918).collect();
+        for &id in &ids {
+            let mut item = asking(id, &lead, InboxKind::Permission, &[], false);
+            item.detail = "go test ./...\n".repeat(6);
+            arrives(&fleet, item, cx);
+        }
+        cx.simulate_resize(gpui::size(px(1000.), px(500.)));
+        cx.dispatch_action(crate::actions::OpenInbox);
+        cx.run_until_parked();
+
+        // Scrolled into view one by one, every card holds its buttons:
+        // squeezed, they were cut off below the card's edge.
+        let inbox = inbox(&w, cx).unwrap();
+        for &id in &ids {
+            inbox.update(cx, |i, cx| i.select(id, cx));
+            cx.run_until_parked();
+            let card = cx
+                .debug_bounds(format!("INBOX-CARD-{id}").leak())
+                .expect("the card is drawn");
+            let allow = cx
+                .debug_bounds(format!("INBOX-ALLOW-{id}").leak())
+                .expect("its Allow button is drawn");
+            assert!(
+                allow.bottom() <= card.bottom() && allow.top() >= card.top(),
+                "card {id}: the button {allow:?} lies outside the card {card:?}"
+            );
+        }
     }
 
     #[gpui::test]
