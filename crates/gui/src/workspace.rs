@@ -20,6 +20,7 @@ use gpui::{
 };
 use ui::prelude::*;
 
+use crate::actions::command_line as command_line_actions;
 use crate::actions::panel::{agent_panel, chatroom_panel, events_panel, fleet_panel, queue_panel};
 use crate::actions::{
     ActivateNextItem, ActivateNextPane, ActivatePaneDown, ActivatePaneLeft, ActivatePaneRight,
@@ -36,6 +37,7 @@ use crate::actions::{
 use crate::agent_panel::AgentPanel;
 use crate::args::View;
 use crate::chatroom::ChatroomPanel;
+use crate::command_line::CommandLine;
 use crate::command_palette::CommandPalette;
 use crate::comms::CommsItem;
 use crate::decorations::client_side_decorations;
@@ -95,6 +97,7 @@ pub struct Workspace {
     fleet: Entity<FleetModel>,
     fleet_panel: Entity<FleetPanel>,
     title_bar: Entity<TitleBar>,
+    command_line: Entity<CommandLine>,
     status_bar: Entity<StatusBar>,
     center: PaneGroup<Entity<Pane>>,
     active_pane: Entity<Pane>,
@@ -155,6 +158,7 @@ impl Workspace {
             dock.update(cx, |d, cx| d.set_open(true, window, cx));
         }
         let docks = [left_dock.clone(), bottom_dock.clone(), right_dock.clone()];
+        let command_line = cx.new(|cx| CommandLine::new(fleet.clone(), this.clone(), window, cx));
         let status_bar = cx.new(|cx| StatusBar::new(fleet.clone(), this, docks, cx));
 
         let first = cx.new(|cx| Pane::new(window, cx));
@@ -201,6 +205,7 @@ impl Workspace {
             fleet,
             fleet_panel,
             title_bar,
+            command_line,
             status_bar,
             center: PaneGroup::new(first.clone()),
             active_pane: first,
@@ -228,9 +233,22 @@ impl Workspace {
         &self.fleet_panel
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn active_pane(&self) -> &Entity<Pane> {
         &self.active_pane
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn command_line(&self) -> &Entity<CommandLine> {
+        &self.command_line
+    }
+
+    /// The question selected in the Inbox, when the Inbox is the active
+    /// tab and the question waits on you: what a plain line in the
+    /// command line answers.
+    pub fn inbox_question(&self, cx: &App) -> Option<ainet_core::InboxItem> {
+        let item = self.active_pane.read(cx).active_item()?;
+        let inbox = item.to_any().downcast::<InboxItem>().ok()?;
+        inbox.read(cx).waiting_question(cx)
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -1092,6 +1110,12 @@ impl Render for Workspace {
                 settings::set(next, cx);
             })
             .on_action(cx.listener(|this, _: &ToggleSwitcher, window, cx| this.toggle_switcher(window, cx)))
+            .on_action(
+                cx.listener(|this, _: &command_line_actions::ToggleFocus, window, cx| {
+                    this.command_line
+                        .update(cx, |line, cx| line.toggle_focus(window, cx))
+                }),
+            )
             .on_action(cx.listener(|this, _: &command_palette::Toggle, window, cx| {
                 this.toggle_command_palette(window, cx)
             }))
@@ -1218,6 +1242,11 @@ impl Render for Workspace {
             .bg(colors.background)
             .child(self.title_bar.clone())
             .child(self.render_body(cx))
+            // Off in the settings, it shows while it has the keyboard.
+            .when(
+                settings::get(cx).command_line || self.command_line.read(cx).is_focused(window, cx),
+                |el| el.child(self.command_line.clone()),
+            )
             .child(self.status_bar.clone())
             .child(self.toast_layer.clone())
             .child(self.modal_layer.clone());

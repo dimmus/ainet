@@ -283,6 +283,7 @@ mod tests {
                     "TextInput && multiline",
                     "CommsCompose > TextInput",
                     "CommsCompose > TextInput && empty",
+                    "CommandLine > TextInput",
                 ];
                 for section in &sections {
                     assert!(
@@ -316,7 +317,7 @@ mod tests {
                 });
                 let ctrl = ('a'..='z')
                     .map(String::from)
-                    .chain(["\\".into()])
+                    .chain(["\\".into(), ";".into()])
                     .map(|k| format!("ctrl-{k}"));
                 let plain = [
                     "escape",
@@ -340,6 +341,7 @@ mod tests {
                     "-",
                     "=",
                     "shift-=",
+                    "cmd-;",
                 ]
                 .map(String::from);
                 for keys in ctrl.chain(plain) {

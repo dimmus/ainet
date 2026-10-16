@@ -139,6 +139,7 @@ impl Workspace {
             folded_rigs: self.fleet_panel.read(cx).folded_rigs(),
             selected,
             recent_actions: command_palette::recent(cx),
+            command_history: self.command_line.read(cx).history().to_vec(),
         })
     }
 
@@ -166,8 +167,8 @@ impl Workspace {
         }
     }
 
-    /// The docks, their panels' sizes, the Fleet's folds and the
-    /// palette's recent actions, as saved.
+    /// The docks, their panels' sizes, the Fleet's folds, the palette's
+    /// recent actions and the command line's history, as saved.
     fn restore_layout(&mut self, saved: &SavedWorkspace, window: &mut Window, cx: &mut Context<Self>) {
         let docks = [
             self.left_dock.clone(),
@@ -198,6 +199,8 @@ impl Workspace {
         self.fleet_panel
             .update(cx, |panel, cx| panel.set_folded_rigs(folded, cx));
         command_palette::set_recent(&saved.recent_actions, cx);
+        let history = saved.command_history.clone();
+        self.command_line.update(cx, |line, _| line.set_history(history));
         self.release_hidden_focus(window, cx);
         cx.notify();
     }
@@ -495,6 +498,8 @@ mod tests {
                     w.resize_dock(DockPosition::Left, px(333.), cx);
                     w.fleet_panel()
                         .update(cx, |p, cx| p.set_folded_rigs(["infra".to_string()], cx));
+                    w.command_line()
+                        .update(cx, |l, _| l.set_history(vec!["/ps".into(), "hello".into()]));
                 });
                 command_palette::set_recent(&["workspace: toggle left dock".into()], cx);
             });
@@ -528,6 +533,7 @@ mod tests {
         assert_eq!(members.len(), 2);
         assert_eq!(left.folded_rigs, vec!["infra".to_string()]);
         assert_eq!(left.panel_sizes.get("FleetPanel"), Some(&333.));
+        assert_eq!(left.command_history, ["/ps", "hello"]);
         assert!(left.docks.iter().any(|d| !d.open), "{:?}", left.docks);
 
         // A new window over the same file: the same workspace.
@@ -565,6 +571,8 @@ mod tests {
         );
         let recent = cx.update(|_, cx| command_palette::recent(cx));
         assert_eq!(recent, vec!["workspace: toggle left dock".to_string()]);
+        let history = workspace.read_with(cx, |w, cx| w.command_line().read(cx).history().to_vec());
+        assert_eq!(history, ["/ps", "hello"], "the command line's lines");
         assert_eq!(selected(&workspace, cx), left.selected, "the same agent selected");
     }
 

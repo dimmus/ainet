@@ -281,6 +281,15 @@ impl InboxItem {
         self.selected
     }
 
+    /// The selected item, if it is a question waiting on you: what a line
+    /// typed in the command line answers, as the TUI's input line does in
+    /// its Inbox.
+    pub fn waiting_question(&self, cx: &App) -> Option<core::InboxItem> {
+        self.selected
+            .and_then(|id| self.item(id, cx))
+            .filter(|i| i.waiting && i.kind == InboxKind::Question)
+    }
+
     /// Whether every item shows, not only what waits.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn history_open(&self) -> bool {

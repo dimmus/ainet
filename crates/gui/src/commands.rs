@@ -42,12 +42,17 @@ pub fn question(store: &Store) -> Option<&InboxItem> {
 
 /// Carries out a parsed command: a request (or what is wrong with the
 /// line) through the fleet, the console's own commands as the app's
-/// actions.
-pub fn run(fleet: &Entity<FleetModel>, cmd: Command, window: &mut Window, cx: &mut App) {
+/// actions. Returns what was wrong, if anything, which the fleet has
+/// shown as a toast too.
+pub fn run(fleet: &Entity<FleetModel>, cmd: Command, window: &mut Window, cx: &mut App) -> Option<String> {
     let action: Box<dyn Action> = match cmd {
-        Command::Request(..) | Command::Error(_) | Command::Nothing => {
+        Command::Error(why) => {
+            fleet.update(cx, |fleet, cx| fleet.show(why.clone(), true, cx));
+            return Some(why);
+        }
+        Command::Request(..) | Command::Nothing => {
             fleet.update(cx, |fleet, cx| fleet.run(cmd, cx));
-            return;
+            return None;
         }
         Command::Answer(Decision::Allow) => Box::new(Allow),
         Command::Answer(Decision::Always) => Box::new(Always),
@@ -66,30 +71,31 @@ pub fn run(fleet: &Entity<FleetModel>, cmd: Command, window: &mut Window, cx: &m
             }
             Ok(View::Named(name)) => {
                 let text = format!("no view or rig named {name}");
-                fleet.update(cx, |fleet, cx| fleet.show(text, true, cx));
-                return;
+                fleet.update(cx, |fleet, cx| fleet.show(text.clone(), true, cx));
+                return Some(text);
             }
             Ok(View::Review) | Err(_) => return console_only(fleet, cx),
         },
         Command::Help | Command::Cols(_) => return console_only(fleet, cx),
     };
     window.dispatch_action(action, cx);
+    None
 }
 
 /// Opens the Terminals grid on `rig`'s terminals (every one's for
 /// `None`) in the window's workspace, once the view that ran the command
 /// is done (as a dispatched action would be).
-fn show_terminals(rig: Option<String>, window: &mut Window, cx: &mut App) {
-    let Some(workspace) = window.root::<Workspace>().flatten() else {
-        return;
-    };
+fn show_terminals(rig: Option<String>, window: &mut Window, cx: &mut App) -> Option<String> {
+    let workspace = window.root::<Workspace>().flatten()?;
     window.defer(cx, move |window, cx| {
         workspace.update(cx, |w, cx| w.show_rig_terminals(rig, window, cx));
     });
+    None
 }
 
 /// The console's own commands with nothing to do here.
-fn console_only(fleet: &Entity<FleetModel>, cx: &mut App) {
+fn console_only(fleet: &Entity<FleetModel>, cx: &mut App) -> Option<String> {
     let text = "that is the console's command; here the keys and menus do it";
     fleet.update(cx, |fleet, cx| fleet.show(text.into(), false, cx));
+    Some(text.into())
 }

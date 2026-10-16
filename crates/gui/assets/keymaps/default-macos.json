@@ -31,6 +31,7 @@
       "cmd-p": "fleet::ToggleSwitcher",
       "ctrl-o": "fleet::Operator",
       "ctrl-g": "fleet::TileAll",
+      "cmd-;": "command_line::ToggleFocus",
       "alt-down": "fleet::SelectNext",
       "alt-up": "fleet::SelectPrev",
       "ctrl-shift-y": "fleet::NextWaiting",
@@ -77,6 +78,7 @@
       "ctrl-a": null,
       "ctrl-e": null,
       "ctrl-g": null,
+      "cmd-;": null,
       "ctrl-n": null,
       "ctrl-o": null,
       "ctrl-t": null,
@@ -229,6 +231,16 @@
     "context": "CommsCompose > TextInput",
     "bindings": {
       "tab": "comms::Complete"
+    }
+  },
+  {
+    // The command line above the status bar: tab completes an @name or
+    // a /command, up and down recall the lines typed before.
+    "context": "CommandLine > TextInput",
+    "bindings": {
+      "tab": "command_line::Complete",
+      "up": "command_line::PreviousLine",
+      "down": "command_line::NextLine"
     }
   },
   {

@@ -627,6 +627,23 @@ three now used by the TUI too, which behaves as before). Tiles in one
 pane redraw together (GPUI redraws a view's subtree), from their row
 caches.
 
+Item 2, the command line (`command_line.rs`, see GUI.md "The command
+line"): a strip above the status bar (`cmd ▸`, a field, what enter will
+do), on by default (`"command_line": false` shows it only while it has
+the keyboard). A line means what the TUI's input line means:
+`/command` through `commands::parse`/`run` (which now returns what was
+wrong), `@Name text` through `command::message`, other text to the
+selected agent, or, while the Inbox shows a waiting question, its answer
+(`InboxItem::waiting_question`). Errors show in red in the line and as a
+toast, and the line stays; done, it clears. `tab` completes `@names` and
+`/command` names, `up`/`down` recall the last 50 lines, saved with the
+workspace (`command_history`, left out while empty). `ctrl-;` (`cmd-;`)
+reaches it from anywhere but a terminal and escape gives the keyboard
+back where it was. `ainet-model` gained the list of `/commands` with
+their usage (`command::COMMANDS`, checked against `command::parse`) and
+their completion (`complete_command`, `complete_line`); the TUI does not
+use them, so it behaves as before.
+
 ## 6. Risks
 
 | Risk | Mitigation |

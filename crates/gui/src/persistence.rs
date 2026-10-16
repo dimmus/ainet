@@ -3,7 +3,8 @@
 //! what ainet's window has. `$XDG_STATE_HOME/ainet/gui.json` keeps one
 //! workspace per daemon socket (and one for the demo): the window's bounds,
 //! the docks, the panes with their splits and tabs, the Fleet's folded rigs
-//! and selected agent, the Map's view and the palette's recent actions.
+//! and selected agent, the Map's view, the palette's recent actions and
+//! the command line's history.
 //!
 //! It is state, not configuration: a file that does not parse, or was
 //! written in another format version, is ignored and written anew; a file
@@ -22,6 +23,9 @@ pub const VERSION: u32 = 1;
 
 /// The palette keeps this many recent actions.
 pub const RECENT_ACTIONS: usize = 50;
+
+/// The command line keeps this many lines.
+pub const COMMAND_HISTORY: usize = 50;
 
 /// `$XDG_STATE_HOME/ainet/gui.json`.
 pub fn state_file() -> PathBuf {
@@ -57,6 +61,10 @@ pub struct SavedWorkspace {
     pub selected: Option<String>,
     /// What was run from the palette, the latest last.
     pub recent_actions: Vec<String>,
+    /// The lines typed in the command line, the latest last. Left out
+    /// while empty; an older app ignores it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub command_history: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -427,6 +435,7 @@ mod tests {
             folded_rigs: vec!["infra".into()],
             selected: Some("a".into()),
             recent_actions: vec!["workspace: toggle left dock".into()],
+            command_history: vec!["/ps".into(), "@lead hello".into()],
         }
     }
 
@@ -465,6 +474,10 @@ mod tests {
         assert_eq!(load(&file, "/tmp/other.sock"), Some(other));
         let text = std::fs::read_to_string(&file).unwrap();
         assert!(text.contains("\"version\": 1"), "{text}");
+        // The command line's history is written only when there is one.
+        let empty = serde_json::to_string(&SavedWorkspace::default()).unwrap();
+        assert!(!empty.contains("command_history"), "{empty}");
+        assert!(text.contains("\"command_history\""), "{text}");
         let names: Vec<_> = std::fs::read_dir(file.parent().unwrap())
             .unwrap()
             .map(|e| e.unwrap().file_name())

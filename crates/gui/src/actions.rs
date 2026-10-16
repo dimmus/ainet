@@ -165,6 +165,27 @@ actions!(
     ]
 );
 
+/// The command line's actions, in a module of their own:
+/// `command_line::Complete` and `comms::Complete` would otherwise clash.
+pub mod command_line {
+    use gpui::actions;
+
+    actions!(
+        command_line,
+        [
+            /// Gives the command line at the bottom the keyboard, or gives
+            /// the keyboard back to where it was.
+            ToggleFocus,
+            /// Completes the `@name` or `/command` being typed.
+            Complete,
+            /// Recalls the line typed before.
+            PreviousLine,
+            /// Recalls the line typed after, or what was being typed.
+            NextLine,
+        ]
+    );
+}
+
 actions!(
     terminals,
     [

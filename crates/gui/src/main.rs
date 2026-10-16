@@ -8,6 +8,7 @@ mod agent_panel;
 mod args;
 mod assets;
 mod chatroom;
+mod command_line;
 mod command_palette;
 mod commands;
 mod comms;

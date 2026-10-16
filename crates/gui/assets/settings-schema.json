@@ -58,6 +58,11 @@
         "size": "large"
       }
     },
+    "command_line": {
+      "description": "The command line above the status bar, always there. Off, it shows\nonly while it has the keyboard (`ctrl-;`).",
+      "type": "boolean",
+      "default": true
+    },
     "confirm_quit": {
       "description": "Ask before quitting.",
       "type": "boolean",

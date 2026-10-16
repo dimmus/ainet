@@ -40,6 +40,7 @@ pub const TEMPLATE: &str = r#"// ainet desktop settings. Every field is optional
   //               "cursor_shape": "block", "blinking": "on" },
   // "fleet_panel": { "dock": "left", "width": 260 },
   // "critters": { "size": "large" },
+  // "command_line": true, // the cmd line above the status bar
   // "confirm_quit": false,
 }
 "#;
@@ -69,6 +70,9 @@ pub struct Settings {
     pub fleet_panel: FleetPanelSettings,
     /// The agents' pixel critters.
     pub critters: CritterSettings,
+    /// The command line above the status bar, always there. Off, it shows
+    /// only while it has the keyboard (`ctrl-;`).
+    pub command_line: bool,
     /// Ask before quitting.
     pub confirm_quit: bool,
 }
@@ -84,6 +88,7 @@ impl Default for Settings {
             terminal: TerminalSettings::default(),
             fleet_panel: FleetPanelSettings::default(),
             critters: CritterSettings::default(),
+            command_line: true,
             confirm_quit: false,
         }
     }
@@ -552,6 +557,7 @@ mod tests {
         );
         assert_eq!(s.critters.size, CritterSize::Large);
         assert!(!s.confirm_quit && s.theme.is_none());
+        assert!(s.command_line);
         assert_eq!(parse("").unwrap(), s);
         assert_eq!(parse("  // nothing yet\n{}").unwrap(), s);
     }
@@ -589,6 +595,7 @@ mod tests {
             "terminal",
             "fleet_panel",
             "critters",
+            "command_line",
             "confirm_quit",
         ] {
             assert!(properties.get(field).is_some(), "{field} in the schema");
@@ -609,6 +616,7 @@ mod tests {
               "fleet_panel": { "dock": "right" },
               "ui_density": "compact",
               "critters": { "size": "small" },
+              "command_line": false,
               "confirm_quit": true,
             }
             "#,
@@ -633,6 +641,7 @@ mod tests {
         );
         assert_eq!(s.ui_density, UiDensity::Compact);
         assert_eq!(s.critters.size, CritterSize::Small);
+        assert!(!s.command_line);
         assert!(s.confirm_quit);
     }
 

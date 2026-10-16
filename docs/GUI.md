@@ -10,6 +10,7 @@ built by, and the reasons behind it, are in [GUI-PLAN.md](GUI-PLAN.md).
 Contents: [the pin](#the-pin) · [a workspace of its own](#a-workspace-of-its-own) ·
 [the workspace pieces](#the-workspace-pieces) · [Fleet and Agent panels](#the-fleet-and-agent-panels) ·
 [terminals](#the-terminal) · [the Terminals grid](#the-terminals-grid) ·
+[the command line](#the-command-line) ·
 [the Inbox](#the-inbox) · [Comms](#comms) ·
 [the bottom dock](#the-bottom-dock-and-reports) · [the Map](#the-map) ·
 [palette and modals](#the-command-palette-pickers-and-modals) ·
@@ -156,6 +157,7 @@ Keys (Linux; macOS has the `cmd` equivalents), in the keymaps:
 | `ctrl-y`, `ctrl-a`, `ctrl-n` | allow, always allow, deny (outside the Inbox: open it on the oldest request) |
 | `ctrl-p` | the agent switcher |
 | `ctrl-shift-p` | the command palette |
+| `ctrl-;` | the command line (above the status bar), and back |
 | `ctrl-o` | the operator's terminal, to type into; with no operator running, starts one (`command::operator_up`), as the TUI's |
 | `ctrl-shift-y` | select the next agent with a request waiting on you (`Store::next_waiting_agent`, round again) |
 | `escape`, `enter`, `up`, `down`, `home`, `end` | `menu::*`, for menus, pickers and modals (`ctrl-enter` in a picker: `menu::SecondaryConfirm`) |
@@ -578,6 +580,91 @@ list keys and `+ - =` stay the agent's), `command_palette.rs` (`/view
 rig:infra`, `/view docs`, `/view terminals`), and in `ainet-model`
 `terminal::{more_cols, fewer_cols, next_rig, grid_step}`.
 
+## The command line
+
+`CommandLine` (`command_line.rs`) is OpenRig's `cmd ▸` line: a strip
+across the window above the status bar, there all the time
+(settings.json `"command_line": false` hides it; it then shows only while
+it has the keyboard). It has the prompt (`cmd ▸`, the arrow in the accent
+colour while it has the keyboard), a one-line `TextInput`, and beside it
+what enter will do, or the hint "/command · @Name message · text to the
+selected agent · Tab completes" with its key while nothing is typed.
+
+A line means what it means in the TUI's input line, through the shared
+command language (`command_line::command_for`):
+
+- **`/command`**: `commands::parse` and `commands::run`, as in the palette
+  and Comms: a request through the fleet (long text as a report tab), the
+  console's own commands as the app's actions (`/view inbox` opens the
+  Inbox, `/allow` opens it on the oldest request, …). While typing the
+  name the strip lists the commands it may be (`/sp`: `/spawn  /spec
+  /specs`); once it is whole, its usage and what it does (`/grow <pod>
+  <member> [runtime] [ROLE] · add a seat to the rig`), from
+  `ainet_model::command::COMMANDS`.
+- **`@Name text`**: that agent (`command::message`, delivered through the
+  typing guard, kept in its mailbox); the strip says `to orch-lead@docs`.
+- **Anything else**: the selected agent (`command::message` with the
+  selection as the default; a click in a terminal or a grid tile selects
+  its agent, so this is also the TUI's focused tile). When the active tab
+  is the Inbox and its selected item is a question waiting on you, the
+  line answers it instead (`command::answer_question`, through
+  `InboxItem::waiting_question`), as the TUI's line does in its Inbox;
+  the strip says `answers orch-lead@docs's question`. `@Name` lines
+  still message there.
+
+Done, the line clears and keeps the keyboard, as a shell's does (a
+command that opens a view, `/view inbox`, gives that view the keyboard).
+Wrong, what is wrong shows beside it in red and as the usual toast
+(`commands::run` now returns it), and the line stays to be put right;
+editing it clears the red. A command with nothing to act on (`/close`
+with nobody selected) says "nothing to act on" there only.
+
+`tab` completes an `@name` as the TUI's (`command::complete`) or a
+`/command` name (`command::complete_command`: the whole name and a space,
+or as far as several names agree, `/snap` to `/snapshot`). `up` and `down`
+recall the lines run before, newest first, and past the newest what was
+being typed; the same line twice in a row is kept once, and the last 50
+(`persistence::COMMAND_HISTORY`) are saved with the workspace
+(`"command_history"`, left out while empty).
+
+`ctrl-;` (`command_line::ToggleFocus`; `cmd-;` on macOS) gives it the
+keyboard from anywhere but a terminal (a terminal's keys are the
+agent's; the keymap unbinds it there), remembering where the keyboard
+was; escape, or `ctrl-;` again, gives it back there (to the active pane
+if that view is gone). A click into the line remembers it the same way.
+The line sits outside every view, so the bare-letter keys of the Fleet,
+the Inbox, Comms and the grid never fire while you type in it.
+
+Keys (context `CommandLine`, around its field):
+
+| Keys | Where | Action |
+|---|---|---|
+| `ctrl-;` (`cmd-;` on macOS) | anywhere but a terminal | `command_line::ToggleFocus` |
+| `enter` | the line | run it |
+| `escape` | the line | the keyboard back where it was |
+| `tab` | the line | `command_line::Complete` |
+| `up`, `down` | the line | `command_line::PreviousLine`, `NextLine` |
+
+Tests: pure ones for the history (recall, the line being typed kept, the
+same line once, the last 50), what each kind of line becomes (the
+selected agent, `@Name`, a question shown, `/commands`, nobody selected)
+and the previews; headless ones for each kind of line sending what the
+TUI sends through the demo link (plain text to the selected agent with
+its toast, `@Name`, `/ps`, `/view inbox` giving the Inbox the keys, a
+question shown in the Inbox answered, `@Name` still a message there),
+errors in the line and as toasts (no such command, no such agent, no such
+view, a usage) and cleared by editing, "nothing to act on", `tab` on
+`@names` and `/command` names, `up` and `down`, `ctrl-;` and escape from
+the Fleet, the Inbox and after a click, a terminal keeping `ctrl-;`,
+escape after the view it came from closed, letters typed in it reaching
+no other view's keys, and the setting hiding it until it has the
+keyboard. Also `persist.rs` (its history restored), `persistence.rs` (the
+saved field left out while empty), `keymap.rs` (`ctrl-;` and `cmd-;` stay
+a terminal's) and, in `ainet-model`, `command::{COMMANDS, command_named,
+commands_starting, complete_command, complete_line}` (every listed
+command understood by `command::parse`, by name, its usage the one a
+usage error gives).
+
 ## The Inbox
 
 `InboxItem` (`inbox.rs`) is the TUI's Inbox as a tab, opened by
@@ -880,7 +967,7 @@ All in the modal layer, on the picker and the text field above:
 | File | What | After Zed's |
 |---|---|---|
 | `command_palette.rs` | `CommandPalette` (`ctrl-shift-p`): every action available where the keyboard was (`Window::available_actions`; `menu::*` left out), named in words as Zed's (`humanize`: `workspace::ToggleLeftDock` is "workspace: toggle left dock"), with its key binding there (`ui::KeyBinding::for_action_in`), fuzzy filtered (`normalize` lets `workspace::toggle_left` find it too), the ones run from it lately first (kept with the workspace). Picking one goes back where the keyboard was and runs it there. A line starting with `/`, or one that matches no action, is a console command: `commands::parse` (`command::parse`, no rig in view, so the selected agent's rig) says in its row what it does (`launching docs`) or what is wrong (the usage, `no command /x`); enter runs it, or stays open while it is wrong | `command_palette` |
-| `commands.rs` | the console's command language for the app, shared with Comms: requests through the fleet, the console's own commands (`/view`, `/allow`, `/quit`, …) as the app's actions. `/answer <text>` answers the question waiting on you (`commands::question`: the selected agent's first, else the oldest), as the TUI's answers the one selected. `/view fleet` focuses the Fleet, `/view terminals` opens the Terminals grid on every rig, `/view rig:<name>` and `/view <rig>` on that rig (`Workspace::show_rig_terminals`), whichever agent is selected; another name says there is no such view or rig | — |
+| `commands.rs` | the console's command language for the app, shared with Comms and the command line (`run` returns what was wrong, also shown as a toast): requests through the fleet, the console's own commands (`/view`, `/allow`, `/quit`, …) as the app's actions. `/answer <text>` answers the question waiting on you (`commands::question`: the selected agent's first, else the oldest), as the TUI's answers the one selected. `/view fleet` focuses the Fleet, `/view terminals` opens the Terminals grid on every rig, `/view rig:<name>` and `/view <rig>` on that rig (`Workspace::show_rig_terminals`), whichever agent is selected; another name says there is no such view or rig | — |
 | `up_modal.rs` | `fleet::Up`: `SpecPicker` over the library (`Request::Specs`, through the new `FleetModel::list`), with what is typed offered as a source of its own (a spec file's path, or a name); then `UpModal`: working directory (Browse… asks the system for a folder, `cx.prompt_for_paths`), rig name, fresh seats (`dev.impl, dev.review`). **Plan** shows what would launch (`UpSpec { plan: true }`, `FleetModel::ask`) in the form; **Launch** (or enter in the last field) sends `Up`. Both are `command::up` | `file_finder`, `ui::Modal` |
 | `rig_modals.rs` | `fleet::SwitchRig` (the title bar's rig switcher, which names the selected agent's rig, `title_bar::rig_label`): a `RigPicker`; picking a rig selects its first live agent in the Fleet's order (`rig_modals::first_agent`), so the Fleet, Agent panel, Chatroom and the rig commands follow it. `fleet::Restore`: a `RigPicker`, then `RestoreModal`: the snapshots (`Request::SnapshotList`), the latest by default, picked by click or `up`/`down`; the rig's seats as checkboxes to start fresh; enter restores (`command::restore`). `fleet::Down`: `DownModal` asks about the selected agent's rig (or the only one; else a rig picker first), with **Take a snapshot first** checked; enter takes it down (`command::down`) | — |
 | `seat_modals.rs` | `fleet::Spawn` (`s` in the Fleet): `SpawnModal`, the runtime (claude-code, codex, terminal), working directory (Browse…) and role, as `/spawn` (`command::spawn`). `fleet::Grow`: `GrowModal` for the selected agent's rig (else a rig picker): pod, member, runtime (or the rig's default), role, as `/grow` (`command::grow`); it says so when the pod or member is missing | — |
@@ -969,7 +1056,8 @@ one workspace per daemon socket and one for the demo:
     { "kind": "pane", "items": [ { "kind": "map", "zoom": 1.5, "pan_x": 0, "pan_y": 0 } ] } ] },
   "folded_rigs": [ "infra" ],
   "selected": "…",
-  "recent_actions": [ "workspace: toggle left dock" ] } } }
+  "recent_actions": [ "workspace: toggle left dock" ],
+  "command_history": [ "/ps", "@orch-lead@docs ship it" ] } } }
 ```
 
 - **What.** The window's bounds and whether it was maximized or full
@@ -978,7 +1066,7 @@ one workspace per daemon socket and one for the demo:
   dragged to a size; the pane tree with its splits, shares, tabs, each
   pane's active tab and the active pane; the Fleet's folded rigs and
   selected agent; the Map's zoom and pan (with its tab); the palette's recent actions (the
-  last 50). Terminals are saved by agent id, the Inbox, Comms and the Map
+  last 50) and the command line's lines (the last 50). Terminals are saved by agent id, the Inbox, Comms and the Map
   as themselves, the Terminals grid with its rig filter and the columns
   asked for; reports and the stand-in tab are not saved.
 - **Restoring.** At start the window opens with the saved bounds (at
@@ -1083,6 +1171,7 @@ settings stay and the status bar says what is wrong. `ctrl-,` opens it
 | `terminal.cursor_shape`, `.blinking` | `"block"`, `"on"` | `"bar"`, `"underline"`, `"hollow"`; `"off"`, `"terminal_controlled"` (still), as in Zed |
 | `fleet_panel.dock`, `.width` | `"left"`, 260 | the Agent panel takes the other side |
 | `critters.size` | `"large"` | `"small"`; `ctrl-e` toggles it |
+| `command_line` | `true` | the command line above the status bar; `false` shows it only while it has the keyboard (`ctrl-;`) |
 | `confirm_quit` | `false` | ask before quitting |
 
 Themes: Zed's One, Ayu and Gruvbox families, **Deepharness** (the TUI's
@@ -1106,7 +1195,7 @@ the status bar (`themes:`).
 
 Keys: `crates/gui/assets/keymaps/default-{linux,macos}.json`, in Zed's
 format, with the contexts `Workspace`, `FleetPanel`, `Terminal`, `Inbox`,
-`Comms`, `CommsCompose`, `QueuePanel`, `Map`, `Terminals` (with `grid`), `Picker`, `TabSwitcher`, `Form` and `TextInput` (see "The workspace pieces" for the
+`Comms`, `CommsCompose`, `CommandLine`, `QueuePanel`, `Map`, `Terminals` (with `grid`), `Picker`, `TabSwitcher`, `Form` and `TextInput` (see "The workspace pieces" for the
 pane, dock and text keys). `~/.config/ainet/keymap.json` adds to them and
 overrides them (`null` unbinds), and reloads on save; bindings it cannot
 read are listed in the status bar and the rest apply. `ctrl-alt-,` opens
@@ -1163,6 +1252,7 @@ module; modules without tests of their own are covered where named):
 | `agent_panel.rs` | 2 | 1 | the selected agent, the gauge, the sparkline |
 | `terminal_item.rs`, `terminal_element.rs`, `terminal_layout.rs`, `terminal_input.rs` | 16 | 12 | layout, colours, selections, row cache and keys; key encoding; the screen drawn, focus and `Interact`, keys past the workspace, one `Resize`, scrollback, copy and paste, the right-click menu by its keys (Paste, Send Ctrl-C, Copy, Clear Selection, Message…, Zoom; escape types nothing), redrawing only what changed |
 | `terminals.rs` | | 11 | the Terminals grid: tiles in the TUI's order, the rig filter, columns, a click and `ctrl-alt` arrows giving tiles the keys with `Interact`, zoom, a hidden grid fetching nothing, tiles following agents, the size rule, `OpenTerminal` into a tile, views opening it |
+| `command_line.rs` | 4 | 6 | the history, lines as the TUI's and their previews; each kind of line sent through the demo link, errors in the line and as toasts, completion, recall, `ctrl-;` and escape, letters never reaching other views' keys, the setting |
 | `inbox.rs` | 4 | 8 | order, detail styles, picks, the glow; the answer keys, cards by selection and click, the Allow, Always and Deny buttons answering their own card, questions, `ctrl-shift-y`, history, alerts |
 | `comms.rs`, `commands.rs` | 6 | 6 | rows, splices, sticking to the end, mentions, code; lines sent as the TUI's, completion, keys, threads, clicks |
 | `queue_panel.rs`, `queue_form.rs`, `chatroom.rs`, `events_panel.rs`, `report.rs` | 1 | 9 | the queue's order and chips, every menu entry and form, right click; chat rooms and the cap; the events log; reports |
@@ -1229,6 +1319,12 @@ Collected from the plan's phase notes; none of these is started.
   the detach; the next whole screen (at most 5 s later) mends it.
   Cached panes and panels rely on every view that reads the fleet
   observing it, which all do today.
+- **Command line:** no list of completions to pick from (`tab` completes
+  as far as the names agree, the strip lists them); no completion of a
+  command's arguments (rig, seat or view names); the history is per
+  workspace, not shared between windows; Comms' own meaning of a line
+  (answering the selected entry) is the Comms compose box's, not the
+  line's.
 - **Inbox:** Markdown beyond headings,
   lists and fenced code, keyboard focus on single buttons.
 - **Comms:** a right-click menu on messages, a completion list while
