@@ -116,6 +116,15 @@
     }
   },
   {
+    // The table itself, not a field in it: r writes to the selected
+    // item's agent, h shows every item or only what waits.
+    "context": "Inbox && cards",
+    "bindings": {
+      "r": "inbox::ReplyToAgent",
+      "h": "inbox::ToggleHistory"
+    }
+  },
+  {
     // The stream, when it has the keyboard: the list keys select
     // entries, enter opens a thread (or answers), c writes a new
     // message, r answers the selected one.

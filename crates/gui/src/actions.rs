@@ -144,6 +144,11 @@ actions!(
         Deny,
         /// Answers the waiting question.
         Answer,
+        /// Writes to the selected request's agent: on a waiting request,
+        /// a reason to deny it with; on an answered one, a message.
+        ReplyToAgent,
+        /// Shows only the requests waiting on you, or every item.
+        ToggleHistory,
     ]
 );
 

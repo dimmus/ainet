@@ -270,6 +270,7 @@ mod tests {
                     "FleetPanel",
                     "Terminal",
                     "Inbox",
+                    "Inbox && cards",
                     "Comms",
                     "QueuePanel",
                     "Map",

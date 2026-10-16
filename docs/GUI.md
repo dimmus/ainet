@@ -473,25 +473,37 @@ the GUI tests listed under the terminal.
 `InboxItem` (`inbox.rs`) is the TUI's Inbox as a tab, opened by
 `workspace::OpenInbox` (`ctrl-shift-i`), `--view inbox`, the waiting
 badge in the title and status bars, a toast's Review button, or the
-answer keys from anywhere else. One card per item of the Store's inbox,
-drawn like the tool-call approval cards of Zed's agent panel
-(`agent_ui`'s `render_tool_call`): a faint header with the agent's
-critter, name (in its colour), the kind's chip (the TUI's `kind_chip`:
-permission, plan, question, finished, failed; faded once answered) and
-age; the summary; the whole detail in a block that scrolls past 18 rem
-(a permission's command or edit in the buffer font, `+`/`-`/`@` lines
-coloured as the TUI's; a plan as light markdown: headings, lists, fenced
-code); and, while it waits on you, **Allow**, **Always** and **Deny**
-with their key hints on the selected card, plus a button to the agent's
-own terminal. Failed items get a dashed border, as Zed's failed tool
-calls.
+answer keys from anywhere else. It is a table above a detail pane, so it
+stays readable with many requests: Zed's virtualised `Table` (the Queue
+panel's) lists who asks (critter and name in its colour), the kind's chip
+(the TUI's `kind_chip`: permission, plan, question, finished, failed;
+faded once answered), what it asks and how long ago. Below it, the
+selected item in full, drawn like the tool-call approval cards of Zed's
+agent panel (`agent_ui`'s `render_tool_call`): a faint header with the
+critter, name, role, chip and age; the summary; the whole detail in a
+block that scrolls past 18 rem (a permission's command or edit in the
+buffer font, `+`/`-`/`@` lines coloured as the TUI's; a plan as light
+markdown: headings, lists, fenced code); and, while it waits on you,
+**Allow**, **Always** and **Deny** with their key hints, plus a button to
+the agent's own terminal. Failed items get a dashed border, as Zed's
+failed tool calls. A double click on a row opens the agent's terminal.
+
+Talking back: every item but a waiting question (which has its own
+answer field) has a field for your words to its agent (`r`, or enter on
+the row). While the request waits, enter there **denies it with your
+reason**: `Request::Answer` carries an optional `message` (left off the
+wire when empty, so older daemons and the TUI see the request they
+always did) and ainetd hands it to Claude Code as the deny message
+("Denied from ainet by your human: use cargo nextest"; for a plan, "Your
+human sent the plan back from ainet: …"), so the agent knows what to do
+instead. Once the item no longer waits, the same field sends the agent a
+message (`command::message_to`). `Store::deny_with` builds the deny.
 
 Order: requests waiting on you first, oldest first (where the keys go);
-then the history (answered requests, finished and failed reports,
-questions sent as messages), newest first, folded under a disclosure
-until opened. A history row opens to its full card (enter, or a click).
-The selection is a card's id; when the selected request is answered it
-moves on to the next one waiting.
+with **All** (`h`), the rest follows (answered requests, finished and
+failed reports, questions sent as messages), newest first. The selection
+is an item's id; when the selected request is answered it moves on to the
+next one waiting.
 
 Questions (`AskUserQuestion`) show their options as Zed's `ChoiceCard`s,
 radio or checkbox by `multi_select`; digits `1`–`9` pick them while the
@@ -499,19 +511,24 @@ Inbox has the keyboard, as the TUI's. A field takes your own words;
 enter (or **Answer**) sends them if typed, else the numbers picked
 (`command::answer_choices`, "1 3"), through `command::answer_question`.
 A click anywhere in the Inbox (its buttons too) gives it the keyboard,
-and a field that goes when its question is answered hands the keyboard
-back to the cards.
+and a field that goes when its item is answered hands the keyboard back
+to the table.
 **Leave to Terminal** (`ctrl-n`) denies it as the TUI's `^N` does.
 Permissions and plans go through `Store::answer`, so the request and what
 the toast says (`allowed Lead's permission`) are the TUI's.
 
 Keys (the TUI's): `ctrl-y` allow, `ctrl-a` always, `ctrl-n` deny. In the
-Inbox they answer the selected card; anywhere else (but a terminal, which
+Inbox they answer the selected item; anywhere else (but a terminal, which
 takes every ctrl letter) they first open the Inbox on the oldest request
 waiting, the selected agent's first (`Store::next_waiting`), so you read
-before you allow. `up`/`down` (`home`/`end`) move between cards, `enter`
-is `inbox::Answer`, `escape` leaves a question's field. There are no
-single-letter answer keys: a stray key must never allow a command.
+before you allow. `up`/`down` (`home`/`end`) move between rows, `enter`
+is `inbox::Answer` (a question's answer, else the reply field), `r`
+(`inbox::ReplyToAgent`) goes to the reply field, `h`
+(`inbox::ToggleHistory`) shows everything or only what waits, `escape`
+leaves a field. `r` and `h` are bound in `Inbox && cards`, a context the
+Inbox adds only while it (not one of its fields) has the keyboard, so
+typing in a field never triggers them. There are no single-letter answer
+keys: a stray key must never allow a command.
 
 Attention: an item that asks for you (`Change::InboxAdded { alert: true
 }`) becomes a toast with the agent's critter and the TUI's flash text
@@ -524,11 +541,13 @@ tab shows a bell and the waiting count.
 Tests: pure ones for the order, the detail styles, picking and the glow;
 headless ones for the keys opening the Inbox first and then answering
 through the demo link (the card resolves on `InboxResolved` and the
-selection moves on), cards answered by selection and click, the Allow,
-Always and Deny buttons answering their own card, questions
+selection moves on), items answered by selection and a click on their
+row, the Allow, Always and Deny buttons answering their own item, cards
+keeping their buttons in a short window, a deny with a reason, a message
+from a history item, the Waiting / All filter, questions
 (digits, several or one, your words over picks, escape, deny, the
 keyboard back on the cards after an answer by text), a click giving the
-Inbox the keys, `ctrl-shift-y`, the history folding, `--view inbox`, and
+Inbox the keys, `ctrl-shift-y`, `--view inbox`, and
 the alert's toast and glow count.
 `FleetModel::receive` (tests only) applies link messages directly.
 
@@ -1096,7 +1115,7 @@ Collected from the plan's phase notes; none of these is started.
   the detach; the next whole screen (at most 5 s later) mends it.
   Cached panes and panels rely on every view that reads the fleet
   observing it, which all do today.
-- **Inbox:** the agent's role on the card, Markdown beyond headings,
+- **Inbox:** Markdown beyond headings,
   lists and fenced code, keyboard focus on single buttons.
 - **Comms:** a right-click menu on messages, a completion list while
   typing `@`, Markdown beyond fenced code, history older than the Store

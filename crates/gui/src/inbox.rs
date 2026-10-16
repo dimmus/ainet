@@ -1,19 +1,24 @@
 //! The Inbox as a tab: [`InboxItem`], opened by `workspace::OpenInbox`,
 //! the waiting badge in the title and status bars, a toast's "Review", or
-//! `ctrl-y`/`ctrl-a`/`ctrl-n` from anywhere else. One card per item of the
-//! Store's inbox, drawn like the tool-call approval cards of Zed's agent
-//! panel: the agent's critter and name, a chip of the kind, the summary,
-//! the whole command, plan or edit in a scrolling block, and while it
-//! waits on you Allow, Always and Deny with their keys. A question offers
-//! its options as choice cards and a field for your own answer.
+//! `ctrl-y`/`ctrl-a`/`ctrl-n` from anywhere else. A table of the Store's
+//! inbox (who asks, what kind, what, how long ago) above the selected item
+//! in full, drawn like the tool-call approval cards of Zed's agent panel:
+//! the agent's critter and name, a chip of the kind, the summary, the
+//! whole command, plan or edit in a scrolling block, and while it waits on
+//! you Allow, Always and Deny with their keys. A question offers its
+//! options as choice cards and a field for your own answer.
+//!
+//! Every item has a field for your words to its agent (`r`): while a
+//! request waits, a reason to deny it with, which the agent reads instead
+//! of a bare "denied"; once it does not, a message.
 //!
 //! Requests waiting on you come first, oldest first (the one the TUI's
-//! keys go to); everything answered or only for your information is
-//! history, newest first, folded away until you open it. The answers are
-//! the TUI's: `Store::answer` for permissions and plans,
-//! `command::answer_question` for questions.
+//! keys go to); with `h` (All), everything answered or only for your
+//! information follows, newest first. The answers are the TUI's:
+//! `Store::answer` for permissions and plans, `command::answer_question`
+//! for questions, `Store::deny_with` for a deny with a reason.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 use std::f32::consts::TAU;
 use std::time::Duration;
 
@@ -21,12 +26,14 @@ use ainet_core::{self as core, Decision, InboxKind};
 use ainet_model::command;
 use ainet_model::describe::age;
 use gpui::{
-    Action, Animation, AnimationExt, ClickEvent, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
-    Hsla, KeyDownEvent, MouseButton, ScrollHandle, Subscription,
+    Action, Animation, AnimationExt, ClickEvent, Div, Entity, EventEmitter, FocusHandle, Focusable,
+    FontWeight, Hsla, KeyContext, KeyDownEvent, MouseButton, ScrollStrategy, Stateful, Subscription,
 };
-use ui::{Chip, ChoiceCard, Disclosure, KeyBinding, ListItem, ListItemSpacing, Tooltip, prelude::*};
+use ui::{
+    Chip, ChoiceCard, ColumnWidthConfig, KeyBinding, Table, TableInteractionState, Tooltip, prelude::*,
+};
 
-use crate::actions::{Allow, Always, Answer, Deny, OpenTerminal};
+use crate::actions::{Allow, Always, Answer, Deny, OpenTerminal, ReplyToAgent, ToggleHistory};
 use crate::critter::{self, Critter};
 use crate::fleet::{FleetModel, Tick};
 use crate::item::{Item, ItemEvent, TabContentParams};
@@ -202,29 +209,35 @@ pub fn waiting_badge(
         .into_any_element()
 }
 
-/// A question's field for your own answer.
+/// A field to type into: your own answer to a question, or a reply to a
+/// request.
 struct AnswerField {
     input: Entity<TextInput>,
     _subscription: Subscription,
 }
 
+/// The table's columns: agent, kind, what it asks, age.
+const COLS: usize = 4;
+
 pub struct InboxItem {
     fleet: Entity<FleetModel>,
     focus_handle: FocusHandle,
-    /// The card the keys answer: an inbox item's id.
+    /// The item the keys answer and the detail shows: an inbox item's id.
     selected: Option<u64>,
-    /// Whether the selected card was waiting on you when last seen, to
+    /// Whether the selected item was waiting on you when last seen, to
     /// move on to the next once it is answered.
     selected_waiting: bool,
+    /// Every item shows, not only what waits on you.
     history_open: bool,
-    /// History cards opened to show their detail.
-    opened: HashSet<u64>,
     /// The options picked per waiting question, by index.
     picked: HashMap<u64, BTreeSet<usize>>,
     answers: HashMap<u64, AnswerField>,
-    scroll: ScrollHandle,
-    /// The scrolling list's children as last drawn: the card each one is.
-    children: Vec<Option<u64>>,
+    /// Reply fields, by item and whether it was waiting when the field was
+    /// made: a reason to deny while it waits, a message once it does not.
+    replies: HashMap<(u64, bool), AnswerField>,
+    table: Entity<TableInteractionState>,
+    /// The table's rows as last drawn: item ids, top to bottom.
+    rows: Vec<u64>,
     animation: critter::Animation,
     _subscriptions: Vec<Subscription>,
 }
@@ -250,11 +263,11 @@ impl InboxItem {
             selected: None,
             selected_waiting: false,
             history_open: false,
-            opened: HashSet::new(),
             picked: HashMap::new(),
             answers: HashMap::new(),
-            scroll: ScrollHandle::new(),
-            children: Vec::new(),
+            replies: HashMap::new(),
+            table: cx.new(|cx| TableInteractionState::new(cx)),
+            rows: Vec::new(),
             animation: critter::Animation::default(),
             _subscriptions: subscriptions,
         };
@@ -262,12 +275,13 @@ impl InboxItem {
         inbox
     }
 
-    /// The selected card's inbox item id.
+    /// The selected item's id.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn selected(&self) -> Option<u64> {
         self.selected
     }
 
+    /// Whether every item shows, not only what waits.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn history_open(&self) -> bool {
         self.history_open
@@ -288,7 +302,15 @@ impl InboxItem {
         self.answers.get(&id).map(|a| a.input.clone())
     }
 
-    /// The ids of the cards shown, top to bottom.
+    /// The reply field of item `id` as it is now (waiting or not), once
+    /// drawn.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn reply_input(&self, id: u64, cx: &App) -> Option<Entity<TextInput>> {
+        let waiting = self.item(id, cx)?.waiting;
+        self.replies.get(&(id, waiting)).map(|r| r.input.clone())
+    }
+
+    /// The ids of the items in the table, top to bottom.
     pub fn shown(&self, cx: &App) -> Vec<u64> {
         let inbox = &self.fleet.read(cx).store.inbox;
         let order = order(inbox);
@@ -315,27 +337,35 @@ impl InboxItem {
             .cloned()
     }
 
-    /// An answer field about to go (its question no longer waits) hands
-    /// the keyboard back to the cards, or it would go nowhere.
+    /// A field about to go (its question no longer waits, or its request
+    /// was answered and a deny reason makes no sense any more) hands the
+    /// keyboard back to the Inbox, or it would go nowhere.
     fn keep_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let store = &self.fleet.read(cx).store;
-        let going = self.answers.iter().any(|(id, field)| {
-            !store.inbox.iter().any(|i| i.id == *id && i.waiting)
-                && field.input.focus_handle(cx).contains_focused(window, cx)
-        });
+        let waiting = |id: u64| store.inbox.iter().find(|i| i.id == id).map(|i| i.waiting);
+        let focused = |field: &AnswerField| field.input.focus_handle(cx).contains_focused(window, cx);
+        let going = self
+            .answers
+            .iter()
+            .any(|(id, field)| waiting(*id) != Some(true) && focused(field))
+            || self
+                .replies
+                .iter()
+                .any(|((id, was), field)| waiting(*id) != Some(*was) && focused(field));
         if going {
             window.focus(&self.focus_handle, cx);
         }
     }
 
-    /// Keeps the selection on a card that shows, moving on to the next
+    /// Keeps the selection on an item that shows, moving on to the next
     /// request once the selected one is answered, and forgets what was
-    /// picked or typed for questions no longer waiting.
+    /// picked or typed for items that changed.
     fn sync(&mut self, cx: &mut Context<Self>) {
         let store = &self.fleet.read(cx).store;
-        let waiting: HashSet<u64> = store.inbox.iter().filter(|i| i.waiting).map(|i| i.id).collect();
-        self.picked.retain(|id, _| waiting.contains(id));
-        self.answers.retain(|id, _| waiting.contains(id));
+        let state: HashMap<u64, bool> = store.inbox.iter().map(|i| (i.id, i.waiting)).collect();
+        self.picked.retain(|id, _| state.get(id) == Some(&true));
+        self.answers.retain(|id, _| state.get(id) == Some(&true));
+        self.replies.retain(|(id, was), _| state.get(id) == Some(was));
         let first_waiting = store.inbox.iter().find(|i| i.waiting).map(|i| i.id);
         let selected = self
             .selected
@@ -354,11 +384,11 @@ impl InboxItem {
                     .flatten()
             });
         }
-        self.selected_waiting = self.selected.is_some_and(|id| waiting.contains(&id));
+        self.selected_waiting = self.selected.is_some_and(|id| state.get(&id) == Some(&true));
     }
 
-    /// Selects card `id` (showing the history if it is there) and scrolls
-    /// it into view.
+    /// Selects item `id` (showing every item if it no longer waits) and
+    /// scrolls its row into view.
     pub fn select(&mut self, id: u64, cx: &mut Context<Self>) {
         let Some(item) = self.item(id, cx) else { return };
         if !item.waiting {
@@ -366,21 +396,16 @@ impl InboxItem {
         }
         self.selected = Some(id);
         self.selected_waiting = item.waiting;
-        self.scroll_to_selected();
+        if let Some(ix) = self.shown(cx).iter().position(|s| *s == id) {
+            self.table
+                .read(cx)
+                .scroll_handle
+                .scroll_to_item(ix, ScrollStrategy::Nearest);
+        }
         cx.notify();
     }
 
-    fn scroll_to_selected(&self) {
-        if let Some(ix) = self
-            .children
-            .iter()
-            .position(|c| *c == self.selected && c.is_some())
-        {
-            self.scroll.scroll_to_item(ix);
-        }
-    }
-
-    /// Moves the selection `delta` cards down (up if negative).
+    /// Moves the selection `delta` rows down (up if negative).
     fn select_relative(&mut self, delta: isize, cx: &mut Context<Self>) {
         let shown = self.shown(cx);
         if shown.is_empty() {
@@ -402,13 +427,14 @@ impl InboxItem {
         }
     }
 
-    fn toggle_history(&mut self, cx: &mut Context<Self>) {
-        self.history_open = !self.history_open;
+    /// Shows every item, or only what waits on you.
+    fn set_history(&mut self, open: bool, cx: &mut Context<Self>) {
+        self.history_open = open;
         self.sync(cx);
         cx.notify();
     }
 
-    /// Answers card `id` with `decision`, as the TUI's `^Y`/`^A`/`^N`:
+    /// Answers item `id` with `decision`, as the TUI's `^Y`/`^A`/`^N`:
     /// says why when it cannot be answered so (a question wants its
     /// answer; history is not waiting).
     fn answer(&mut self, id: u64, decision: Decision, cx: &mut Context<Self>) {
@@ -422,7 +448,7 @@ impl InboxItem {
             });
     }
 
-    /// Answers the selected card, or says nothing waits.
+    /// Answers the selected item, or says nothing waits.
     fn answer_selected(&mut self, decision: Decision, cx: &mut Context<Self>) {
         match self.selected {
             Some(id) => self.answer(id, decision, cx),
@@ -456,27 +482,76 @@ impl InboxItem {
         self.fleet.update(cx, |fleet, cx| fleet.run(sent, cx));
     }
 
-    /// Enter: answers a waiting question, opens or folds a history card,
-    /// and on a request says which keys answer it.
-    fn confirm(&mut self, cx: &mut Context<Self>) {
-        let Some(item) = self.selected.and_then(|id| self.item(id, cx)) else {
+    /// Sends what was typed in item `id`'s reply field: while the request
+    /// waits, a deny with that reason (what the agent reads instead of a
+    /// bare "denied"); once it does not, a message to its agent.
+    fn send_reply(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(item) = self.item(id, cx) else { return };
+        let Some(field) = self.replies.get(&(id, item.waiting)) else {
             return;
         };
-        if !item.waiting {
-            self.toggle_opened(item.id, cx);
-        } else if item.kind == InboxKind::Question {
-            self.submit(item.id, cx);
-        } else {
-            let how = "allow (ctrl-y), always allow (ctrl-a) or deny (ctrl-n)";
-            self.fleet
-                .update(cx, |fleet, cx| fleet.show(how.into(), false, cx));
+        let text = field.input.read(cx).text().trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        let input = field.input.clone();
+        let sent = self.fleet.update(cx, |fleet, cx| {
+            if item.waiting {
+                match fleet.store.deny_with(&item, &text) {
+                    Ok((req, ok)) => {
+                        fleet.request(req, ok, cx);
+                        true
+                    }
+                    Err(why) => {
+                        fleet.show(why, true, cx);
+                        false
+                    }
+                }
+            } else {
+                match fleet.store.agents.get(&item.agent) {
+                    Some(agent) => {
+                        let cmd = command::message_to(agent, text.clone());
+                        fleet.run(cmd, cx);
+                        true
+                    }
+                    None => {
+                        fleet.show("that agent has left the fleet".into(), true, cx);
+                        false
+                    }
+                }
+            }
+        });
+        if sent {
+            input.update(cx, |input, cx| input.set_text("", cx));
         }
     }
 
-    fn toggle_opened(&mut self, id: u64, cx: &mut Context<Self>) {
-        if !self.opened.remove(&id) {
-            self.opened.insert(id);
+    /// Enter: answers a waiting question, and on anything else gives the
+    /// keyboard to its reply field.
+    fn confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(item) = self.selected.and_then(|id| self.item(id, cx)) else {
+            return;
+        };
+        if item.waiting && item.kind == InboxKind::Question {
+            self.submit(item.id, cx);
+        } else {
+            self.focus_reply(window, cx);
         }
+    }
+
+    /// `r`: the keyboard to the selected item's field: the answer field of
+    /// a waiting question, else its reply field.
+    fn focus_reply(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(item) = self.selected.and_then(|id| self.item(id, cx)) else {
+            return;
+        };
+        let input = if item.waiting && item.kind == InboxKind::Question {
+            self.answer_field(item.id, window, cx)
+        } else {
+            self.reply_field(&item, window, cx)
+        };
+        let focus = input.focus_handle(cx);
+        window.focus(&focus, cx);
         cx.notify();
     }
 
@@ -534,6 +609,48 @@ impl InboxItem {
         input
     }
 
+    /// The reply field of `item`: a reason to deny it with while it waits,
+    /// a message to its agent once it does not.
+    fn reply_field(
+        &mut self,
+        item: &core::InboxItem,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<TextInput> {
+        let key = (item.id, item.waiting);
+        if let Some(field) = self.replies.get(&key) {
+            return field.input.clone();
+        }
+        let name = self
+            .fleet
+            .read(cx)
+            .store
+            .agents
+            .get(&item.agent)
+            .map(|a| a.name.clone())
+            .unwrap_or_else(|| "the agent".into());
+        let placeholder = if item.waiting {
+            format!("Deny, telling {name} why or what to do instead…")
+        } else {
+            format!("Message {name}…")
+        };
+        let input = cx.new(|cx| TextInput::new(window, cx).with_placeholder(placeholder));
+        let id = item.id;
+        let subscription = cx.subscribe(&input, move |this, _, event: &InputEvent, cx| {
+            if *event == InputEvent::Submitted {
+                this.send_reply(id, cx);
+            }
+        });
+        self.replies.insert(
+            key,
+            AnswerField {
+                input: input.clone(),
+                _subscription: subscription,
+            },
+        );
+        input
+    }
+
     fn render_empty(&self, cx: &App) -> Div {
         let fleet = self.fleet.read(cx);
         v_flex()
@@ -549,32 +666,143 @@ impl InboxItem {
             .child(Label::new("Inbox zero. Nothing needs you.").color(Color::Muted))
     }
 
-    /// A card: who asks and what, the detail, and the answers while it
-    /// waits on you.
+    /// A row's cells: who, what kind, what it asks, how long ago.
+    fn render_cells(&self, ix: usize, cx: &App) -> Vec<AnyElement> {
+        let fleet = self.fleet.read(cx);
+        let Some(item) = self
+            .rows
+            .get(ix)
+            .and_then(|id| fleet.store.inbox.iter().find(|i| i.id == *id))
+        else {
+            return (0..COLS).map(|_| gpui::Empty.into_any_element()).collect();
+        };
+        let agent = fleet.store.agents.get(&item.agent);
+        let name = agent
+            .map(|a| a.name.clone())
+            .unwrap_or_else(|| item.agent.chars().take(8).collect());
+        let hue = themes::agent_color(&item.agent, cx).cursor;
+        let text = if item.waiting {
+            Color::Default
+        } else {
+            Color::Muted
+        };
+        vec![
+            h_flex()
+                .gap_1p5()
+                .min_w_0()
+                .overflow_hidden()
+                .children(agent.map(|a| {
+                    Critter::agent(a, fleet.tick(), cx)
+                        .size(px(16.))
+                        .animate(&self.animation)
+                }))
+                .child(
+                    Label::new(name)
+                        .size(LabelSize::Small)
+                        .color(Color::Custom(if item.waiting { hue } else { hue.opacity(0.7) }))
+                        .truncate(),
+                )
+                .into_any_element(),
+            kind_chip(item, cx).into_any_element(),
+            Label::new(item.summary.lines().next().unwrap_or_default().to_string())
+                .size(LabelSize::Small)
+                .color(text)
+                .truncate()
+                .into_any_element(),
+            Label::new(age(item.created))
+                .size(LabelSize::Small)
+                .color(Color::Muted)
+                .into_any_element(),
+        ]
+    }
+
+    /// A row's frame: the selection, and the click that selects (a double
+    /// click opens the agent's terminal).
+    fn render_row(
+        &self,
+        ix: usize,
+        row: Stateful<Div>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(&id) = self.rows.get(ix) else {
+            return row.into_any_element();
+        };
+        let selected = self.selected == Some(id);
+        let focused = self.focus_handle.is_focused(window);
+        let colors = cx.theme().colors();
+        let agent = self.item(id, cx).map(|i| i.agent).unwrap_or_default();
+        let fleet = self.fleet.clone();
+        row.debug_selector(move || format!("INBOX-ROW-{id}"))
+            .border_l_2()
+            .border_color(if selected && focused {
+                colors.border_focused
+            } else {
+                gpui::transparent_black()
+            })
+            .when(selected, |row| row.bg(colors.ghost_element_selected))
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                window.focus(&this.focus_handle, cx);
+                this.select(id, cx);
+                if event.click_count() == 2 {
+                    fleet.update(cx, |fleet, cx| fleet.select(&agent, cx));
+                    window.dispatch_action(OpenTerminal.boxed_clone(), cx);
+                }
+            }))
+            .into_any_element()
+    }
+
+    /// Waiting / All, with their counts.
+    fn render_filter(&self, waiting: usize, all: usize, cx: &mut Context<Self>) -> AnyElement {
+        let focus = self.focus_handle.clone();
+        let filter = |id: &'static str, label: String, on: bool, show_all: bool, cx: &mut Context<Self>| {
+            Button::new(id, label)
+                .label_size(LabelSize::Small)
+                .toggle_state(on)
+                .on_click(cx.listener(move |this, _, _, cx| this.set_history(show_all, cx)))
+        };
+        h_flex()
+            .gap_0p5()
+            .child(filter(
+                "inbox-filter-waiting",
+                format!("Waiting {waiting}"),
+                !self.history_open,
+                false,
+                cx,
+            ))
+            .child(
+                filter(
+                    "inbox-filter-all",
+                    format!("All {all}"),
+                    self.history_open,
+                    true,
+                    cx,
+                )
+                .tooltip(move |_, cx| Tooltip::for_action_in("Show every item", &ToggleHistory, &focus, cx)),
+            )
+            .into_any_element()
+    }
+
+    /// The selected item in full: who asks and what, the detail, and the
+    /// answers while it waits on you.
     fn render_card(
         &mut self,
         item: &core::InboxItem,
-        selected: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let id = item.id;
-        let focused = self.focus_handle.contains_focused(window, cx);
         let colors = cx.theme().colors();
-        let border = if selected {
-            if focused {
-                colors.border_focused
-            } else {
-                colors.border_selected
-            }
-        } else {
-            colors.border.opacity(0.8)
-        };
         // Zed's tool cards: a faint header, the editor's background.
         let header_bg = colors
             .element_background
             .blend(colors.editor_foreground.opacity(0.025));
-        let (rule, background) = (colors.border.opacity(0.8), colors.editor_background);
+        let (rule, background, border, selected_border) = (
+            colors.border.opacity(0.8),
+            colors.editor_background,
+            colors.border_variant,
+            colors.border_selected,
+        );
         let fleet = self.fleet.read(cx);
         let agent = fleet.store.agents.get(&item.agent);
         let critter = agent.map(|a| {
@@ -585,9 +813,8 @@ impl InboxItem {
         let name = agent
             .map(|a| a.name.clone())
             .unwrap_or_else(|| item.agent.chars().take(8).collect());
+        let role = agent.and_then(|a| a.role.clone());
         let hue = themes::agent_color(&item.agent, cx).cursor;
-        let created = item.created;
-        let history = !item.waiting;
 
         let header = h_flex()
             .gap_2()
@@ -600,21 +827,14 @@ impl InboxItem {
                     .weight(FontWeight::SEMIBOLD)
                     .color(Color::Custom(hue)),
             )
+            .children(role.map(|r| Label::new(r).size(LabelSize::Small).color(Color::Muted)))
             .child(kind_chip(item, cx))
             .child(div().flex_1())
             .child(
-                Label::new(format!("{} ago", age(created)))
+                Label::new(format!("{} ago", age(item.created)))
                     .size(LabelSize::XSmall)
                     .color(Color::Muted),
-            )
-            .when(history, |el| {
-                el.child(
-                    Disclosure::new(("inbox-card-fold", id), true)
-                        .opened_icon(IconName::ChevronUp)
-                        .closed_icon(IconName::ChevronDown)
-                        .on_click(cx.listener(move |this, _, _, cx| this.toggle_opened(id, cx))),
-                )
-            });
+            );
 
         let summary = div().px_2().py_1p5().child(Label::new(item.summary.clone()));
         let lines = detail_lines(item.kind, &item.detail);
@@ -636,52 +856,80 @@ impl InboxItem {
                 )
         });
 
-        let footer = if item.waiting && item.kind == InboxKind::Question {
-            Some(self.render_question(item, selected, window, cx))
+        let answers = if item.waiting && item.kind == InboxKind::Question {
+            Some(self.render_question(item, true, window, cx))
         } else if item.waiting {
-            Some(self.render_answers(item, selected, cx))
-        } else if item.kind == InboxKind::Question {
-            Some(
-                div()
-                    .px_2()
-                    .py_1p5()
-                    .border_t_1()
-                    .border_color(rule)
-                    .child(
-                        Label::new("A message for you: answer it from Comms")
-                            .size(LabelSize::Small)
-                            .color(Color::Muted),
-                    )
-                    .into_any_element(),
-            )
+            Some(self.render_answers(item, true, cx))
         } else {
             None
         };
+        // Your words for the agent: a reason to deny with while it waits
+        // (questions have their own answer field), a message after.
+        let reply = (!(item.waiting && item.kind == InboxKind::Question)).then(|| {
+            let input = self.reply_field(item, window, cx);
+            let waiting = item.waiting;
+            let focus = self.focus_handle.clone();
+            h_flex()
+                .p_2()
+                .gap_2()
+                .border_t_1()
+                .border_color(rule)
+                .child(
+                    Icon::new(if waiting {
+                        IconName::Close
+                    } else {
+                        IconName::Envelope
+                    })
+                    .size(IconSize::Small)
+                    .color(if waiting { Color::Error } else { Color::Muted }),
+                )
+                .child(
+                    div()
+                        .debug_selector(move || format!("INBOX-REPLY-{id}"))
+                        .flex_1()
+                        .min_w_0()
+                        .px_2()
+                        .py_1()
+                        .rounded_sm()
+                        .border_1()
+                        .border_color(border)
+                        .bg(background)
+                        .child(input),
+                )
+                .child(
+                    Button::new(("inbox-send-reply", id), if waiting { "Deny" } else { "Send" })
+                        .label_size(LabelSize::Small)
+                        .key_binding(
+                            KeyBinding::for_action_in(&ReplyToAgent, &focus, cx).size(rems_from_px(12_f32)),
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| this.send_reply(id, cx))),
+                )
+        });
 
         v_flex()
             .id(("inbox-card", id))
             .debug_selector(move || format!("INBOX-CARD-{id}"))
             .w_full()
-            // In the scrolling column a card keeps its height: let to
-            // shrink, cards that do not all fit were squeezed until
-            // their detail and buttons were cut off.
+            // In the scrolling pane a card keeps its height: let to
+            // shrink, it was squeezed until its detail and buttons were
+            // cut off.
             .flex_none()
             .rounded_md()
             .border_1()
             .when(item.kind == InboxKind::Failed, |el| el.border_dashed())
-            .border_color(border)
+            .border_color(selected_border)
             .bg(background)
             .overflow_hidden()
-            .on_click(cx.listener(move |this, _, _, cx| this.select(id, cx)))
             .child(header)
             .child(summary)
             .children(detail)
-            .children(footer)
+            .children(answers)
+            .children(reply)
             .into_any_element()
     }
 
-    /// Allow, Always and Deny, with their keys on the selected card, and a
-    /// way to the agent's own terminal.
+    /// Allow, Always and Deny, with their keys, and a way to the agent's
+    /// own terminal.
     fn render_answers(&self, item: &core::InboxItem, selected: bool, cx: &mut Context<Self>) -> AnyElement {
         let id = item.id;
         let focus = self.focus_handle.clone();
@@ -853,79 +1101,6 @@ impl InboxItem {
             )
             .into_any_element()
     }
-
-    /// An answered item, folded to one line.
-    fn render_row(&self, item: &core::InboxItem, selected: bool, cx: &mut Context<Self>) -> AnyElement {
-        let id = item.id;
-        let store = &self.fleet.read(cx).store;
-        let name = store
-            .agents
-            .get(&item.agent)
-            .map(|a| a.name.clone())
-            .unwrap_or_else(|| item.agent.chars().take(8).collect());
-        let hue = themes::agent_color(&item.agent, cx).cursor;
-        let (mark, color) = if item.kind == InboxKind::Failed {
-            (IconName::XCircle, Color::Error)
-        } else {
-            (IconName::Check, Color::Muted)
-        };
-        div()
-            .debug_selector(move || format!("INBOX-CARD-{id}"))
-            .flex_none()
-            .child(
-                ListItem::new(("inbox-row", id))
-                    .spacing(ListItemSpacing::Sparse)
-                    .rounded()
-                    .toggle_state(selected)
-                    .start_slot(Icon::new(mark).size(IconSize::Small).color(color))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.select(id, cx);
-                        this.toggle_opened(id, cx);
-                    }))
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .min_w_0()
-                            .child(kind_chip(item, cx))
-                            .child(Label::new(name).size(LabelSize::Small).color(Color::Custom(hue)))
-                            .child(
-                                Label::new(item.summary.clone())
-                                    .size(LabelSize::Small)
-                                    .color(Color::Muted)
-                                    .truncate(),
-                            )
-                            .child(div().flex_1())
-                            .child(
-                                Label::new(age(item.created))
-                                    .size(LabelSize::XSmall)
-                                    .color(Color::Muted),
-                            ),
-                    ),
-            )
-            .into_any_element()
-    }
-
-    fn render_history_header(&self, count: usize, cx: &mut Context<Self>) -> AnyElement {
-        let open = self.history_open;
-        h_flex()
-            .id("inbox-history")
-            .flex_none()
-            .gap_1()
-            .pt_1()
-            .cursor_pointer()
-            .on_click(cx.listener(|this, _, _, cx| this.toggle_history(cx)))
-            .child(
-                Disclosure::new("inbox-history-disclosure", open)
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_history(cx))),
-            )
-            .child(Label::new("History").size(LabelSize::Small).color(Color::Muted))
-            .child(
-                Label::new(count.to_string())
-                    .size(LabelSize::Small)
-                    .color(Color::Disabled),
-            )
-            .into_any_element()
-    }
 }
 
 /// A button opening the asking agent's terminal: you can always answer
@@ -1032,50 +1207,66 @@ impl Item for InboxItem {
 impl Render for InboxItem {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let inbox = self.fleet.read(cx).store.inbox.clone();
-        let order = order(&inbox);
-        let mut children: Vec<Option<u64>> = Vec::new();
-        let mut cards: Vec<AnyElement> = Vec::new();
-        for &i in &order.waiting {
-            let item = &inbox[i];
-            let selected = self.selected == Some(item.id);
-            cards.push(self.render_card(item, selected, window, cx));
-            children.push(Some(item.id));
-        }
-        if order.waiting.is_empty() && !order.history.is_empty() {
-            cards.push(
-                Label::new("Nothing is waiting on you.")
-                    .color(Color::Muted)
-                    .into_any_element(),
-            );
-            children.push(None);
-        }
-        if !order.history.is_empty() {
-            cards.push(self.render_history_header(order.history.len(), cx));
-            children.push(None);
-            if self.history_open {
-                for &i in &order.history {
-                    let item = &inbox[i];
-                    let selected = self.selected == Some(item.id);
-                    cards.push(if self.opened.contains(&item.id) {
-                        self.render_card(item, selected, window, cx)
-                    } else {
-                        self.render_row(item, selected, cx)
-                    });
-                    children.push(Some(item.id));
-                }
-            }
-        }
-        self.children = children;
-        let waiting = order.waiting.len();
+        self.rows = self.shown(cx);
+        let waiting = inbox.iter().filter(|i| i.waiting).count();
+        let filter = self.render_filter(waiting, inbox.len(), cx);
         let colors = cx.theme().colors();
         let (background, rule) = (colors.editor_background, colors.border_variant);
+        let selected = self
+            .selected
+            .and_then(|id| inbox.iter().find(|i| i.id == id))
+            .cloned();
+        let card = selected.map(|item| self.render_card(&item, window, cx));
+        let history_open = self.history_open;
+
+        let table = Table::new(COLS)
+            .interactable(&self.table)
+            .hide_row_borders()
+            .width_config(ColumnWidthConfig::explicit(vec![
+                relative(0.22),
+                relative(0.13),
+                relative(0.55),
+                relative(0.10),
+            ]))
+            .header(vec!["Agent", "Kind", "Request", "Age"])
+            .uniform_list(
+                "inbox-table",
+                self.rows.len(),
+                cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
+                    range.map(|ix| this.render_cells(ix, cx)).collect()
+                }),
+            )
+            .map_row(
+                cx.processor(|this, (ix, row): (usize, Stateful<Div>), window, cx| {
+                    this.render_row(ix, row, window, cx)
+                }),
+            )
+            .empty_table_callback(move |_, _| {
+                let text = if history_open {
+                    "Nothing here yet."
+                } else {
+                    "Nothing is waiting on you. h shows every item."
+                };
+                div()
+                    .p_3()
+                    .child(Label::new(text).size(LabelSize::Small).color(Color::Muted))
+                    .into_any_element()
+            });
+
+        // `cards` only while the Inbox itself has the keyboard: its bare
+        // letters must not fire while you type in one of its fields.
+        let mut context = KeyContext::new_with_defaults();
+        context.add("Inbox");
+        if self.focus_handle.is_focused(window) {
+            context.add("cards");
+        }
 
         v_flex()
             .id("inbox")
-            .key_context("Inbox")
+            .key_context(context)
             .track_focus(&self.focus_handle)
             // A click anywhere in it gives it the keyboard, so its keys
-            // answer the card clicked (a field keeps the focus it took).
+            // answer the item selected (a field keeps the focus it took).
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| {
@@ -1090,14 +1281,19 @@ impl Render for InboxItem {
             .on_action(cx.listener(|this, _: &menu::SelectPrevious, _, cx| this.select_relative(-1, cx)))
             .on_action(cx.listener(|this, _: &menu::SelectFirst, _, cx| this.select_edge(false, cx)))
             .on_action(cx.listener(|this, _: &menu::SelectLast, _, cx| this.select_edge(true, cx)))
-            // Escape in an answer field gives the keyboard back to the cards.
+            // Escape in a field gives the keyboard back to the table.
             .on_action(cx.listener(|this, _: &menu::Cancel, window, cx| {
                 window.focus(&this.focus_handle, cx);
             }))
             .on_action(cx.listener(|this, _: &Allow, _, cx| this.answer_selected(Decision::Allow, cx)))
             .on_action(cx.listener(|this, _: &Always, _, cx| this.answer_selected(Decision::Always, cx)))
             .on_action(cx.listener(|this, _: &Deny, _, cx| this.answer_selected(Decision::Deny, cx)))
-            .on_action(cx.listener(|this, _: &Answer, _, cx| this.confirm(cx)))
+            .on_action(cx.listener(|this, _: &Answer, window, cx| this.confirm(window, cx)))
+            .on_action(cx.listener(|this, _: &ReplyToAgent, window, cx| this.focus_reply(window, cx)))
+            .on_action(cx.listener(|this, _: &ToggleHistory, _, cx| {
+                let open = !this.history_open;
+                this.set_history(open, cx)
+            }))
             .on_key_down(cx.listener(Self::on_key_down))
             .child(
                 h_flex()
@@ -1124,24 +1320,33 @@ impl Render for InboxItem {
                         } else {
                             Color::Muted
                         }),
-                    ),
+                    )
+                    .child(div().flex_1())
+                    .child(filter),
             )
             .map(|el| {
                 if inbox.is_empty() {
-                    el.child(self.render_empty(cx))
-                } else {
-                    el.child(
-                        v_flex()
-                            .id("inbox-cards")
-                            .track_scroll(&self.scroll)
-                            .overflow_y_scroll()
-                            .flex_1()
-                            .min_h_0()
-                            .p_3()
-                            .gap_3()
-                            .children(cards),
-                    )
+                    return el.child(self.render_empty(cx));
                 }
+                // The table above, the selected item in full below.
+                el.child(div().flex_1().min_h(rems(6.)).child(table)).child(
+                    v_flex()
+                        .id("inbox-selected")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .p_3()
+                        .border_t_1()
+                        .border_color(rule)
+                        .map(|el| match card {
+                            Some(card) => el.child(card),
+                            None => el.child(
+                                Label::new("Select a request to read it and answer.")
+                                    .size(LabelSize::Small)
+                                    .color(Color::Muted),
+                            ),
+                        }),
+                )
             })
     }
 }
@@ -1277,7 +1482,7 @@ mod tests {
     fn answers(sent: &[Request]) -> Vec<(u64, Decision)> {
         sent.iter()
             .filter_map(|r| match r {
-                Request::Answer { item, decision } => Some((*item, *decision)),
+                Request::Answer { item, decision, .. } => Some((*item, *decision)),
                 _ => None,
             })
             .collect()
@@ -1444,8 +1649,8 @@ mod tests {
         arrives(&fleet, asking(901, &lead, InboxKind::Permission, &[], false), cx);
         arrives(&fleet, asking(902, &lead, InboxKind::Permission, &[], false), cx);
         assert_eq!(inbox.read_with(cx, |i, _| i.selected()), Some(901));
-        let card = cx.debug_bounds("INBOX-CARD-902").expect("the card is drawn");
-        cx.simulate_click(card.center(), Modifiers::none());
+        let row = cx.debug_bounds("INBOX-ROW-902").expect("the row is drawn");
+        cx.simulate_click(row.center(), Modifiers::none());
         assert_eq!(inbox.read_with(cx, |i, _| i.selected()), Some(902));
         cx.simulate_keystrokes("ctrl-y");
         assert_eq!(answers(&take_sent(&fleet, cx)), [(902, Decision::Allow)]);
@@ -1471,14 +1676,18 @@ mod tests {
             cx.simulate_click(bounds.center(), Modifiers::none());
         };
 
-        // A button on a card that is not selected answers that card, not
-        // the selected one, and selects it.
+        // Only the selected item shows in full: its row first, then its
+        // buttons answer it.
+        assert!(cx.debug_bounds("INBOX-DENY-902").is_none());
+        click("INBOX-ROW-902".into(), cx);
+        assert_eq!(inbox.read_with(cx, |i, _| i.selected()), Some(902));
         click("INBOX-DENY-902".into(), cx);
         assert_eq!(answers(&take_sent(&fleet, cx)), [(902, Decision::Deny)]);
-        assert_eq!(inbox.read_with(cx, |i, _| i.selected()), Some(902));
+        click("INBOX-ROW-901".into(), cx);
         click("INBOX-ALWAYS-901".into(), cx);
         assert_eq!(answers(&take_sent(&fleet, cx)), [(901, Decision::Always)]);
         assert_eq!(inbox.read_with(cx, |i, _| i.selected()), Some(901));
+        click(format!("INBOX-ROW-{first}"), cx);
 
         // Allow on the demo's own request: the demo resolves it, and its
         // buttons go with the wait.
@@ -1599,7 +1808,9 @@ mod tests {
         });
 
         // Answered from its field, the keyboard goes back to the cards
-        // when the field goes.
+        // when the field goes. Only the selected item is drawn in full.
+        inbox.update(cx, |i, cx| i.select(2000, cx));
+        cx.run_until_parked();
         let field = inbox.read_with(cx, |i, _| i.answer_input(2000)).expect("drawn");
         cx.update(|window, cx| window.focus(&field.focus_handle(cx), cx));
         cx.simulate_input("both");
@@ -1630,8 +1841,8 @@ mod tests {
         cx.update(|window, cx| window.focus(&panel, cx));
         cx.run_until_parked();
         take_sent(&fleet, cx);
-        let card = cx.debug_bounds("INBOX-CARD-902").expect("the card is drawn");
-        cx.simulate_click(card.center(), Modifiers::none());
+        let row = cx.debug_bounds("INBOX-ROW-902").expect("the row is drawn");
+        cx.simulate_click(row.center(), Modifiers::none());
         assert_eq!(inbox.read_with(cx, |i, _| i.selected()), Some(902));
         let focus = inbox.read_with(cx, |i, cx| i.focus_handle(cx));
         assert!(cx.update(|window, _| focus.is_focused(window)));
@@ -1666,7 +1877,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn history_folds_away_and_opens(cx: &mut TestAppContext) {
+    async fn the_filter_shows_what_waits_or_everything(cx: &mut TestAppContext) {
         init_test(cx);
         let (w, cx) = cx.add_window_view(|window, cx| {
             let fleet = cx.new(FleetModel::demo);
@@ -1686,24 +1897,85 @@ mod tests {
             assert!(!i.history_open());
             assert_eq!(i.shown(cx), waiting);
         });
-        inbox.update(cx, |i, cx| i.toggle_history(cx));
+
+        // h shows everything: the history follows, newest first.
+        let focus = inbox.read_with(cx, |i, cx| i.focus_handle(cx));
+        cx.update(|window, cx| window.focus(&focus, cx));
+        cx.simulate_keystrokes("h");
         inbox.read_with(cx, |i, cx| {
+            assert!(i.history_open());
             assert_eq!(i.shown(cx), [waiting.clone(), history.clone()].concat());
         });
         cx.run_until_parked();
+
+        // A history item shows in full below, and enter goes to its field,
+        // which messages its agent.
+        inbox.update(cx, |i, cx| i.select(history[0], cx));
+        cx.run_until_parked();
         assert!(
-            cx.debug_bounds("INBOX-CARD-1").is_some(),
-            "history rows are drawn"
+            cx.debug_bounds(format!("INBOX-CARD-{}", history[0]).leak())
+                .is_some()
+        );
+        take_sent(&fleet, cx);
+        cx.simulate_keystrokes("enter");
+        let field = inbox
+            .read_with(cx, |i, cx| i.reply_input(history[0], cx))
+            .expect("the reply field is drawn");
+        assert!(cx.update(|window, cx| field.focus_handle(cx).is_focused(window)));
+        cx.simulate_input("thanks, now the changelog");
+        cx.simulate_keystrokes("enter");
+        let agent = fleet.read_with(cx, |f, _| {
+            f.store
+                .inbox
+                .iter()
+                .find(|i| i.id == history[0])
+                .unwrap()
+                .agent
+                .clone()
+        });
+        let sent = take_sent(&fleet, cx);
+        assert!(
+            sent.iter().any(|r| matches!(r,
+                Request::Message { to, body, .. } if *to == [agent.clone()] && body == "thanks, now the changelog")),
+            "{sent:?}"
+        );
+        assert_eq!(
+            field.read_with(cx, |f, _| f.text().to_string()),
+            "",
+            "sent, the field empties"
         );
 
-        // Enter opens a history card's detail and folds it again.
-        inbox.update(cx, |i, cx| i.select(history[0], cx));
-        let focus = inbox.read_with(cx, |i, cx| i.focus_handle(cx));
+        // h again: only what waits.
         cx.update(|window, cx| window.focus(&focus, cx));
+        cx.simulate_keystrokes("h");
+        inbox.read_with(cx, |i, cx| assert_eq!(i.shown(cx), waiting));
+    }
+
+    #[gpui::test]
+    async fn a_waiting_request_can_be_denied_with_a_reason(cx: &mut TestAppContext) {
+        let (w, cx) = demo(cx);
+        let fleet = fleet(&w, cx);
+        let lead = seat(&fleet, "orch-lead@docs", cx);
+        arrives(&fleet, asking(950, &lead, InboxKind::Permission, &[], false), cx);
+        let inbox = w.update_in(cx, |w, window, cx| w.open_inbox(Some(950), window, cx));
+        cx.run_until_parked();
+        take_sent(&fleet, cx);
+
+        // r writes the reason, enter denies with it.
+        cx.simulate_keystrokes("r");
+        cx.simulate_input("use cargo nextest instead");
         cx.simulate_keystrokes("enter");
-        assert!(inbox.read_with(cx, |i, _| i.opened.contains(&history[0])));
+        let sent = take_sent(&fleet, cx);
+        assert!(
+            sent.iter().any(|r| matches!(r,
+                Request::Answer { item: 950, decision: Decision::Deny, message: Some(m) }
+                    if m == "use cargo nextest instead")),
+            "{sent:?}"
+        );
+        // An empty field sends nothing.
+        inbox.update(cx, |i, cx| i.select(950, cx));
         cx.simulate_keystrokes("enter");
-        assert!(!inbox.read_with(cx, |i, _| i.opened.contains(&history[0])));
+        assert!(answers(&take_sent(&fleet, cx)).is_empty());
     }
 
     #[gpui::test]
