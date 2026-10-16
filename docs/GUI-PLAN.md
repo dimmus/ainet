@@ -583,6 +583,36 @@ packages that the GUI's tree links, the toolchain named by
 `just check-all` runs both gates. cargo-deny was left out: no config for
 the two licences could be checked here.
 
+### Phase 9 — OpenRig-style views (asked for after first use, 2026-10-16)
+
+From trying the app on a real display:
+
+1. **Terminals grid.** Every live agent's terminal at once, in rows and
+   columns, as one tab (the TUI's `^G` view), rather than as pane splits:
+   tiles reuse `TerminalItem` (header, live screen, typing with messages
+   held), columns from `terminal::grid_cols` with `+ - =` like the TUI,
+   a rig filter (`ctrl-r`), click a tile to type into it, zoom one tile.
+2. **Command line.** OpenRig's `cmd ▸` line, always there: `/commands`,
+   `@Name message`, plain text to the selected agent, Tab completion,
+   through the shared command language (`commands::run`,
+   `command::message`); a key to reach it from anywhere but a terminal.
+3. **Topology view.** OpenRig's TUI topology: an explorer tree (host →
+   rigs → pods with seat counts) and, for the chosen rig, a table grouped
+   by pod: seat, runtime, model, context, state, queue count, work item,
+   what it is doing now; a summary line (seats, working, needing you, open
+   rows); filter (`/`); sub-views Table, Recent (queue changes from the
+   journal), Overview, Graph (the Map), Health.
+4. **Conversation view.** Each agent's session as a readable chat rather
+   than a raw terminal, side by side like OpenRig's: your prompts as
+   blocks, the agent's replies, tool calls with an output excerpt
+   (ainet/rig commands highlighted), and a prompt box under each that
+   messages the agent; built from Claude Code's transcript (Codex as far
+   as its transcript allows).
+
+Done in this phase so far: the Inbox as a table above the selected
+request, with a reply field that denies with a reason (a new optional
+`message` on `Request::Answer`) or messages the agent.
+
 ## 6. Risks
 
 | Risk | Mitigation |
