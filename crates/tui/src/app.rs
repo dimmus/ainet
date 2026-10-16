@@ -693,11 +693,8 @@ impl App {
             KeyCode::Char('z') if ctrl && self.tab == Tab::Terminals => self.grid.zoom = !self.grid.zoom,
             KeyCode::Char('r') if ctrl && self.tab == Tab::Terminals => {
                 // Cycle the rig filter: all → each rig → all.
-                let names: Vec<String> = self.store.rigs.keys().cloned().collect();
-                self.grid.rig = match &self.grid.rig {
-                    None => names.first().cloned(),
-                    Some(r) => names.iter().skip_while(|n| *n != r).nth(1).cloned(),
-                };
+                let names = self.store.rigs.keys().map(String::as_str);
+                self.grid.rig = terminal::next_rig(names, self.grid.rig.as_deref());
                 self.dirty_visible();
             }
             KeyCode::Char('u') if ctrl => {
@@ -723,7 +720,7 @@ impl App {
                     .grid
                     .cols
                     .unwrap_or_else(|| term::grid_cols(n as usize, self.areas.body, None) as u16);
-                self.grid.cols = Some((cur + 1).min(n));
+                self.grid.cols = Some(terminal::more_cols(cur.into(), n.into()) as u16);
             }
             KeyCode::Char('-') if self.input.is_empty() && self.tab == Tab::Terminals => {
                 let n = self.grid_ids().len().max(1);
@@ -731,7 +728,7 @@ impl App {
                     .grid
                     .cols
                     .unwrap_or_else(|| term::grid_cols(n, self.areas.body, None) as u16);
-                self.grid.cols = Some(cur.saturating_sub(1).max(1));
+                self.grid.cols = Some(terminal::fewer_cols(cur.into()) as u16);
             }
             KeyCode::Char('=') if self.input.is_empty() && self.tab == Tab::Terminals => {
                 self.grid.cols = None

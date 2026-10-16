@@ -250,6 +250,52 @@ pub fn grid_cols(n: usize, width: f64, height: f64, fixed: Option<usize>) -> usi
         .unwrap_or(1)
 }
 
+/// One column more than `current` (`+` in the Terminals grid), at most one
+/// per tile of the `n`.
+pub fn more_cols(current: usize, n: usize) -> usize {
+    (current + 1).min(n.max(1))
+}
+
+/// One column fewer than `current` (`-`), at least one.
+pub fn fewer_cols(current: usize) -> usize {
+    current.saturating_sub(1).max(1)
+}
+
+/// The Terminals grid's rig filter after `current` (`^R`): all, then each
+/// of `rigs` in turn, then all again. A rig no longer there goes back to
+/// all.
+pub fn next_rig<'a>(rigs: impl IntoIterator<Item = &'a str>, current: Option<&str>) -> Option<String> {
+    let mut rigs = rigs.into_iter();
+    match current {
+        None => rigs.next(),
+        Some(r) => rigs.skip_while(|n| *n != r).nth(1),
+    }
+    .map(str::to_string)
+}
+
+/// Where a step of `dx` columns and `dy` rows goes from tile `at` in a
+/// grid of `n` tiles in `cols` columns (rows filled left to right; the
+/// last may be short): `None` past an edge, so the step can leave the
+/// grid. Going down into a short last row lands on its last tile.
+pub fn grid_step(n: usize, cols: usize, at: usize, dx: isize, dy: isize) -> Option<usize> {
+    let cols = cols.max(1);
+    if at >= n {
+        return None;
+    }
+    let rows = n.div_ceil(cols);
+    let (row, col) = ((at / cols) as isize, (at % cols) as isize);
+    let (row, col) = (row + dy, col + dx);
+    if row < 0 || row as usize >= rows || col < 0 || col as usize >= cols {
+        return None;
+    }
+    let row_start = row as usize * cols;
+    let in_row = (n - row_start).min(cols);
+    if dx != 0 && col as usize >= in_row {
+        return None;
+    }
+    Some(row_start + (col as usize).min(in_row - 1))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -365,5 +411,43 @@ mod tests {
         assert_eq!(grid_cols(5, 200., 50., Some(3)), 3);
         assert_eq!(grid_cols(2, 200., 50., Some(9)), 2);
         assert_eq!(grid_cols(1, 200., 50., None), 1);
+    }
+
+    #[test]
+    fn columns_step_within_the_tiles() {
+        assert_eq!(more_cols(2, 5), 3);
+        assert_eq!(more_cols(5, 5), 5);
+        assert_eq!(more_cols(1, 0), 1);
+        assert_eq!(fewer_cols(3), 2);
+        assert_eq!(fewer_cols(1), 1);
+        assert_eq!(fewer_cols(0), 1);
+    }
+
+    #[test]
+    fn the_rig_filter_goes_round() {
+        let rigs = ["docs", "infra"];
+        assert_eq!(next_rig(rigs, None).as_deref(), Some("docs"));
+        assert_eq!(next_rig(rigs, Some("docs")).as_deref(), Some("infra"));
+        assert_eq!(next_rig(rigs, Some("infra")), None);
+        assert_eq!(next_rig(rigs, Some("gone")), None);
+        assert_eq!(next_rig([], None), None);
+    }
+
+    #[test]
+    fn steps_stay_in_the_grid() {
+        // 5 tiles in 3 columns:  0 1 2
+        //                        3 4
+        let step = |at, dx, dy| grid_step(5, 3, at, dx, dy);
+        assert_eq!(step(0, 1, 0), Some(1));
+        assert_eq!(step(0, -1, 0), None);
+        assert_eq!(step(2, 1, 0), None);
+        assert_eq!(step(4, 1, 0), None, "the short row ends");
+        assert_eq!(step(1, 0, 1), Some(4));
+        assert_eq!(step(2, 0, 1), Some(4), "down onto the short row's last");
+        assert_eq!(step(4, 0, -1), Some(1));
+        assert_eq!(step(3, 0, 1), None);
+        assert_eq!(step(0, 0, -1), None);
+        assert_eq!(grid_step(0, 3, 0, 1, 0), None);
+        assert_eq!(grid_step(3, 0, 0, 0, 1), Some(1), "no columns: one");
     }
 }
