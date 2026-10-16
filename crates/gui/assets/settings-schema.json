@@ -755,6 +755,7 @@
       "type": "object",
       "properties": {
         "claude": {
+          "description": "Claude Code seats, in milliseconds.",
           "type": "integer",
           "format": "uint64",
           "minimum": 0,
@@ -762,6 +763,7 @@
           "default": 800
         },
         "codex": {
+          "description": "Codex seats, in milliseconds.",
           "type": "integer",
           "format": "uint64",
           "minimum": 0,
@@ -769,6 +771,7 @@
           "default": 1500
         },
         "shell": {
+          "description": "Shell seats, in milliseconds.",
           "type": "integer",
           "format": "uint64",
           "minimum": 0,

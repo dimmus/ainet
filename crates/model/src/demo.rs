@@ -17,6 +17,8 @@ use ainet_core::{
 
 use crate::link::Listing;
 
+mod settings;
+
 const MIN: i64 = 60_000;
 
 /// Conversation entries made from messages start here, past the script's.
@@ -235,6 +237,9 @@ pub struct Demo {
     /// them, but typing should not look dead.
     typing: std::collections::HashMap<String, String>,
     said: std::collections::HashMap<String, Vec<String>>,
+    /// ainet's own settings, `/always` rules, hooks and paths, pretend
+    /// (the desktop app's demo only).
+    settings: settings::DemoSettings,
 }
 
 impl Default for Demo {
@@ -272,21 +277,23 @@ impl Demo {
     fn full_only(req: &Request) -> bool {
         match req {
             Request::Up(spec) => spec.plan,
-            _ => matches!(
-                req,
-                Request::QueueClaim { .. }
-                    | Request::QueueUnclaim { .. }
-                    | Request::QueueUpdate { .. }
-                    | Request::QueueHandoff { .. }
-                    | Request::QueueBlock { .. }
-                    | Request::QueueShow { .. }
-                    | Request::Transcript { .. }
-                    | Request::Conversation { .. }
-                    | Request::SpecShow { .. }
-                    | Request::Export { .. }
-                    | Request::Specs
-                    | Request::SnapshotList { .. }
-            ),
+            _ => {
+                matches!(
+                    req,
+                    Request::QueueClaim { .. }
+                        | Request::QueueUnclaim { .. }
+                        | Request::QueueUpdate { .. }
+                        | Request::QueueHandoff { .. }
+                        | Request::QueueBlock { .. }
+                        | Request::QueueShow { .. }
+                        | Request::Transcript { .. }
+                        | Request::Conversation { .. }
+                        | Request::SpecShow { .. }
+                        | Request::Export { .. }
+                        | Request::Specs
+                        | Request::SnapshotList { .. }
+                ) || crate::config::is_config(req)
+            }
         }
     }
 
@@ -387,7 +394,16 @@ impl Demo {
                 }
             })
             .collect();
+        let settings = settings::DemoSettings::new(
+            &home,
+            &agents
+                .iter()
+                .take(2)
+                .map(|a| (a.id.clone(), a.cwd.clone()))
+                .collect::<Vec<_>>(),
+        );
         let mut demo = Demo {
+            settings,
             agents,
             rigs,
             inbox: Vec::new(),
@@ -612,6 +628,24 @@ impl Demo {
         self.agents.iter().position(|a| a.id == id)
     }
 
+    /// The answer to a request about ainet itself (settings, `/always`
+    /// rules, hooks, paths); `None` for others.
+    fn respond_config(&mut self, req: &Request) -> Option<Response> {
+        let agents: Vec<(String, String)> = self
+            .agents
+            .iter()
+            .map(|a| (a.id.clone(), a.name.clone()))
+            .collect();
+        let find = move |key: &str| {
+            let key = key.to_lowercase();
+            agents
+                .iter()
+                .find(|(id, name)| *id == key || name.to_lowercase() == key || id.starts_with(&key))
+                .map(|(id, _)| id.clone())
+        };
+        self.settings.respond(req, find)
+    }
+
     /// Advances the simulation one tick (~120 ms).
     pub fn step(&mut self, tick: u64) -> Vec<Event> {
         let mut events = Vec::new();
@@ -711,6 +745,14 @@ impl Demo {
     pub fn handle(&mut self, req: &Request) -> (Vec<Event>, Result<Option<String>, String>) {
         if !self.full && Self::full_only(req) {
             return (vec![], Err(CANNOT.into()));
+        }
+        if let Some(resp) = self.respond_config(req) {
+            return match resp {
+                Response::Error { message } => (vec![], Err(message)),
+                Response::Settings { settings } if settings.changed.is_some() => (vec![], Ok(None)),
+                Response::Text { text } => (vec![], Ok(Some(text))),
+                other => (vec![], Ok(Some(crate::popup::render(&other)))),
+            };
         }
         match req {
             Request::Answer { item, decision, .. } => (self.answer(*item, *decision), Ok(None)),
@@ -985,6 +1027,9 @@ impl Demo {
             return Response::Error {
                 message: CANNOT.into(),
             };
+        }
+        if let Some(resp) = self.respond_config(req) {
+            return resp;
         }
         match req {
             Request::Conversation { .. } if self.old_daemon => Response::Error {

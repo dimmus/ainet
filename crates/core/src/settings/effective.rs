@@ -19,13 +19,94 @@ pub enum Source {
 }
 
 /// One setting as it is in force.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Effective {
     /// Dotted: `messaging.paste_settle_ms`.
     pub key: String,
     pub value: Value,
     pub default: Value,
     pub source: Source,
+    /// When a change to it takes effect.
+    #[serde(default)]
+    pub applies: Applies,
+    /// What it does, from the schema.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+}
+
+/// When a change to a setting takes effect in ainetd.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Applies {
+    /// At once: the daemon (or the console) reads it on each use.
+    #[default]
+    Live,
+    /// For seats and terminals started from then on.
+    NewSeats,
+    /// When ainetd next starts.
+    Restart,
+}
+
+impl Applies {
+    /// In words, after "applies": `now`, `to new seats`, `after a daemon
+    /// restart`.
+    pub fn label(self) -> &'static str {
+        match self {
+            Applies::Live => "now",
+            Applies::NewSeats => "to new seats",
+            Applies::Restart => "after a daemon restart",
+        }
+    }
+}
+
+/// When a change to `key` takes effect: the first rule whose key is
+/// `key` or a group above it.
+const APPLIES: &[(&str, Applies)] = &[
+    // Read by the console and the desktop app each time they need ainetd.
+    ("daemon.autostart", Applies::Live),
+    ("daemon", Applies::Restart),
+    ("runtimes", Applies::NewSeats),
+    // The hold is in force at once, but seats keep the hook timeout they
+    // started with.
+    ("permissions.hold_secs", Applies::NewSeats),
+    ("permissions.spec_policies", Applies::NewSeats),
+    ("messaging.typing_guard", Applies::NewSeats),
+    ("retention.scrollback_lines", Applies::NewSeats),
+];
+
+/// When a change to the setting `key` takes effect.
+pub fn applies(key: &str) -> Applies {
+    APPLIES
+        .iter()
+        .find(|(k, _)| key == *k || key.strip_prefix(k).is_some_and(|rest| rest.starts_with('.')))
+        .map_or(Applies::Live, |(_, a)| *a)
+}
+
+/// Whether setting `key` to `value` lets agents do more without asking
+/// you than ainet's defaults do: a permission mode that loosens, tools
+/// allowed without asking, rules that keep allowing, a spec's policy
+/// applied, or arguments that skip the agent's own checks. Front ends
+/// say so when such a value is set.
+pub fn less_safe(key: &str, value: &Value) -> bool {
+    let last = key.rsplit('.').next().unwrap_or(key);
+    let in_runtime = key.starts_with("runtimes.");
+    match last {
+        "permission_mode" if in_runtime => value
+            .as_str()
+            .and_then(|m| m.parse::<super::PermissionMode>().ok())
+            .is_some_and(super::PermissionMode::loosens),
+        "allowed_tools" if in_runtime => value.as_array().is_some_and(|a| !a.is_empty()),
+        "args" if in_runtime => value.as_array().is_some_and(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .any(|s| s.contains("dangerously") || s == "--yolo")
+        }),
+        _ => match key {
+            "permissions.persist_always" | "permissions.spec_policies" => value == &Value::Bool(true),
+            "permissions.global_rules" => value.as_array().is_some_and(|a| !a.is_empty()),
+            _ => false,
+        },
+    }
 }
 
 /// The environment variables that set a setting, and the setting: they
@@ -76,6 +157,8 @@ pub fn effective(settings: &Settings, raw: &Value, env: &[(String, String, Strin
         out.push(Effective {
             value: at(&value, &key).cloned().unwrap_or(Value::Null),
             default: d.clone(),
+            applies: applies(&key),
+            description: super::schema_walk::description(&key),
             key,
             source,
         });
@@ -115,7 +198,7 @@ fn unknown_in(raw: &Value, default: &Value, key: String, out: &mut Vec<String>) 
 
 /// Calls `f` with each setting's dotted key and default: values that are
 /// not objects, and objects that are empty by default (maps).
-fn leaves(v: &Value, key: String, f: &mut impl FnMut(String, &Value)) {
+pub(super) fn leaves(v: &Value, key: String, f: &mut impl FnMut(String, &Value)) {
     match v {
         Value::Object(map) if !map.is_empty() => {
             for (k, child) in map {
@@ -132,6 +215,6 @@ fn leaves(v: &Value, key: String, f: &mut impl FnMut(String, &Value)) {
 }
 
 /// The value at a dotted key.
-fn at<'a>(v: &'a Value, key: &str) -> Option<&'a Value> {
+pub(super) fn at<'a>(v: &'a Value, key: &str) -> Option<&'a Value> {
     key.split('.').try_fold(v, |v, k| v.get(k))
 }

@@ -1,12 +1,11 @@
 //! `ainet hook`: Claude Code runs it for every hook event.
 
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::ExitCode;
 use std::time::Duration;
 
 use ainet_core::client::Client;
-use ainet_core::settings::Settings;
 use ainet_core::{Request, Response};
 use anyhow::Result;
 use serde_json::Value;
@@ -66,15 +65,6 @@ pub fn prepare(raw: &str, source: Option<String>) -> Option<Value> {
     Some(payload)
 }
 
-/// Claude Code's settings file the hooks go in: `hooks.claude_settings`,
-/// else `settings.json` in `$CLAUDE_CONFIG_DIR` or `~/.claude`.
-fn claude_settings(settings: &Settings) -> PathBuf {
-    match &settings.hooks.claude_settings {
-        Some(p) => ainet_core::paths::expand(p),
-        None => ainet_claude::hooks::settings_path(),
-    }
-}
-
 /// The hook command for this binary: `<path> hook`.
 fn command() -> String {
     std::env::current_exe()
@@ -87,7 +77,7 @@ fn command() -> String {
 /// ainet's hooks in Claude Code's settings. Writing keeps a backup.
 pub fn install_hooks(json: bool, write: bool, remove: bool, status: bool) -> Result<ExitCode> {
     let settings = crate::settings::get();
-    let path = claude_settings(settings);
+    let path = ainet_daemon::claude_settings_file(settings);
     let cmd = command();
     let timeout = settings.permissions.hook_timeout_secs();
     if status {

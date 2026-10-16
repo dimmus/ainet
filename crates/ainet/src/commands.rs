@@ -137,6 +137,11 @@ pub fn run(cli: Cli, socket: PathBuf) -> Result<ExitCode> {
         Cmd::Terminal(TerminalCmd::Status) => return terminal_status(&conn, &out),
         _ => {}
     }
+    let cmd = match cmd {
+        Cmd::Config(c) => return crate::admin::config(&conn, out.json, c),
+        Cmd::Hooks(h) => return crate::admin::hooks(out.json, h).map(|_| ExitCode::SUCCESS),
+        other => other,
+    };
     conn.ensure_daemon()?;
     match cmd {
         Cmd::Daemon
@@ -145,6 +150,8 @@ pub fn run(cli: Cli, socket: PathBuf) -> Result<ExitCode> {
         | Cmd::Mcp
         | Cmd::InstallHooks { .. }
         | Cmd::Critter { .. }
+        | Cmd::Config(_)
+        | Cmd::Hooks(_)
         | Cmd::Shutdown => {
             unreachable!("handled above")
         }
@@ -466,6 +473,7 @@ pub fn run(cli: Cli, socket: PathBuf) -> Result<ExitCode> {
             &format!("nudged {seat}"),
         ),
         Cmd::Watchdog(w) => watchdog(&conn, &out, w)?,
+        Cmd::Always(a) => crate::admin::always(&conn, out.json, a)?,
 
         // ---- agents ------------------------------------------------------
         Cmd::Spawn {

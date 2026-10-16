@@ -1452,6 +1452,30 @@ published schema describes them too (composed from `ainet_core::settings`),
 so an editor completes `runtimes.claude.permission_mode` or
 `permissions.global_rules` and shows which settings loosen safety.
 
+For the coming Settings view, `ainet-model` reads and writes these
+sections through the link: `Link::config(request, token)` sends
+`Request::SettingsGet` (`key`: a setting or group, or all),
+`SettingsSet { key, value }`, `SettingsUnset { key }`, `SettingsReload`,
+`AlwaysList`, `AlwaysRevoke`, `HookStatus`, `HookInstall`, `HookUninstall`
+or `Paths`, and the answer comes back as `Msg::Config` /
+`Change::Config { token, reply }`, a `ainet_model::ConfigReply`
+(`Settings`, `Always`, `Hooks`, `Paths`, `Done`). A settings report
+(`ainet_core::settings::SettingsReport`) has each setting's value,
+default, source (default, file, environment variable), description (from
+the schema) and when a change applies (`Applies::Live`, `NewSeats`,
+`Restart`), the file's error and unknown keys, and after a set the key
+changed; `ainet_core::settings::less_safe(key, value)` says which values
+to label as loosening safety, `value_from_text` turns typed words into
+the JSON a setting takes. ainetd edits the file keeping comments and the
+app's keys, refuses unknown keys and bad values, and puts the change in
+force at once. With an ainetd older than these requests, settings are
+read and written in settings.json by the link itself, with
+`config::OLD_DAEMON_SETTINGS` as the report's notice; the others fail
+with `config::OLD_DAEMON`. `Demo::full` answers all of them from a
+pretend file in memory (nothing on disk); the console's demo cannot.
+The command line's `/config`, `/set` and `/unset` work through the same
+requests.
+
 Themes: Zed's One, Ayu and Gruvbox families, **Deepharness** (the TUI's
 palette, `crates/gui/assets/themes/deepharness/deepharness.json`), and
 **Omarchy**, made at start-up from Omarchy's current `colors.toml` the way

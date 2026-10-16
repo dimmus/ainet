@@ -11,6 +11,7 @@
 //! followed while it runs (`config`), and what it keeps is pruned as
 //! those settings say (`retention`).
 
+mod admin;
 mod agents;
 mod always;
 mod comms;
@@ -39,6 +40,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Notify, broadcast, mpsc};
 
+pub use admin::{HookAction, claude_settings_file, hook_action};
 pub use store::Store;
 
 /// Activity sparkline: buckets of this width, this many of them.
@@ -100,6 +102,7 @@ struct Daemon {
     pane_tx: mpsc::UnboundedSender<PaneEvent>,
     store: Store,
     socket: PathBuf,
+    database: PathBuf,
     exe: PathBuf,
     /// settings.json as it is in force.
     config: config::Config,
@@ -178,7 +181,7 @@ pub async fn run(opts: Options) -> Result<()> {
     let (events, _) = broadcast::channel(4096);
     let follower = ainet_core::settings::Follower::new(opts.settings.clone());
     let config = config::Config::new(&follower);
-    config.report();
+    config.log();
     let mut daemon = Daemon {
         agents: BTreeMap::new(),
         panes: HashMap::new(),
@@ -203,6 +206,7 @@ pub async fn run(opts: Options) -> Result<()> {
         pane_tx,
         store: Store::open(&opts.database).context("open the state database")?,
         socket: opts.socket.clone(),
+        database: opts.database.clone(),
         exe: opts.exe.clone(),
         config,
         stopping: false,
@@ -513,6 +517,14 @@ async fn handle(req: Request, d: &Shared) -> Response {
         Request::WatchdogStop { id, reason } => queue::watchdog_stop(d, &id, reason),
         Request::AlwaysList { agent } => always::list(d, agent),
         Request::AlwaysRevoke { agent, rule } => always::revoke(d, &agent, rule),
+        Request::SettingsGet { key } => admin::settings_get(d, key.as_deref()),
+        Request::SettingsSet { key, value } => admin::settings_set(d, key, Some(value)).await,
+        Request::SettingsUnset { key } => admin::settings_set(d, key, None).await,
+        Request::SettingsReload => admin::settings_reload(d, None).await,
+        Request::HookStatus => admin::hooks(d, admin::HookAction::Status).await,
+        Request::HookInstall => admin::hooks(d, admin::HookAction::Install).await,
+        Request::HookUninstall => admin::hooks(d, admin::HookAction::Uninstall).await,
+        Request::Paths => admin::paths(d),
     }
 }
 

@@ -241,7 +241,8 @@ impl App {
             // The TUI never asks for a reply of its own.
             | Change::Reply { .. }
             | Change::Listing { .. }
-            | Change::Conversation { .. } => {}
+            | Change::Conversation { .. }
+            | Change::Config { .. } => {}
             Change::Snapshot => {
                 self.select_waiting();
                 self.after_fleet();

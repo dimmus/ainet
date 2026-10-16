@@ -243,12 +243,62 @@ pub fn parse(cx: &Context, cmd: &str) -> Command {
             Some(t) => capture(t),
             None => Command::error("/capture <agent>"),
         },
+        // ainet's own settings.
+        "set" => match (arg(1), rest(2)) {
+            (Some(key), value) if !value.is_empty() => set_setting(key, &value),
+            _ => Command::error("/set <key> <value>"),
+        },
+        "unset" => match arg(1) {
+            Some(key) => unset_setting(key),
+            None => Command::error("/unset <key>"),
+        },
+        "config" | "settings" => show_settings(arg(1)),
         "whoami" => match store.selected.clone() {
             Some(id) => req(Request::Whoami { agent: id }, "who".into()),
             None => Command::error("select an agent"),
         },
         other => Command::Error(format!("no command /{other}; /help lists them")),
     }
+}
+
+/// Sets one of ainet's settings (`/set`): the words after the key are
+/// its value, as text for a setting that takes text, else as JSON
+/// (`true`, `600`, `["Bash"]`). Unknown keys are refused here; values
+/// that would not read are refused by ainetd, and nothing is written.
+pub fn set_setting(key: &str, words: &str) -> Command {
+    if let Err(e) = ainet_core::settings::check_key(key) {
+        return Command::Error(e);
+    }
+    let value = ainet_core::settings::value_from_text(key, words);
+    Command::Request(
+        Box::new(Request::SettingsSet {
+            key: key.into(),
+            value,
+        }),
+        format!("set {key}"),
+    )
+}
+
+/// Removes one of ainet's settings (or a group) from settings.json, so
+/// its default applies (`/unset`).
+pub fn unset_setting(key: &str) -> Command {
+    Command::Request(
+        Box::new(Request::SettingsUnset { key: key.into() }),
+        format!("unset {key}"),
+    )
+}
+
+/// The settings in force, or only those under `key` (`/config`).
+pub fn show_settings(key: Option<&str>) -> Command {
+    Command::Request(
+        Box::new(Request::SettingsGet {
+            key: key.map(str::to_string),
+        }),
+        match key {
+            Some(k) => format!("settings: {k}"),
+            None => "settings".into(),
+        },
+    )
 }
 
 /// Spawns a loose agent (`/spawn`): `runtime` in `cwd` (here when not
@@ -769,6 +819,11 @@ pub const COMMANDS: &[CommandInfo] = &[
         "[n]",
         "the Terminals grid's columns (none: from its shape)",
     ),
+    info(
+        "config",
+        "[key]",
+        "ainet's settings in force, and where they come from",
+    ),
     info("continue", "<seat>", "nudge a seat to carry on"),
     info("critters", "", "critters small or large"),
     info("deny", "", "deny the request waiting on you"),
@@ -794,6 +849,7 @@ pub const COMMANDS: &[CommandInfo] = &[
     info("relaunch", "<seat>", "start a seat's agent afresh"),
     info("remove", "<seat>", "take a seat out of its rig"),
     info("restore", "<rig>", "bring a rig back from a snapshot"),
+    info("set", "<key> <value>", "change one of ainet's settings"),
     info("shrink", "<pod>", "take a pod out of the rig"),
     info("snapshot", "<rig>", "take a snapshot of a rig"),
     info("snapshots", "<rig>", "a rig's snapshots"),
@@ -804,6 +860,7 @@ pub const COMMANDS: &[CommandInfo] = &[
     ),
     info("spec", "<name>", "a spec from the library"),
     info("specs", "", "the spec library"),
+    info("unset", "<key>", "a setting back to its default"),
     info("up", "<spec file | library name | rig>", "launch a team"),
     info(
         "view",

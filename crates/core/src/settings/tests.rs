@@ -404,3 +404,186 @@ fn spec_policies_map_onto_permission_modes() {
     assert_eq!(Effort::parse(" High"), Some(Effort::High));
     assert_eq!(Effort::parse("extreme"), None);
 }
+
+/// Words typed after a key become the JSON the setting takes.
+#[test]
+fn words_become_the_settings_json() {
+    use serde_json::json;
+    assert_eq!(value_from_text("queue.nudge", "false"), json!(false));
+    assert_eq!(value_from_text("permissions.hold_secs", "900"), json!(900));
+    // Text needs no quotes, even when it looks like something else.
+    assert_eq!(value_from_text("daemon.log.level", "debug"), json!("debug"));
+    assert_eq!(value_from_text("messaging.message_note", "true"), json!("true"));
+    assert_eq!(
+        value_from_text("runtimes.claude.model", "\"opus\""),
+        json!("opus")
+    );
+    assert_eq!(value_from_text("runtimes.claude.model", "null"), Value::Null);
+    assert_eq!(value_from_text("rigs.default_cwd", "~/work"), json!("~/work"));
+    assert_eq!(
+        value_from_text("runtimes.claude.permission_mode", "plan"),
+        json!("plan")
+    );
+    assert_eq!(value_from_text("runtimes.claude.env.RUST_LOG", "1"), json!("1"));
+    assert_eq!(
+        value_from_text("runtimes.claude.args", r#"["--verbose"]"#),
+        json!(["--verbose"])
+    );
+    assert_eq!(value_from_text("rigs.keep_snapshots", "5"), json!(5));
+    assert!(takes_text("daemon.socket") && !takes_text("queue.nudge"));
+}
+
+/// Only ainet's settings may be set; groups and the desktop app's keys
+/// are refused with a word on why.
+#[test]
+fn keys_are_checked() {
+    assert!(check_key("queue.nudge").is_ok());
+    assert!(check_key("rigs.keep_snapshots").is_ok());
+    assert!(check_key("runtimes.claude.env.RUST_LOG").is_ok());
+    assert!(check_key("cost.prices.claude-opus").is_ok());
+    assert!(
+        check_key("queue.nudgy")
+            .unwrap_err()
+            .contains("no setting queue.nudgy")
+    );
+    assert!(check_key("queue.watchdog").unwrap_err().contains("group"));
+    assert!(check_key("theme").unwrap_err().contains("desktop app"));
+    assert!(check_key("").is_err() && check_key("queue..nudge").is_err());
+}
+
+/// Setting and unsetting edit the text: comments, the desktop app's keys
+/// and trailing commas stay; bad values are refused and say why.
+#[test]
+fn set_and_unset_keep_the_file_as_written() {
+    use serde_json::json;
+    let text = "{\n  // my theme\n  \"theme\": \"One Dark\",\n  \"queue\": { \"nudge\": true, },\n}\n";
+    let set_ = set(text, "queue.nudge", &json!(false)).unwrap();
+    assert!(
+        set_.contains("// my theme") && set_.contains("One Dark"),
+        "{set_}"
+    );
+    assert!(!parse(&set_).unwrap().settings.queue.nudge);
+    let more = set(&set_, "runtimes.claude.permission_mode", &json!("plan")).unwrap();
+    assert_eq!(
+        parse(&more).unwrap().settings.runtimes.claude.permission_mode,
+        Some(PermissionMode::Plan)
+    );
+    // A mode misspelt, a wrong type, out of range: refused.
+    assert!(set(text, "runtimes.claude.permission_mode", &json!("bypass")).is_err());
+    assert!(set(text, "queue.nudge", &json!("maybe")).is_err());
+    let e = set(text, "queue.watchdog.tick_secs", &json!(0)).unwrap_err();
+    assert!(e.contains("tick_secs"), "{e}");
+    assert!(set(text, "theme", &json!("x")).is_err());
+    // A file that does not read now is not edited.
+    assert!(
+        set("{ \"queue\": { \"nudge\": 3 } }", "queue.nudge", &json!(true))
+            .unwrap_err()
+            .contains("fix it first")
+    );
+    let back = unset(&more, "runtimes.claude.permission_mode").unwrap();
+    assert_eq!(
+        parse(&back).unwrap().settings.runtimes.claude.permission_mode,
+        None
+    );
+    assert!(back.contains("// my theme"));
+    // A whole group goes back to its defaults; what is not set stays as is.
+    let none = unset(&back, "queue").unwrap();
+    assert!(parse(&none).unwrap().settings.queue.nudge);
+    assert_eq!(unset(&none, "queue.nudge").unwrap(), none);
+    // A file that is not there yet is made.
+    let fresh = set("", "rigs.keep_snapshots", &json!(3)).unwrap();
+    assert_eq!(parse(&fresh).unwrap().settings.rigs.keep_snapshots, Some(3));
+}
+
+#[test]
+fn files_are_edited_whole() {
+    let dir = std::env::temp_dir().join(format!("ainet-settings-edit-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let file = dir.join("ainet/settings.json");
+    assert!(set_in_file(&file, "queue.nudge", &serde_json::json!(false)).unwrap());
+    assert!(!set_in_file(&file, "queue.nudge", &serde_json::json!(false)).unwrap());
+    assert!(!SettingsReport::read(&file).entries.is_empty());
+    assert_eq!(
+        SettingsReport::read(&file).get("queue.nudge").unwrap().value,
+        serde_json::json!(false)
+    );
+    assert!(unset_in_file(&file, "queue.nudge").unwrap());
+    assert!(!unset_in_file(&file, "queue.nudge").unwrap());
+    // Nothing left beside it.
+    assert_eq!(std::fs::read_dir(file.parent().unwrap()).unwrap().count(), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Each setting says when a change applies; most are live.
+#[test]
+fn settings_say_when_they_apply() {
+    assert_eq!(applies("queue.nudge"), Applies::Live);
+    assert_eq!(applies("daemon.autostart"), Applies::Live);
+    assert_eq!(applies("daemon.socket"), Applies::Restart);
+    assert_eq!(applies("daemon.log.level"), Applies::Restart);
+    assert_eq!(applies("runtimes.claude.model"), Applies::NewSeats);
+    assert_eq!(applies("permissions.hold_secs"), Applies::NewSeats);
+    assert_eq!(applies("permissions.global_rules"), Applies::Live);
+    assert_eq!(applies("messaging.typing_guard"), Applies::NewSeats);
+    assert_eq!(applies("messaging.paste_settle_ms"), Applies::Live);
+    assert_eq!(applies("retention.scrollback_lines"), Applies::NewSeats);
+    assert_eq!(applies("daemonic"), Applies::Live, "a whole word");
+    let report = SettingsReport::new(&parse("").unwrap(), None, &[], None);
+    let e = report.get("runtimes.claude.permission_mode").unwrap();
+    assert_eq!(e.applies, Applies::NewSeats);
+    assert!(e.description.contains("bypassPermissions"), "{}", e.description);
+    let bare: Vec<&str> = report
+        .entries
+        .iter()
+        .filter(|e| e.description.is_empty())
+        .map(|e| e.key.as_str())
+        .collect();
+    assert!(bare.is_empty(), "not described: {bare:?}");
+    assert_eq!(report.modified().count(), 0, "no file is all defaults");
+}
+
+/// Values that let agents do more without asking are told apart.
+#[test]
+fn less_safe_values_are_told_apart() {
+    use serde_json::json;
+    assert!(less_safe(
+        "runtimes.claude.permission_mode",
+        &json!("bypassPermissions")
+    ));
+    assert!(less_safe(
+        "runtimes.claude.permission_mode",
+        &json!("acceptEdits")
+    ));
+    assert!(!less_safe("runtimes.claude.permission_mode", &json!("plan")));
+    assert!(!less_safe("runtimes.claude.permission_mode", &Value::Null));
+    assert!(less_safe("runtimes.claude.allowed_tools", &json!(["Bash"])));
+    assert!(!less_safe("runtimes.claude.allowed_tools", &json!([])));
+    assert!(less_safe(
+        "runtimes.claude.args",
+        &json!(["--dangerously-skip-permissions"])
+    ));
+    assert!(less_safe("permissions.persist_always", &json!(true)));
+    assert!(less_safe(
+        "permissions.global_rules",
+        &json!([{"tool": "WebSearch"}])
+    ));
+    assert!(!less_safe("permissions.persist_always", &json!(false)));
+    assert!(!less_safe("queue.nudge", &json!(false)));
+}
+
+/// A report narrowed to a group, a setting or a map's entry.
+#[test]
+fn reports_narrow_to_a_key() {
+    let report = SettingsReport::new(&parse("").unwrap(), None, &[], None);
+    let queue = report.clone().only("queue").unwrap();
+    assert!(queue.entries.iter().all(|e| e.key.starts_with("queue.")));
+    assert!(queue.entries.len() > 3);
+    assert_eq!(report.clone().only("queue.nudge").unwrap().entries.len(), 1);
+    let env = report.clone().only("runtimes.claude.env.X").unwrap();
+    assert_eq!(env.entries[0].key, "runtimes.claude.env");
+    assert!(report.clone().only("queu").is_err());
+    assert_eq!(
+        report.clone().only("").unwrap().entries.len(),
+        report.entries.len()
+    );
+}

@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use ainet_core::settings::{self, Follower, Loaded, Settings, Source};
+use ainet_core::settings::{self, Follower, Loaded, Settings, SettingsReport, Source};
 
 use crate::{Daemon, Shared, lock};
 
@@ -28,14 +28,29 @@ pub(crate) struct Config {
 
 impl Config {
     pub(crate) fn new(follower: &Follower) -> Config {
+        Config::of(
+            follower.loaded.clone(),
+            follower.error.clone(),
+            follower.path().map(PathBuf::from),
+        )
+    }
+
+    /// The settings `loaded` (the last good file), with the environment
+    /// over them.
+    pub(crate) fn of(loaded: Loaded, error: Option<String>, file: Option<PathBuf>) -> Config {
         let env = settings::env_overrides();
         Config {
-            settings: follower.settings().clone().with_env(&env),
-            loaded: follower.loaded.clone(),
-            error: follower.error.clone(),
+            settings: loaded.settings.clone().with_env(&env),
+            loaded,
+            error,
             env,
-            file: follower.path().map(PathBuf::from),
+            file,
         }
+    }
+
+    /// Every setting in force, with where it comes from, for clients.
+    pub(crate) fn report(&self) -> SettingsReport {
+        SettingsReport::new(&self.loaded, self.error.clone(), &self.env, self.file.clone())
     }
 
     /// One line on what is set and from where, for the log.
@@ -61,7 +76,7 @@ impl Config {
     }
 
     /// Says in the log what is in force and what is wrong.
-    pub(crate) fn report(&self) {
+    pub(crate) fn log(&self) {
         tracing::info!("{}", self.describe());
         if !self.loaded.unknown.is_empty() {
             tracing::warn!(
@@ -96,7 +111,7 @@ pub(crate) async fn follow(d: Shared, mut follower: Follower) {
         follower = back;
         if changed {
             let config = Config::new(&follower);
-            config.report();
+            config.log();
             let mut g = lock(&d);
             g.config = config;
             g.settings_changed();

@@ -16,6 +16,7 @@ use ainet_core::client::Client;
 use ainet_core::protocol::SpecEntry;
 use ainet_core::{Agent, Conversation, Event, Request, Response, SnapshotInfo};
 
+use crate::config::ConfigReply;
 use crate::demo::Demo;
 
 /// What the background threads tell the UI.
@@ -64,6 +65,12 @@ pub enum Msg {
     Conversation {
         token: u64,
         reply: Result<Conversation, String>,
+    },
+    /// The reply to [`Link::config`]: its token, and the settings, rules,
+    /// hooks or paths, or the error.
+    Config {
+        token: u64,
+        reply: Result<ConfigReply, String>,
     },
     Connected(bool),
 }
@@ -297,6 +304,32 @@ impl<S: Sink> Link<S> {
                         Err(e) => Err(format!("ainetd: {e}")),
                     });
                     tx.send(Msg::Conversation { token, reply });
+                });
+            }
+        }
+    }
+
+    /// Sends a request about ainet itself (`SettingsGet`, `SettingsSet`,
+    /// `SettingsUnset`, `SettingsReload`, `AlwaysList`, `AlwaysRevoke`,
+    /// `HookStatus`, `HookInstall`, `HookUninstall`, `Paths`): the reply
+    /// comes back as [`Msg::Config`] with `token`. A daemon older than
+    /// the settings requests has settings.json read or written here
+    /// instead, with a notice saying so ([`crate::config::local`]); the
+    /// others then fail saying the daemon is older.
+    pub fn config(&mut self, req: Request, token: u64) {
+        match &mut self.backend {
+            Backend::Demo(demo) => {
+                let reply = ConfigReply::from_response(demo.respond(&req));
+                self.sink.send(Msg::Config { token, reply });
+            }
+            Backend::Daemon(socket) => {
+                let (socket, tx) = (socket.clone(), self.sink.clone());
+                thread::spawn(move || {
+                    let reply = match call(&socket, &req, Duration::from_secs(20)) {
+                        Ok(resp) => ConfigReply::from_response(crate::config::or_local(&req, resp)),
+                        Err(e) => Err(format!("ainetd: {e}")),
+                    };
+                    tx.send(Msg::Config { token, reply });
                 });
             }
         }
@@ -570,8 +603,22 @@ fn listen<S: Sink>(socket: PathBuf, tx: S, no_attach: Arc<AtomicBool>) {
 fn request<S: Sink>(socket: &Path, req: Request, tx: &S, ok: String, timeout: Duration) {
     let (socket, tx) = (socket.to_path_buf(), tx.clone());
     thread::spawn(move || {
-        let msg = match call(&socket, &req, timeout) {
+        let answer = call(&socket, &req, timeout).map(|resp| match crate::config::is_config(&req) {
+            true => crate::config::or_local(&req, resp),
+            false => resp,
+        });
+        let msg = match answer {
+            Ok(Response::Error { message }) if ainet_core::protocol::unknown_request(&message) => {
+                Msg::Flash(crate::config::OLD_DAEMON.into(), true)
+            }
             Ok(Response::Error { message }) => Msg::Flash(message, true),
+            Ok(Response::Settings { settings }) => match crate::config::changed_line(&settings) {
+                Some(line) => Msg::Flash(line, false),
+                None => Msg::Popup(ok, crate::popup::settings_text(&settings)),
+            },
+            Ok(Response::Hooks { hooks }) => {
+                Msg::Flash(hooks.done.clone().unwrap_or_else(|| hooks.summary.clone()), false)
+            }
             Ok(Response::Spawned { agent }) => Msg::Flash(format!("{} joined the fleet", agent.name), false),
             Ok(Response::Text { text }) => Msg::Popup(ok, text),
             Ok(
@@ -581,7 +628,9 @@ fn request<S: Sink>(socket: &Path, req: Request, tx: &S, ok: String, timeout: Du
                 | Response::Snapshots { .. }
                 | Response::Watchdogs { .. }
                 | Response::Captures { .. }
-                | Response::Whoami { .. }),
+                | Response::Whoami { .. }
+                | Response::AlwaysRules { .. }
+                | Response::Paths { .. }),
             ) => Msg::Popup(ok, crate::popup::render(&resp)),
             Ok(Response::Rig { rig }) => {
                 Msg::Flash(format!("{ok}: rig {} is {}", rig.name, rig.status.label()), false)

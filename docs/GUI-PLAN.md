@@ -821,6 +821,33 @@ protocol step: reading and setting values, paths, and hook status and
 install over the socket (the console's `install-hooks` already does the
 last two locally).
 
+**Done: items 3 and 5** (protocol and console parity). Additive requests,
+each answered "bad request" by an older daemon and handled by clients
+falling back: `SettingsGet { key? }` (`Response::Settings`: every setting
+with value, default, source, description and when it applies, `live`,
+`new_seats` or `restart`; the file's error and unknown keys),
+`SettingsSet { key, value }` and `SettingsUnset { key }` (ainetd edits the
+file through `ainet_core::settings::set_in_file`, keeping comments, refuses
+unknown keys, groups and values that would not read, and puts the file in
+force at once), `SettingsReload`, `HookStatus` / `HookInstall` /
+`HookUninstall` (`Response::Hooks`, with the backup made), and `Paths`
+(`Response::Paths`: socket, state directory, database, log, settings
+file, spec directories, Claude Code's config directory, the `ainet`
+binary, version, protocol and pid). `AlwaysList` / `AlwaysRevoke` came
+with part two. The console: `ainet config get|set|unset|list
+[--changed]|path [--all]|edit` (through a running ainetd, else on the file
+directly; an older daemon is said to be older and the file is used),
+`ainet always list|revoke` (revoking all needs `--all`) and `ainet hooks
+status|install|uninstall`; `--json` everywhere. The TUI and the GUI's
+command line: `/config [key]` (a popup of the settings in force), `/set
+<key> <value>`, `/unset <key>`, in `ainet_model::command`. `ainet-model`
+gives the GUI `Link::config` (`Msg::Config`, `ConfigReply`), the fallback
+to the file for an older daemon, and `Demo::full` answering all of it
+from a pretend file. Values typed as words become the JSON a setting
+takes (text unquoted; the schema decides), and a value that loosens
+safety is said to be less safe as it is set. Left: item 4, the GUI
+Settings view, and item 6's GUI tests.
+
 ## 6. Risks
 
 | Risk | Mitigation |

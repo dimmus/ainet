@@ -229,13 +229,38 @@ Code seats in `plan` mode, `builtin:default` and `builtin:standard` in its
 default, `builtin:yolo` with `bypassPermissions`; other policies are
 reported and ignored. `ainet up <spec> --plan` shows each seat's mode.
 
+From the console, without opening the file:
+
+```sh
+ainet config list [KEY] [--changed]   # every setting: value, source, when a change applies (* = not the default)
+ainet config get queue.nudge          # one value (text bare, the rest as JSON); a group lists its settings
+ainet config set queue.nudge false    # text needs no quotes; lists and maps are JSON
+ainet config unset runtimes.claude    # a setting or a whole group back to its defaults
+ainet config path [--all]             # settings.json; --all: every path ainet uses, and versions
+ainet config edit                     # $VISUAL / $EDITOR on the file, then checked and reloaded
+ainet always list [AGENT]             # /always rules in force, the global ones too
+ainet always revoke AGENT KEY|--all
+ainet hooks status|install|uninstall  # ainet's hooks in Claude Code's settings
+```
+
+`set` and `unset` edit the file in place, keeping comments and the desktop
+app's keys; an unknown key or a value that would not read (a wrong type,
+out of range, a misspelt mode) is refused and nothing is written. With
+ainetd running they go through it, so the change is in force at once;
+without it (or with an older ainetd, which is said) the file is read and
+written directly. A value that lets agents do more without asking is
+called less safe as it is set. `--json` gives each of them as JSON. In
+the TUI, `/config [key]` shows the settings in force, `/set <key> <value>`
+and `/unset <key>` change them.
+
 ainet's hooks reach the seats it starts on their own command line; for
-Claude Code sessions you start yourself, `ainet install-hooks` prints the
-block to merge into Claude Code's settings, `--write` merges it (keeping a
-backup of the file), `--status` says whether it is there and up to date
-(after a change of `hold_secs`, write it again), and `--remove` takes it
-out. ainet never writes Claude Code's settings unless you run one of
-these.
+Claude Code sessions you start yourself, `ainet hooks install` (or
+`ainet install-hooks --write`) merges them into Claude Code's settings,
+keeping a backup of the file; `ainet hooks status` says whether they are
+there and up to date (after a change of `hold_secs`, install again), and
+`ainet hooks uninstall` takes them out. `ainet install-hooks` alone prints
+the block to merge by hand. ainet never writes Claude Code's settings
+unless you run one of these (or press the desktop app's button for it).
 
 Environment variables that meant something before still win over the
 file: `AINET_SOCKET` over `daemon.socket`, `AINET_LOG` over

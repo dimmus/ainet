@@ -65,10 +65,7 @@ pub fn ensure_daemon_with(socket: &Path, ainet: &Path, settings: &DaemonSettings
 /// Where an autostarted daemon logs: `daemon.log.file`, else `ainetd.log`
 /// in the state directory.
 pub fn log_file(log: &LogSettings) -> PathBuf {
-    log.file
-        .as_deref()
-        .map(paths::expand)
-        .unwrap_or_else(paths::daemon_log)
+    log.path()
 }
 
 /// Opens the daemon's log: moved aside first once it reached

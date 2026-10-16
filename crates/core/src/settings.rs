@@ -15,9 +15,12 @@
 //! their descriptions, and only take values from a closed list, so a typo
 //! is an error rather than a looser agent.
 
+mod edit;
 mod effective;
 mod load;
 mod policy;
+mod report;
+mod schema_walk;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -26,9 +29,12 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub use effective::{Effective, Source, effective, env_overrides, unknown_keys};
+pub use edit::{check_key, set, set_in_file, unset, unset_in_file, value_from_text, write_whole};
+pub use effective::{Applies, Effective, Source, applies, effective, env_overrides, less_safe, unknown_keys};
 pub use load::{Follower, Loaded, load, parse, schema};
 pub use policy::{GlobalRule, SPEC_POLICIES, spec_policy};
+pub use report::SettingsReport;
+pub use schema_walk::{description, takes_text};
 
 /// The top-level keys this module owns; the rest of the file is the
 /// desktop app's.
@@ -120,6 +126,17 @@ pub struct LogSettings {
     /// How many rotated logs to keep.
     #[schemars(range(min = 1, max = 20))]
     pub keep: u32,
+}
+
+impl LogSettings {
+    /// Where an autostarted ainetd writes its log: `file`, else
+    /// `ainetd.log` in the state directory.
+    pub fn path(&self) -> PathBuf {
+        self.file
+            .as_deref()
+            .map(crate::paths::expand)
+            .unwrap_or_else(crate::paths::daemon_log)
+    }
 }
 
 impl Default for LogSettings {
@@ -342,10 +359,13 @@ impl Default for Readiness {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct QuietMs {
+    /// Claude Code seats, in milliseconds.
     #[schemars(range(max = 60_000))]
     pub claude: u64,
+    /// Codex seats, in milliseconds.
     #[schemars(range(max = 60_000))]
     pub codex: u64,
+    /// Shell seats, in milliseconds.
     #[schemars(range(max = 60_000))]
     pub shell: u64,
 }

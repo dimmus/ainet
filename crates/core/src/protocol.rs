@@ -17,7 +17,7 @@ use crate::agent::{Agent, Decision, InboxItem, Runtime};
 use crate::comms::{ChatMessage, Message, QItem, QState, Watchdog};
 use crate::conversation::Conversation;
 use crate::rig::{Discovered, Edge, Rig, SnapshotInfo, Whoami};
-use crate::settings::{Effort, PermissionMode};
+use crate::settings::{Effort, PermissionMode, SettingsReport};
 
 /// Bumped on any incompatible change.
 pub const VERSION: u32 = 2;
@@ -373,6 +373,42 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rule: Option<String>,
     },
+
+    // ---- settings ----------------------------------------------------------
+    // Daemons from before these answer "bad request"; clients then read
+    // or write settings.json themselves and say the daemon is older.
+    /// The settings in force (`Response::Settings`): every one, or only
+    /// `key` (a setting, or a group such as `queue`).
+    SettingsGet {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key: Option<String>,
+    },
+    /// Sets one setting in settings.json, keeping the rest of the file as
+    /// written, and puts it in force. Unknown keys and values that would
+    /// not read are refused and nothing is written.
+    SettingsSet {
+        key: String,
+        value: Value,
+    },
+    /// Removes a setting (or a group) from settings.json, so its default
+    /// applies.
+    SettingsUnset {
+        key: String,
+    },
+    /// Reads settings.json again now (after an edit by hand), instead of
+    /// within the second.
+    SettingsReload,
+    /// Whether ainet's hooks are in Claude Code's settings
+    /// (`Response::Hooks`).
+    HookStatus,
+    /// Installs (or repairs) ainet's hooks in Claude Code's settings,
+    /// keeping a backup. Only on your say-so: a button, a command.
+    HookInstall,
+    /// Removes ainet's hooks from Claude Code's settings, keeping a
+    /// backup.
+    HookUninstall,
+    /// The paths ainetd uses, and its version (`Response::Paths`).
+    Paths,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -480,6 +516,65 @@ pub struct AlwaysRule {
     /// Kept across sessions and restarts (`permissions.persist_always`).
     #[serde(default)]
     pub kept: bool,
+}
+
+/// ainet's hooks in Claude Code's settings (`Request::HookStatus`,
+/// `HookInstall`, `HookUninstall`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HookReport {
+    /// Claude Code's settings file (`hooks.claude_settings`, else
+    /// `settings.json` in its config directory).
+    pub settings_path: PathBuf,
+    pub exists: bool,
+    /// Why the file could not be read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Some hooks of ainet's are there.
+    pub installed: bool,
+    /// All of them are, as they should be: this binary, today's timeouts.
+    pub current: bool,
+    /// Hook events with no entry as it should be.
+    #[serde(default)]
+    pub missing: Vec<String>,
+    /// Entries of ainet's that run another binary or another timeout.
+    #[serde(default)]
+    pub stale: usize,
+    /// One line on it, for people.
+    pub summary: String,
+    /// After an install or removal: what it did, in words.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub done: Option<String>,
+    /// The file as it was before that change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup: Option<PathBuf>,
+}
+
+/// Where ainetd keeps things, and which ainetd it is (`Request::Paths`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PathsReport {
+    pub socket: PathBuf,
+    /// The database and logs.
+    pub state_dir: PathBuf,
+    pub database: PathBuf,
+    /// Where an autostarted ainetd writes its log.
+    pub log: PathBuf,
+    /// settings.json; none for a daemon that follows no file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<PathBuf>,
+    /// Where your own specs are looked for, in order.
+    #[serde(default)]
+    pub spec_dirs: Vec<PathBuf>,
+    /// Claude Code's config directory (`$CLAUDE_CONFIG_DIR`, else
+    /// `~/.claude`).
+    pub claude_config_dir: PathBuf,
+    /// The `ainet` binary seats' MCP server and hooks run.
+    pub exe: PathBuf,
+    /// ainet's version (the daemon's, from ainetd).
+    pub version: String,
+    pub protocol: u32,
+    /// ainetd's process id; 0 when no daemon answered.
+    #[serde(default)]
+    pub pid: u32,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -614,6 +709,25 @@ pub enum Response {
     AlwaysRules {
         rules: Vec<AlwaysRule>,
     },
+    /// The settings in force (`Request::SettingsGet`, and after a set,
+    /// an unset or a reload).
+    Settings {
+        settings: Box<SettingsReport>,
+    },
+    /// ainet's hooks in Claude Code's settings.
+    Hooks {
+        hooks: Box<HookReport>,
+    },
+    /// The paths in use, and versions.
+    Paths {
+        paths: Box<PathsReport>,
+    },
+}
+
+/// Whether a daemon's error says it does not know the request: it is
+/// older than the client.
+pub fn unknown_request(message: &str) -> bool {
+    message.starts_with("bad request")
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -899,5 +1013,97 @@ mod tests {
         assert!(
             matches!(back, Response::AlwaysRules { rules } if rules[0].kept && rules[0].key == "Bash:cargo test")
         );
+    }
+
+    #[test]
+    fn settings_requests_are_additions_old_peers_can_ignore() {
+        // New requests, as lines: what an older daemon reads as "bad
+        // request", which clients take as "older; restart it".
+        for (req, line) in [
+            (Request::SettingsGet { key: None }, r#"{"op":"settings_get"}"#),
+            (
+                Request::SettingsGet {
+                    key: Some("queue".into()),
+                },
+                r#"{"op":"settings_get","key":"queue"}"#,
+            ),
+            (
+                Request::SettingsSet {
+                    key: "queue.nudge".into(),
+                    value: serde_json::json!(false),
+                },
+                r#"{"op":"settings_set","key":"queue.nudge","value":false}"#,
+            ),
+            (
+                Request::SettingsUnset { key: "queue".into() },
+                r#"{"op":"settings_unset","key":"queue"}"#,
+            ),
+            (Request::SettingsReload, r#"{"op":"settings_reload"}"#),
+            (Request::HookStatus, r#"{"op":"hook_status"}"#),
+            (Request::HookInstall, r#"{"op":"hook_install"}"#),
+            (Request::HookUninstall, r#"{"op":"hook_uninstall"}"#),
+            (Request::Paths, r#"{"op":"paths"}"#),
+        ] {
+            let encoded = String::from_utf8(encode(&req)).unwrap();
+            assert_eq!(encoded.trim_end(), line);
+            let back: Request = serde_json::from_str(line).unwrap();
+            assert_eq!(String::from_utf8(encode(&back)).unwrap(), encoded);
+        }
+        assert!(unknown_request("bad request: unknown variant `paths`"));
+        assert!(!unknown_request("no agent x"));
+
+        let report = crate::settings::SettingsReport::new(
+            &crate::settings::parse(r#"{"queue": {"nudge": false}}"#).unwrap(),
+            None,
+            &[],
+            Some("/c/settings.json".into()),
+        );
+        let reply = Response::Settings {
+            settings: Box::new(report.clone()),
+        };
+        let line = encode(&reply);
+        let text = std::str::from_utf8(&line).unwrap();
+        assert!(text.starts_with(r#"{"type":"settings","settings":{"file":"/c/settings.json","entries":["#));
+        assert!(
+            !text.contains("\"changed\"") && !text.contains("\"notice\""),
+            "{text}"
+        );
+        match serde_json::from_slice::<Response>(&line).unwrap() {
+            Response::Settings { settings } => {
+                assert_eq!(*settings, report);
+                let nudge = settings.get("queue.nudge").unwrap();
+                assert_eq!(nudge.source, crate::settings::Source::File);
+                assert_eq!(nudge.applies, crate::settings::Applies::Live);
+            }
+            other => panic!("{other:?}"),
+        }
+        // An entry from a client that knows no `applies` or description.
+        let old: crate::settings::Effective =
+            serde_json::from_str(r#"{"key":"a.b","value":1,"default":1,"source":{"from":"default"}}"#)
+                .unwrap();
+        assert_eq!(old.applies, crate::settings::Applies::Live);
+
+        let hooks = Response::Hooks {
+            hooks: Box::new(HookReport {
+                settings_path: "/c/claude.json".into(),
+                summary: "not installed in /c/claude.json".into(),
+                missing: vec!["Stop".into()],
+                ..HookReport::default()
+            }),
+        };
+        let back: Response = serde_json::from_slice(&encode(&hooks)).unwrap();
+        assert!(
+            matches!(back, Response::Hooks { hooks } if hooks.missing == ["Stop"] && hooks.done.is_none())
+        );
+        let paths = Response::Paths {
+            paths: Box::new(PathsReport {
+                version: "0.1.0".into(),
+                protocol: VERSION,
+                pid: 7,
+                ..PathsReport::default()
+            }),
+        };
+        let back: Response = serde_json::from_slice(&encode(&paths)).unwrap();
+        assert!(matches!(back, Response::Paths { paths } if paths.pid == 7 && paths.settings.is_none()));
     }
 }

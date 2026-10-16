@@ -91,6 +91,12 @@ pub enum Change {
         token: u64,
         reply: Result<Conversation, String>,
     },
+    /// The reply to a request sent with `Link::config`, for whoever
+    /// asked.
+    Config {
+        token: u64,
+        reply: Result<crate::ConfigReply, String>,
+    },
     /// The connection to ainetd came up or went down.
     Connected(bool),
 }
@@ -201,6 +207,7 @@ impl Store {
             Msg::Reply { token, reply } => Change::Reply { token, reply },
             Msg::Listing { token, listing } => Change::Listing { token, listing },
             Msg::Conversation { token, reply } => Change::Conversation { token, reply },
+            Msg::Config { token, reply } => Change::Config { token, reply },
             Msg::Connected(up) => {
                 let was = std::mem::replace(&mut self.connected, up);
                 if was == up {
