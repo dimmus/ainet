@@ -28,7 +28,7 @@ use std::time::Duration;
 use ainet_core::client::Client;
 use ainet_core::{Conversation, Request};
 use ainet_model::journal::{self, Happening};
-use ainet_model::{Backend, Change, Command, Link, Listing, Msg, Pump, Store, Tally, daemon};
+use ainet_model::{Backend, Change, Command, ConfigReply, Link, Listing, Msg, Pump, Store, Tally, daemon};
 use futures::StreamExt;
 use futures::channel::mpsc::UnboundedReceiver;
 use gpui::{App, AppContext as _, AsyncApp, Context, EntityId, EventEmitter, Subscription, Task, WeakEntity};
@@ -58,6 +58,10 @@ pub type OnListing = Box<dyn FnOnce(Result<Listing, String>, &mut App)>;
 
 /// What hears a conversation asked for with [`FleetModel::conversation`].
 pub type OnConversation = Box<dyn FnOnce(Result<Conversation, String>, &mut App)>;
+
+/// What hears the answer to a request about ainet itself (settings,
+/// `/always` rules, hooks, paths) asked with [`FleetModel::config`].
+pub type OnConfig = Box<dyn FnOnce(Result<ConfigReply, String>, &mut App)>;
 
 /// A request whose reply is long text to read whole (a transcript, a
 /// spec, a queue item): the workspace opens it as a report tab and asks
@@ -191,6 +195,8 @@ pub struct FleetModel {
     listed: HashMap<u64, OnListing>,
     /// Who hears the conversations on their way, by token.
     conversations: HashMap<u64, OnConversation>,
+    /// Who hears the answers about ainet itself, by token.
+    configs: HashMap<u64, OnConfig>,
     next_token: u64,
     /// What happened, the latest last, at most [`KEEP_EVENTS`].
     events: VecDeque<Rc<Happening>>,
@@ -303,6 +309,7 @@ impl FleetModel {
             asked: HashMap::new(),
             listed: HashMap::new(),
             conversations: HashMap::new(),
+            configs: HashMap::new(),
             next_token: 0,
             events: VecDeque::new(),
             events_logged: 0,
@@ -504,6 +511,27 @@ impl FleetModel {
         self.next_token += 1;
         self.conversations.insert(self.next_token, Box::new(on_reply));
         link.conversation(agent, after, tail, self.next_token);
+    }
+
+    /// Asks ainetd about itself (`Request::SettingsGet`, `SettingsSet`,
+    /// `AlwaysList`, `HookStatus`, `Paths`, …); `on_reply` hears the
+    /// answer, or the error. An older ainetd's settings answers come from
+    /// settings.json, with a notice saying so (`ainet_model::config`).
+    /// Nothing else hears it.
+    pub fn config(
+        &mut self,
+        req: Request,
+        on_reply: impl FnOnce(Result<ConfigReply, String>, &mut App) + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        #[cfg(test)]
+        self.sent.push((req.clone(), String::new()));
+        let Some(link) = &mut self.link else {
+            return cx.defer(move |cx| on_reply(Err("ainetd is not running yet".into()), cx));
+        };
+        self.next_token += 1;
+        self.configs.insert(self.next_token, Box::new(on_reply));
+        link.config(req, self.next_token);
     }
 
     /// A request only ainetd acts on (keystrokes, resizes), sent quietly.
@@ -787,7 +815,8 @@ impl FleetModel {
                 | Change::History(_)
                 | Change::Detached { .. }
                 // Only its asker hears it; a poll redraws nothing else.
-                | Change::Conversation { .. } => false,
+                | Change::Conversation { .. }
+                | Change::Config { .. } => false,
                 Change::Flash(text, _) => !text.is_empty(),
                 _ => true,
             };
@@ -809,6 +838,11 @@ impl FleetModel {
                 }
                 Change::Conversation { token, reply } => {
                     if let Some(on_reply) = self.conversations.remove(&token) {
+                        on_reply(reply, cx);
+                    }
+                }
+                Change::Config { token, reply } => {
+                    if let Some(on_reply) = self.configs.remove(&token) {
                         on_reply(reply, cx);
                     }
                 }

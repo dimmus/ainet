@@ -28,6 +28,8 @@ use crate::pane_group::{Member, PaneAxis, PaneGroup};
 use crate::persistence::{
     self, Debounce, SavedAxis, SavedDock, SavedItem, SavedMember, SavedWindow, SavedWorkspace,
 };
+use crate::settings_view::SettingsItem;
+use crate::settings_view::pages::Page;
 use crate::terminal_item::TerminalItem;
 use crate::terminals::TerminalsItem;
 use crate::topology::{SubView, TopologyItem};
@@ -252,7 +254,8 @@ impl Workspace {
                 | SavedItem::Comms
                 | SavedItem::Map { .. }
                 | SavedItem::Terminals { .. }
-                | SavedItem::Topology { .. } => true,
+                | SavedItem::Topology { .. }
+                | SavedItem::Settings { .. } => true,
             })
         };
         let Some(saved) = saved else { return };
@@ -378,6 +381,10 @@ impl Workspace {
                     topology.update(cx, |t, cx| t.show_view(view, cx));
                 }
                 Box::new(topology)
+            }
+            SavedItem::Settings { page } => {
+                let page = page.as_deref().and_then(Page::from_name);
+                Box::new(cx.new(|cx| SettingsItem::new(fleet, page, window, cx)))
             }
             SavedItem::Unknown => return None,
         })

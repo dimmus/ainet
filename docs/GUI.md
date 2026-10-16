@@ -88,7 +88,7 @@ The patches live in the GUI's workspace only, so the console's build and
   in Zed's whole workspace, so they cannot be dependencies).
   Next to the rig switcher, the title bar has a button per view
   (Terminals, Topology, Map, Comms, the selected agent's Conversation,
-  Inbox; `title_bar::views`), each with its key in the tooltip, so no view
+  Inbox, and the Settings gear; `title_bar::views`), each with its key in the tooltip, so no view
   is reachable only by a key or the palette.
 - Assets: `crates/gui/src/assets.rs` embeds `crates/gui/assets` with
   `rust-embed` (also in debug builds, so the binary never reads the source
@@ -1427,8 +1427,9 @@ comments and trailing commas, every field optional, with a JSON schema
 for editors (`"$schema"`, see "Workspace restore, packaging and macOS"); saved changes apply at
 once (the file is checked every 750 ms: its time, size and a hash of its
 contents, so a quick re-save of the same size is seen too). If it does not parse, the last good
-settings stay and the status bar says what is wrong. `ctrl-,` opens it
-(creating it with every field commented out).
+settings stay and the status bar says what is wrong. `ctrl-,` opens the
+Settings view (below); `workspace: open settings file` in the palette
+opens the file itself (creating it with every field commented out).
 
 | Field | Default | |
 |---|---|---|
@@ -1452,8 +1453,8 @@ published schema describes them too (composed from `ainet_core::settings`),
 so an editor completes `runtimes.claude.permission_mode` or
 `permissions.global_rules` and shows which settings loosen safety.
 
-For the coming Settings view, `ainet-model` reads and writes these
-sections through the link: `Link::config(request, token)` sends
+The Settings view reads and writes these sections through the link
+(`FleetModel::config`, which routes the answer to its asker by token): `Link::config(request, token)` sends
 `Request::SettingsGet` (`key`: a setting or group, or all),
 `SettingsSet { key, value }`, `SettingsUnset { key }`, `SettingsReload`,
 `AlwaysList`, `AlwaysRevoke`, `HookStatus`, `HookInstall`, `HookUninstall`
@@ -1500,12 +1501,69 @@ format, with the contexts `Workspace`, `FleetPanel`, `Terminal`, `Inbox`,
 `Comms`, `CommsCompose`, `CommandLine`, `QueuePanel`, `Map`, `Terminals` (with `grid`), `Topology` (with `view`), `Conversation` (for user bindings; none by default), `Picker`, `TabSwitcher`, `Form` and `TextInput` (see "The workspace pieces" for the
 pane, dock and text keys). `~/.config/ainet/keymap.json` adds to them and
 overrides them (`null` unbinds), and reloads on save; bindings it cannot
-read are listed in the status bar and the rest apply. `ctrl-alt-,` opens
-it (`cmd-k cmd-s` on macOS). In a focused terminal every ctrl-letter goes
+read are listed in the status bar and the rest apply. `ctrl-alt-,`
+(`cmd-k cmd-s` on macOS) opens the Settings view's Keymap category; the
+palette's `workspace: open keymap file` opens the file. In a focused terminal every ctrl-letter goes
 to the agent, so the workspace's ctrl keys (`ctrl-b`, `ctrl-j`, `ctrl-q`, …)
 do nothing there; a test keeps it so. The actions are in
 `crates/gui/src/actions.rs`; `ui::KeyBinding::for_action` shows any of
 them as a hint.
+
+### The Settings view
+
+`workspace::OpenSettings` (`ctrl-,`, the gear in the title bar, the
+palette) opens it as a tab, after Zed's settings window
+(`crates/gui/src/settings_view/`): a search box and the categories on
+the left (the app's Appearance, Terminal, Keymap and Workspace; ainet's
+Daemon, Runtimes, Permissions, Messaging, Queue, Rigs & Specs,
+Discovery, Hooks, Retention, Cost and Diagnostics), the fields of the
+one picked on the right. The search matches every word against each
+field's label, description and key across all categories (results by
+category), counts the matches beside each category, and offers the key
+bindings it matches as a click to the Keymap. It is restored with the
+workspace, on its category.
+
+| File | What |
+|---|---|
+| `settings_view/field.rs` | a field without GPUI: `Field::app(key, label, description, kind)` and `Field::daemon(key, label, kind)` (the schema's description unless `.describe(…)`), `Kind::{Toggle, Dropdown(Vec<Choice>), Number { unit, min, max, step, integer }, Text, Path { directory }, List, Map, Theme}`, `.part_of(parent, when)` for a part shown only with some values of another (a custom line height's ratio), `.when_unset(words)`; reading values as words, typed text as JSON (range and whole numbers checked), stepping, search |
+| `settings_view/pages.rs` | `Page` (the categories, with their names and settings.json sections) and `fields()`, the list of every field by category |
+| `settings_view/mod.rs` | `SettingsItem`: values (the app's from its settings in force; ainet's from a `SettingsReport` asked of ainetd, or read from the file without one), inputs that follow the setting unless typed into, and `write(key, value)` |
+| `settings_view/controls.rs` | drawing: the nav, the search, banners, a field's row (label, the modified dot, reset, a "less safe" note from `ainet_core::settings::less_safe`, description, a footnote with the default, when it applies, the key and an environment variable that wins), and each control: Zed's `Switch`, `DropdownMenu` (only the listed values can be picked), a number with − and + and its unit, text, a path with Browse… (`prompt_for_paths`), list and name = value editors |
+| `settings_view/keymap_editor.rs` | the Keymap category |
+| `keymap_edit.rs` | binding and unbinding one key in keymap.json's text, comments kept |
+
+Each field says its default, has a dot while its value differs from it
+and a reset (which takes the key out of the file); a value equal to the
+default is also taken out rather than written, so the file keeps only
+what you changed. Writes: the app's keys through
+`settings::save_value` (the theme selector's way: only that value changes
+in the text, refused if the result would not read, then put in force at
+once); ainet's through ainetd (`SettingsSet` / `SettingsUnset`, which
+edit the same file the same way and apply it) when connected or in the
+demo, else `ainet_core::settings::set_in_file` on the file. What is
+refused (out of range, a broken file, ainetd's refusal) shows under the
+field and nothing is written; escape in a field puts its value back.
+The file's problems, ainetd's notice for an older daemon, keys ainet
+ignores and "ainetd is not running" show as banners. The theme field
+opens the theme selector, which previews as it moves.
+
+ainet's categories are placeholders for now, saying where their settings
+are (`ainet config list <section>`); the framework for them is in place
+and tested (each field kind over ainetd's keys, through the demo's
+ainetd and through the file).
+
+The Keymap category lists every binding by context: the defaults and
+yours (keymap.json), a default you replaced shown once as yours ("yours,
+over a default", or "unbound"), filtered by action, keys, context or
+source. Per row: Change Keys (press the new ones: they are caught
+before the keymap sees them, so bound keys are recorded too; at most a
+chord of two, a third starts again; enter saves, escape gives up), Add
+Keys (keeps the old), Remove (yours goes from the file; a default is
+unbound with `null`) and, on yours, Reset (your line goes, the default
+applies again). Changing a default's keys unbinds the old ones with
+`null`, as Zed's keymap editor does. A binding goes into the last
+section of keymap.json with that exact context, else a new section at
+the end; comments stay. Changes apply at once.
 
 ## Tests and CI
 
@@ -1542,6 +1600,7 @@ module; modules without tests of their own are covered where named):
 | `actions.rs`, `keymap.rs` | 1 | 3 | Zed's keymap format, every default binding naming a real action, a focused terminal getting every ctrl letter and the list keys, user overrides and errors |
 | `args.rs` | 5 | | flags and view names |
 | `assets.rs` | 2 | | every `ui::IconName` served, themes, fonts and keymaps bundled |
+| `settings_view/`, `keymap_edit.rs` | 14 | 7 | fields as words and typed numbers, search, every app field a setting with its default choice; keymap rows, binding and unbinding in keymap.json's text keeping comments and indentation; the view opening from its action, the title bar and the palette, each field kind writing settings.json with comments kept and the modified dot and reset, an out-of-range number said and escape restoring, a broken file left alone, search across categories and into the Keymap, ainet's settings through the demo's ainetd (toggle, a less safe dropdown, a refusal shown, Browse…, list, map) and into the file without ainetd, keys recorded (bound ones too, escape, a chord, a third starting again), removed and reset |
 | `settings.rs`, `json_edit.rs`, `watch.rs` | 17 | 1 | defaults, the template and schema, lenient JSON, clamping, a theme per appearance, saving into the text as written, never losing the file, writers at once never mixing their files, file watching |
 | `themes.rs`, `zed_theme.rs` | 2 | 3 | Deepharness by default, One Dark bundled, user themes loaded, reported and reloaded, palettes as themes |
 | `theme_selector.rs` | | 2 | preview, escape and a click outside restoring, the pick saved; a query matching nothing, a theme per appearance changing only that one, a broken settings.json left alone with a toast |
@@ -1577,7 +1636,8 @@ demo workspace offscreen with GPUI's own renderer
 which is wgpu without a surface, and the Linux app's cosmic-text text
 system) and writes `workspace.png`, `terminal.png`, `inbox.png`,
 `map.png`, `topology.png`, `topology-recent.png`, `topology-overview.png`,
-`topology-health.png` and `conversations.png` (two side by side) into
+`topology-health.png`, `settings.png`, `settings-keymap.png` and
+`conversations.png` (two side by side) into
 `target/screenshots/`:
 
 ```sh
@@ -1656,6 +1716,13 @@ Collected from the plan's phase notes; none of these is started.
   (`/queue` in Comms does), editing priority and tags, a reason when
   unclaiming, `@` completion in the handoff form; searching a report,
   YAML highlighting, transcript filters.
+- **Settings view:** ainet's categories (Daemon … Cost) and Diagnostics
+  are placeholders until their pages are built; fonts are typed, not
+  picked from a list; the categories cannot be moved through by keys;
+  ainet's values are asked for again when the tab is shown, not as the
+  file changes by hand; the keymap editor changes keys of the bindings
+  listed (and adds keys to their actions), but cannot bind an action no
+  row has or move a binding to another context.
 - **Map:** empty and stopped seats, edge kinds other than who directs
   whom, a menu on nodes.
 - **Palette and modals:** pickers for `/adopt` and `/discover`, editing a

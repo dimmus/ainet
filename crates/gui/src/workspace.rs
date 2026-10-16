@@ -27,10 +27,11 @@ use crate::actions::{
     ActivateNextItem, ActivateNextPane, ActivatePaneDown, ActivatePaneLeft, ActivatePaneRight,
     ActivatePaneUp, ActivatePreviousItem, ActivatePreviousPane, Allow, Always, Capture, CloseActiveItem,
     CloseAgent, CloseAllItems, CloseOtherItems, CloseWindow, Compose, Continue, Deny, MessageAgent,
-    NextWaiting, OpenComms, OpenConversation, OpenInbox, OpenKeymap, OpenMap, OpenSettings, OpenTerminal,
-    OpenTopology, Operator, Relaunch, ReleaseSeat, RemoveSeat, SelectNext, SelectPrev, ShowTranscript,
-    SplitDown, SplitRight, TileAll, TileConversations, ToggleBottomDock, ToggleCritterSize, ToggleLeftDock,
-    ToggleRightDock, ToggleSwitcher, ToggleTypingGuard, ToggleZoom, terminal as terminal_actions,
+    NextWaiting, OpenComms, OpenConversation, OpenInbox, OpenKeymap, OpenKeymapFile, OpenMap, OpenSettings,
+    OpenSettingsFile, OpenTerminal, OpenTopology, Operator, Relaunch, ReleaseSeat, RemoveSeat, SelectNext,
+    SelectPrev, ShowTranscript, SplitDown, SplitRight, TileAll, TileConversations, ToggleBottomDock,
+    ToggleCritterSize, ToggleLeftDock, ToggleRightDock, ToggleSwitcher, ToggleTypingGuard, ToggleZoom,
+    terminal as terminal_actions,
 };
 use crate::actions::{
     Down, Grow, Restore, Spawn, SwitchRig, Up, command_palette, tab_switcher, theme_selector,
@@ -60,6 +61,8 @@ use crate::report::ReportItem;
 use crate::rig_modals::{RigAction, RigPicker};
 use crate::seat_modals::SpawnModal;
 use crate::settings::{self, DockSide};
+use crate::settings_view::SettingsItem;
+use crate::settings_view::pages::Page;
 use crate::status_bar::StatusBar;
 use crate::switcher::AgentSwitcher;
 use crate::tab_switcher::TabSwitcher;
@@ -690,6 +693,51 @@ impl Workspace {
         topology
     }
 
+    /// Opens the Settings view and gives it the keyboard: activates its
+    /// tab where one is open (in any pane), else adds one to the active
+    /// pane; on `page`, if given.
+    pub fn open_settings(
+        &mut self,
+        page: Option<Page>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<SettingsItem> {
+        let mut found = None;
+        for pane in self.panes() {
+            let at = pane
+                .read(cx)
+                .items()
+                .position(|i| i.to_any().downcast::<SettingsItem>().is_ok());
+            if let Some(ix) = at {
+                self.active_pane = pane.clone();
+                pane.update(cx, |p, cx| p.activate_item(ix, true, window, cx));
+                found = pane
+                    .read(cx)
+                    .active_item()
+                    .and_then(|i| i.to_any().downcast::<SettingsItem>().ok());
+                break;
+            }
+        }
+        let item = match found {
+            Some(item) => {
+                if let Some(page) = page {
+                    item.update(cx, |s, cx| s.show_page(page, cx));
+                }
+                item
+            }
+            None => {
+                let fleet = self.fleet.clone();
+                let item = cx.new(|cx| SettingsItem::new(fleet, page, window, cx));
+                self.active_pane.update(cx, |p, cx| {
+                    p.add_item(Box::new(item.clone()), true, true, window, cx)
+                });
+                item
+            }
+        };
+        cx.notify();
+        item
+    }
+
     /// Opens the Topology view on `rig` (as it is, for `None`):
     /// `--view topology:<rig>`, `/view topology:<rig>`.
     pub fn show_topology(&mut self, rig: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
@@ -1262,10 +1310,17 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &ToggleBottomDock, window, cx| {
                 this.toggle_dock(DockPosition::Bottom, window, cx)
             }))
-            .on_action(cx.listener(|this, _: &OpenSettings, _, cx| {
-                this.open_config(settings::settings_file(), settings::TEMPLATE, cx)
+            .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
+                this.open_settings(None, window, cx);
             }))
-            .on_action(cx.listener(|this, _: &OpenKeymap, _, cx| {
+            .on_action(cx.listener(|this, _: &OpenKeymap, window, cx| {
+                this.open_settings(Some(Page::Keymap), window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &OpenSettingsFile, _, cx| {
+                let file = settings::file(cx).unwrap_or_else(settings::settings_file);
+                this.open_config(file, settings::TEMPLATE, cx)
+            }))
+            .on_action(cx.listener(|this, _: &OpenKeymapFile, _, cx| {
                 let file = keymap::user_file(cx).unwrap_or_else(keymap::keymap_file);
                 this.open_config(file, keymap::TEMPLATE, cx)
             }))

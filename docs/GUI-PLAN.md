@@ -848,6 +848,36 @@ takes (text unquoted; the schema decides), and a value that loosens
 safety is said to be less safe as it is set. Left: item 4, the GUI
 Settings view, and item 6's GUI tests.
 
+**Done: item 4, part one** (the view and the app's own categories).
+`workspace::OpenSettings` (`ctrl-,`, a gear in the title bar, the
+palette) opens a Settings tab (`crates/gui/src/settings_view/`): a search
+box and the categories on the left, fields on the right, as Zed's settings
+window. `OpenKeymap` (`ctrl-alt-,`) opens it on the Keymap; the files are
+`OpenSettingsFile` and `OpenKeymapFile`. Field kinds: toggle, dropdown
+(closed lists), number with unit, range and − / +, text, path with
+Browse…, list and name = value editors, and the theme (the theme
+selector, which previews). Each field has its description, default, a
+dot when it differs, a reset, when a change applies (ainet's from
+`ainet_core::settings::applies`), a "less safe" note where
+`less_safe` says so, and an environment variable that wins; errors show
+under it. The app's keys are written with `settings::save_value` (only
+that value changes in the text) and apply at once; ainet's go through
+ainetd (`FleetModel::config`, `SettingsSet` / `SettingsUnset`) when
+connected, else into the file with `set_in_file`. A value equal to its
+default is unset. Search matches label, description and key across every
+category, and the key bindings. Built: Appearance (theme, UI font and
+size, density, critter size), Terminal (font, size following the UI when
+unset, line height with a custom ratio, cursor, blinking), Workspace
+(command line, confirm quit, Fleet panel side and width) and Keymap: every
+binding by context with its source, filtered, keys changed or added by
+pressing them (caught before the keymap), removed (a default with
+`null`) and reset, written to keymap.json with comments kept
+(`keymap_edit.rs`). Headless tests cover each field kind, search, reset,
+writes keeping comments, ainetd and file paths, and recording. Left for
+part two: ainet's ten categories and Diagnostics (placeholders now; the
+framework takes `Field::daemon(key, label, kind)` entries in
+`pages::fields`).
+
 ## 6. Risks
 
 | Risk | Mitigation |

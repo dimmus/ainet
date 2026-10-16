@@ -337,6 +337,8 @@ pub struct AppSettings {
     buffer_font: Font,
     /// The file they come from and are saved to (none in tests).
     file: Option<PathBuf>,
+    /// Without a file (tests), the text saved so far.
+    memory: String,
     _watch: Option<Task<()>>,
 }
 
@@ -349,6 +351,7 @@ impl AppSettings {
             buffer_font: font(settings.terminal.font_family.clone()),
             settings,
             file: None,
+            memory: String::new(),
             _watch: None,
         }
     }
@@ -393,21 +396,60 @@ pub fn save_to(file: PathBuf, cx: &mut App) {
 /// appearance, the one for the system's appearance now), and the rest
 /// stays as written.
 pub fn save_theme(name: &str, cx: &mut App) -> Result<(), String> {
+    let appearance = SystemAppearance::global(cx).0;
+    edit_text(cx, |text| with_theme(text, name, appearance))
+}
+
+/// Sets the app's own setting at `path` (`["terminal", "font_size"]`) to
+/// `value` in settings.json, or removes it with `None` so its default
+/// applies. Only that value changes in the file's text; what would not
+/// read as the app's settings is refused and nothing is written.
+pub fn save_value(path: &[&str], value: Option<&serde_json::Value>, cx: &mut App) -> Result<(), String> {
+    let key = path.join(".");
+    edit_text(cx, |text| {
+        parse(text).map_err(|e| format!("settings.json does not parse: {e}; fix it first"))?;
+        let edited = match value {
+            Some(value) => {
+                let json = serde_json::to_string(value).map_err(|e| e.to_string())?;
+                ainet_core::jsonc::set(text, path, &json)
+            }
+            None => ainet_core::jsonc::unset(text, path),
+        }
+        .map_err(|e| format!("settings.json: {e}"))?;
+        parse(&edited).map_err(|e| match value {
+            Some(value) => format!("{key} cannot be {value}: {e}"),
+            None => format!("without {key}: {e}"),
+        })?;
+        Ok(edited)
+    })
+}
+
+/// Edits settings.json's text with `edit` and puts the result in force:
+/// written to the file whole, or kept in memory without one (tests).
+fn edit_text(cx: &mut App, edit: impl FnOnce(&str) -> Result<String, String>) -> Result<(), String> {
     let file = cx.global::<AppSettings>().file.clone();
     let text = match &file {
         Some(file) => read_settings(file)?,
-        None => String::new(),
+        None => cx.global::<AppSettings>().memory.clone(),
     };
-    let text = with_theme(&text, name, SystemAppearance::global(cx).0)?;
-    if let Some(file) = &file {
-        write_whole(file, &text).map_err(|e| format!("cannot save {}: {e}", file.display()))?;
-        reload(&text, cx);
-    } else {
-        let mut next = get(cx).clone();
-        next.theme = parse(&text)?.theme;
-        set(next, cx);
+    let edited = edit(&text)?;
+    match &file {
+        Some(file) => {
+            write_whole(file, &edited).map_err(|e| format!("cannot save {}: {e}", file.display()))?;
+            reload(&edited, cx);
+        }
+        None => {
+            let next = parse(&edited)?;
+            cx.global_mut::<AppSettings>().memory = edited;
+            set(next, cx);
+        }
     }
     Ok(())
+}
+
+/// The settings file the app follows and saves to (none in tests).
+pub fn file(cx: &App) -> Option<PathBuf> {
+    cx.global::<AppSettings>().file.clone()
 }
 
 /// settings.json's text, empty while there is none. Any other failure
@@ -478,6 +520,10 @@ pub fn with_theme(text: &str, name: &str, appearance: Appearance) -> Result<Stri
 /// Takes new settings from the file's text, or keeps the last good ones and
 /// reports why not.
 pub fn reload(text: &str, cx: &mut App) {
+    // Without a file (tests), the text is the one later edits start from.
+    if cx.global::<AppSettings>().file.is_none() {
+        cx.global_mut::<AppSettings>().memory = text.to_string();
+    }
     match parse(text) {
         Ok(settings) => {
             problems::set(problems::Source::Settings, None, cx);
@@ -494,9 +540,11 @@ pub fn set(settings: Settings, cx: &mut App) {
     }
     let watch = cx.global_mut::<AppSettings>()._watch.take();
     let file = cx.global_mut::<AppSettings>().file.take();
+    let memory = std::mem::take(&mut cx.global_mut::<AppSettings>().memory);
     let mut next = AppSettings::new(settings);
     next._watch = watch;
     next.file = file;
+    next.memory = memory;
     cx.set_global(next);
     apply_theme(cx);
     cx.refresh_windows();

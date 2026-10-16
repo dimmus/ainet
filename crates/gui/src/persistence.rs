@@ -158,6 +158,11 @@ pub enum SavedItem {
     Conversation {
         agent: String,
     },
+    /// The Settings view, on its category.
+    Settings {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        page: Option<String>,
+    },
     /// A kind this version does not know (a newer app's): dropped.
     #[serde(other)]
     Unknown,

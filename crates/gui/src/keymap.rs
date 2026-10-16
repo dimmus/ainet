@@ -204,6 +204,16 @@ pub fn user_file(cx: &App) -> Option<PathBuf> {
     cx.try_global::<UserKeymap>().and_then(|k| k.file.clone())
 }
 
+/// Saves the user's bindings to `file` from now on, without following it
+/// (tests).
+#[cfg(test)]
+pub fn save_to(file: PathBuf, cx: &mut App) {
+    cx.set_global(UserKeymap {
+        file: Some(file),
+        _watch: None,
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use gpui::TestAppContext;

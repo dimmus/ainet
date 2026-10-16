@@ -59,7 +59,8 @@ terminals streamed from ainetd, the Inbox, Comms, the Queue, Chatroom
 and Events, the Map, the command palette), with Zed's themes plus
 Deepharness and Omarchy, Zed's fonts, and Zed-style settings
 (`~/.config/ainet/settings.json`) and keymaps
-(`~/.config/ainet/keymap.json`) that apply as you save. It opens as you
+(`~/.config/ainet/keymap.json`) that apply as you save, with a Settings
+view (`ctrl-,`) to change them and a keymap editor that records keys. It opens as you
 left it: the window, docks, splits and tabs (an agent's terminal while
 the agent lives), per daemon socket, from
 `~/.local/state/ainet/gui.json`. The plan is
@@ -252,6 +253,15 @@ written directly. A value that lets agents do more without asking is
 called less safe as it is set. `--json` gives each of them as JSON. In
 the TUI, `/config [key]` shows the settings in force, `/set <key> <value>`
 and `/unset <key>` change them.
+
+In the desktop app, `ctrl-,` (or the gear in the title bar) opens the
+Settings view: a search box over categories, each field with its
+description, default, a dot when changed, a reset and when a change
+applies. The app's own settings are written to the file at once; ainet's
+go through ainetd as `ainet config set` does. `ctrl-alt-,` opens its
+Keymap category, where bindings are changed by pressing the new keys
+(written to keymap.json). The palette's "open settings file" and "open
+keymap file" open the files themselves.
 
 ainet's hooks reach the seats it starts on their own command line; for
 Claude Code sessions you start yourself, `ainet hooks install` (or
