@@ -698,6 +698,64 @@ columns; a mention's reply hint is a real command (`ainet chat send
 --rig docs --topic general "…"`); the Topology table's line between
 pods is a child, so the selection's left border keeps its colour.
 
+### Phase 10 — Settings for all of ainet (asked for 2026-10-16)
+
+"Sophisticated Settings to set up all aspects of ainet's workflow and
+infrastructure." Today only the GUI's look is configurable
+(`settings.json`, `keymap.json`); everything else is environment
+variables, CLI flags, spec YAML or compile-time constants, and
+`paths::config_file()` (`config.toml`) is never read. An inventory of
+what exists and what is hard-coded was taken on 2026-10-16; the plan:
+
+1. **One settings file for everything.** `~/.config/ainet/settings.json`
+   (JSON with comments, as Zed's and the GUI's today) gains sections the
+   daemon and the console read: `daemon`, `runtimes`, `permissions`,
+   `messaging`, `queue`, `rigs`, `discovery`, `hooks`, `retention`,
+   `cost`. The types live in ainet-core (MIT) with a JSON schema; the
+   GUI's own sections stay in the GUI. Unknown keys are kept, bad values
+   reported and the last good settings kept, as the GUI does now.
+2. **Wire the daemon to it**, replacing constants:
+   - *daemon*: autostart on/off, log level and file (appended, rotated),
+     socket, restore rigs on start.
+   - *runtimes* (Claude Code, Codex, shell): binary path, default model,
+     effort (passed at last: it is parsed and dropped today), permission
+     mode, extra args, environment, allowed/disallowed tools, extra MCP
+     servers, `--strict-mcp-config`, readiness timeouts; skills installed.
+   - *permissions*: how long a request is held, `/always` rules persisted
+     with list/revoke, the sensitive path lists, spec `permission_policy`
+     honoured (`locked` … `yolo`) where Claude Code allows it.
+   - *messaging*: paste settle and flush delays, delivery header, typing
+     guard default per seat, hold while interacting.
+   - *queue and watchdogs*: default interval and message, nudge default.
+   - *rigs and specs*: user spec directories, default cwd, restore policy,
+     snapshot on down, snapshot retention.
+   - *discovery*: auto-track Claude sessions on/off, tmux scanning on/off.
+   - *hooks*: install/uninstall/repair ainet's hooks in Claude Code's
+     settings (the existing unused installer), status shown.
+   - *retention*: in-memory caps, event log and snapshot pruning, inbox
+     expiry.
+   - *cost*: price table overrides, context window guesses.
+   Applied live where possible (a daemon reload on change), otherwise
+   marked "takes effect for new seats" or "after a daemon restart".
+3. **Protocol**: additive requests to read the effective settings and
+   their sources, to set values, to list and revoke `/always` rules, to
+   see hook status and install hooks, and to list the paths in use.
+4. **GUI Settings view** (`workspace::OpenSettings` opens it; the file
+   stays available): Zed-style, a searchable category list on the left
+   (Appearance, Terminal, Keymap, Workspace, Daemon, Runtimes,
+   Permissions, Messaging, Queue, Rigs & Specs, Discovery, Hooks,
+   Retention, Cost, Diagnostics) and fields on the right: toggles,
+   dropdowns, numbers with units, paths with Browse, list and key-value
+   editors; each with its description, default, a modified dot, reset to
+   default, and when it applies. Edits write the file keeping comments.
+   Diagnostics shows paths, versions, daemon pid and log tail. A keymap
+   editor lists bindings by context and records new ones.
+5. **Console parity**: `ainet config get|set|unset|list|path|edit` and
+   the TUI's `/set`.
+6. **Tests**: parsing and defaults, every wired value changing
+   behaviour (daemon tests), protocol round trips and old-daemon
+   fallback, GUI headless tests per category, comments preserved.
+
 ## 6. Risks
 
 | Risk | Mitigation |
