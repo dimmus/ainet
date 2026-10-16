@@ -104,12 +104,19 @@ impl History {
     }
 }
 
-/// What enter does with `line`: a `/command`, an `@Name` message, the
-/// answer to `question` (the Inbox's, when it shows one waiting), or a
-/// message to the selected agent. As the TUI's input line.
-pub fn command_for(store: &Store, question: Option<&Question>, line: &str) -> Command {
+/// What enter does with `line`: a `/command` (rig commands on
+/// `view_rig`, the rig the active view shows, `/answer` on `question`),
+/// an `@Name` message, the answer to `question` (the Inbox's, when it
+/// shows one waiting), or a message to the selected agent. As the TUI's
+/// input line.
+pub fn command_for(
+    store: &Store,
+    question: Option<&Question>,
+    view_rig: Option<&str>,
+    line: &str,
+) -> Command {
     if let Some(cmd) = line.strip_prefix('/') {
-        return commands::parse(store, cmd);
+        return commands::parse_in(store, cmd, view_rig, question);
     }
     match question {
         Some(question) if !line.starts_with('@') => command::answer_question(question, line.to_string()),
@@ -278,7 +285,13 @@ impl CommandLine {
         }
         self.history.push(&line);
         let question = self.question(cx);
-        let cmd = command_for(&self.fleet.read(cx).store, question.as_ref(), &line);
+        let view_rig = self.workspace.upgrade().and_then(|w| w.read(cx).view_rig(cx));
+        let cmd = command_for(
+            &self.fleet.read(cx).store,
+            question.as_ref(),
+            view_rig.as_deref(),
+            &line,
+        );
         let problem = match cmd {
             // `/close` with nobody selected, `/answer` with nothing asked.
             Command::Nothing => Some("nothing to act on".to_string()),
@@ -469,17 +482,17 @@ mod pure_tests {
         };
         // Plain text: the selected agent; `@Name`: that one.
         assert_eq!(
-            to(command_for(&store, None, "hi there")),
+            to(command_for(&store, None, None, "hi there")),
             (vec![other.clone()], "hi there".into())
         );
         assert_eq!(
-            to(command_for(&store, None, "@orch-lead go")),
+            to(command_for(&store, None, None, "@orch-lead go")),
             (vec![lead.clone()], "go".into())
         );
         // A question the Inbox shows takes plain text, not `@Name`.
         let mut question = store.inbox[0].clone();
         question.kind = InboxKind::Question;
-        match command_for(&store, Some(&question), "yes please") {
+        match command_for(&store, Some(&question), None, "yes please") {
             Command::Request(req, _) => {
                 assert!(
                     matches!(*req, Request::AnswerQuestion { item, ref answer } if item == question.id && answer == "yes please")
@@ -488,18 +501,21 @@ mod pure_tests {
             other => panic!("{other:?}"),
         }
         assert_eq!(
-            to(command_for(&store, Some(&question), "@orch-lead go")).0,
+            to(command_for(&store, Some(&question), None, "@orch-lead go")).0,
             vec![lead]
         );
         // `/commands` as the palette's.
         assert!(
-            matches!(command_for(&store, None, "/ps"), Command::Request(req, _) if matches!(*req, Request::Ps))
+            matches!(command_for(&store, None, None, "/ps"), Command::Request(req, _) if matches!(*req, Request::Ps))
         );
-        assert!(matches!(command_for(&store, None, "/down"), Command::Request(..)));
-        assert!(matches!(command_for(&store, None, "/nope"), Command::Error(e) if e.contains("/help")));
+        assert!(matches!(
+            command_for(&store, None, None, "/down"),
+            Command::Request(..)
+        ));
+        assert!(matches!(command_for(&store, None, None, "/nope"), Command::Error(e) if e.contains("/help")));
         // Nobody selected: plain text has nowhere to go.
         store.selected = None;
-        assert!(matches!(command_for(&store, None, "hi"), Command::Error(e) if e == "no such agent"));
+        assert!(matches!(command_for(&store, None, None, "hi"), Command::Error(e) if e == "no such agent"));
     }
 
     #[test]
@@ -707,6 +723,109 @@ mod tests {
         cx.simulate_keystrokes("enter");
         let sent = take_sent(&fleet, cx);
         assert!(sent.len() == 1 && sent[0].starts_with("Message"), "{sent:?}");
+    }
+
+    /// Gives the line the keyboard, wherever it is (a terminal's tile
+    /// keeps `ctrl-;` for itself).
+    fn focus_line(line: &Entity<CommandLine>, cx: &mut VisualTestContext) {
+        line.update_in(cx, |l, window, cx| {
+            if !l.is_focused(window, cx) {
+                l.toggle_focus(window, cx);
+            }
+        });
+    }
+
+    fn run_line(line: &Entity<CommandLine>, typed: &str, cx: &mut VisualTestContext) {
+        focus_line(line, cx);
+        cx.simulate_input(typed);
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    async fn rig_commands_act_on_the_rig_the_view_shows(cx: &mut TestAppContext) {
+        let (w, cx) = demo_workspace(cx);
+        let (fleet, line) = (fleet(&w, cx), line(&w, cx));
+        let selected = seat(&fleet, "dev-app@docs", cx);
+        fleet.update(cx, |f, cx| f.select(&selected, cx));
+        cx.run_until_parked();
+        take_sent(&fleet, cx);
+
+        // The grid shows infra; the selection is still in docs: infra, as
+        // the TUI's filtered grid.
+        w.update_in(cx, |w, window, cx| {
+            w.show_rig_terminals(Some("infra".into()), window, cx)
+        });
+        cx.run_until_parked();
+        run_line(&line, "/down", cx);
+        let sent = take_sent(&fleet, cx);
+        assert!(
+            sent.len() == 1 && sent[0].starts_with("Down") && sent[0].contains("\"infra\""),
+            "{sent:?}"
+        );
+
+        // `/cols 3` fixes the grid's columns, `/cols` fits them again.
+        run_line(&line, "/cols 3", cx);
+        let grid = w.update_in(cx, |w, window, cx| w.open_terminals(window, cx));
+        assert_eq!(grid.read_with(cx, |g, _| g.fixed_cols()), Some(3));
+        run_line(&line, "/cols", cx);
+        assert_eq!(grid.read_with(cx, |g, _| g.fixed_cols()), None);
+
+        // The Topology view on infra: the same.
+        w.update_in(cx, |w, window, cx| {
+            w.show_topology(Some("infra".into()), window, cx)
+        });
+        cx.run_until_parked();
+        run_line(&line, "/snapshot", cx);
+        let sent = take_sent(&fleet, cx);
+        assert!(
+            sent.len() == 1 && sent[0].contains("\"infra\"") && !sent[0].contains("\"docs\""),
+            "{sent:?}"
+        );
+
+        // Elsewhere, the selected agent's rig.
+        w.update_in(cx, |w, window, cx| w.open_map(window, cx));
+        cx.run_until_parked();
+        run_line(&line, "/snapshot", cx);
+        let sent = take_sent(&fleet, cx);
+        assert!(sent.len() == 1 && sent[0].contains("\"docs\""), "{sent:?}");
+    }
+
+    #[gpui::test]
+    async fn answer_answers_the_question_the_inbox_selects(cx: &mut TestAppContext) {
+        let (w, cx) = demo_workspace(cx);
+        let (fleet, line) = (fleet(&w, cx), line(&w, cx));
+        let lead = seat(&fleet, "orch-lead@docs", cx);
+        let selected = seat(&fleet, "dev-app@docs", cx);
+        fleet.update(cx, |f, cx| f.select(&selected, cx));
+        // Two questions: the selected agent's, and the one the Inbox
+        // selects.
+        let question = |id: u64, agent: &str| ainet_core::InboxItem {
+            id,
+            agent: agent.to_string(),
+            kind: InboxKind::Question,
+            summary: "which platform?".into(),
+            detail: "which platform?".into(),
+            created: 0,
+            waiting: true,
+            options: vec!["linux".into(), "mac".into()],
+            multi_select: false,
+        };
+        let (theirs, mine) = (question(3000, &lead), question(3001, &selected));
+        for item in [theirs.clone(), mine] {
+            fleet.update(cx, |f, cx| {
+                f.receive(vec![Msg::Event(Box::new(Event::Inbox { item }))], cx)
+            });
+        }
+        let inbox = w.update_in(cx, |w, window, cx| w.open_inbox(Some(3000), window, cx));
+        inbox.update(cx, |i, cx| i.select(3000, cx));
+        cx.run_until_parked();
+        take_sent(&fleet, cx);
+        run_line(&line, "/answer both", cx);
+        assert_eq!(
+            take_sent(&fleet, cx),
+            tui(command::answer_question(&theirs, "both".into()))
+        );
     }
 
     #[gpui::test]

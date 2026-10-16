@@ -14,16 +14,29 @@ use crate::args::View;
 use crate::fleet::FleetModel;
 use crate::workspace::Workspace;
 
-/// What a `/command` line (without its `/`) asks for. The app has no view
-/// filtered to one rig, so rig commands act on the selected agent's rig
-/// unless they name one; `/answer` answers the question waiting on you
-/// (the selected agent's first), as the TUI's answers the one selected.
+/// What a `/command` line (without its `/`) asks for, typed where no view
+/// says which rig or question is meant: rig commands act on the selected
+/// agent's rig unless they name one; `/answer` answers the question
+/// waiting on you (the selected agent's first).
 pub fn parse(store: &Store, line: &str) -> Command {
+    parse_in(store, line, None, None)
+}
+
+/// [`parse`], typed while a view shows `view_rig` (the Terminals grid or
+/// the Topology view filtered to one rig, which rig commands then act on,
+/// as in the TUI) or the Inbox selects `inbox_item` (which `/answer`
+/// answers, as the TUI's answers the one selected).
+pub fn parse_in(
+    store: &Store,
+    line: &str,
+    view_rig: Option<&str>,
+    inbox_item: Option<&InboxItem>,
+) -> Command {
     command::parse(
         &command::Context {
             store,
-            view_rig: None,
-            inbox_item: question(store),
+            view_rig,
+            inbox_item: inbox_item.or_else(|| question(store)),
         },
         line,
     )
@@ -87,7 +100,10 @@ pub fn run(fleet: &Entity<FleetModel>, cmd: Command, window: &mut Window, cx: &m
             }
             Ok(View::Review) | Err(_) => return console_only(fleet, cx),
         },
-        Command::Help | Command::Cols(_) => return console_only(fleet, cx),
+        // The Terminals grid's columns, as the TUI's: `/cols` alone
+        // goes back to fitting them to the window.
+        Command::Cols(cols) => return set_cols(cols.map(usize::from), window, cx),
+        Command::Help => return console_only(fleet, cx),
     };
     window.dispatch_action(action, cx);
     None
@@ -100,6 +116,19 @@ fn show_terminals(rig: Option<String>, window: &mut Window, cx: &mut App) -> Opt
     let workspace = window.root::<Workspace>().flatten()?;
     window.defer(cx, move |window, cx| {
         workspace.update(cx, |w, cx| w.show_rig_terminals(rig, window, cx));
+    });
+    None
+}
+
+/// Opens the Terminals grid with `cols` columns (fitted to the window
+/// for `None`), once the view that ran the command is done.
+fn set_cols(cols: Option<usize>, window: &mut Window, cx: &mut App) -> Option<String> {
+    let workspace = window.root::<Workspace>().flatten()?;
+    window.defer(cx, move |window, cx| {
+        workspace.update(cx, |w, cx| {
+            let grid = w.open_terminals(window, cx);
+            grid.update(cx, |grid, cx| grid.set_fixed_cols(cols, cx));
+        });
     });
     None
 }

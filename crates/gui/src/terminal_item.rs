@@ -686,12 +686,15 @@ impl Item for TerminalItem {
         cx.notify();
     }
 
+    /// Off show: a size still on its way is dropped with it.
     fn deactivated(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        self.resize = None;
         let id = cx.entity_id();
         self.fleet.update(cx, |fleet, cx| fleet.hide_terminal(id, cx));
     }
 
     fn on_removed(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        self.resize = None;
         let (id, agent) = (cx.entity_id(), self.agent.clone());
         self.fleet.update(cx, |fleet, cx| {
             fleet.hide_terminal(id, cx);

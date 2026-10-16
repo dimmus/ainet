@@ -600,8 +600,12 @@ impl FleetModel {
     /// the agent's pane takes this item's size (see
     /// [`FleetModel::claim_size`]), asks it to, once per change, and
     /// fetches the screen. Other views of the agent paint the screen at
-    /// the size it has.
+    /// the size it has. An item no longer on show (its size was late) is
+    /// not heard: it would size the pane for a view nobody sees.
     pub fn resize_terminal(&mut self, item: EntityId, agent: &str, size: (u16, u16), cx: &mut Context<Self>) {
+        if self.shown.get(&item).map(String::as_str) != Some(agent) {
+            return;
+        }
         self.laid_out.insert(item, (agent.to_string(), size));
         let owner = *self.size_owner.entry(agent.to_string()).or_insert(item);
         if owner == item && self.ask_size(agent, size) {
@@ -1270,6 +1274,20 @@ mod tests {
         assert_eq!(resizes(cx), [(41, 121)]);
         fleet.update(cx, |f, cx| f.hide_terminal(tab, cx));
         assert!(resizes(cx).is_empty());
+
+        // A size that comes after its view was hidden is not heard, and
+        // the hidden view never passes it on.
+        fleet.update(cx, |f, cx| {
+            f.show_terminal(tab, &a, cx);
+            f.resize_terminal(tab, &a, (30, 90), cx);
+            f.show_terminal(tile, &a, cx);
+            f.resize_terminal(tile, &a, (10, 40), cx);
+            f.hide_terminal(tab, cx);
+            f.resize_terminal(tab, &a, (50, 150), cx);
+        });
+        assert_eq!(resizes(cx), [(30, 90), (10, 40)]);
+        fleet.update(cx, |f, cx| f.hide_terminal(tile, cx));
+        assert!(resizes(cx).is_empty(), "the hidden tab is no heir");
     }
 
     #[gpui::test]

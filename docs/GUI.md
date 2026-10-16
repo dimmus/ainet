@@ -596,10 +596,15 @@ selected agent · Tab completes" with its key while nothing is typed.
 A line means what it means in the TUI's input line, through the shared
 command language (`command_line::command_for`):
 
-- **`/command`**: `commands::parse` and `commands::run`, as in the palette
-  and Comms: a request through the fleet (long text as a report tab), the
-  console's own commands as the app's actions (`/view inbox` opens the
-  Inbox, `/allow` opens it on the oldest request, …). While typing the
+- **`/command`**: `commands::parse_in` and `commands::run`, as in the
+  palette and Comms: a request through the fleet (long text as a report
+  tab), the console's own commands as the app's actions (`/view inbox`
+  opens the Inbox, `/allow` opens it on the oldest request, `/cols 3`
+  fixes the Terminals grid's columns and `/cols` fits them again, …). As
+  in the TUI, rig commands (`/down`, `/snapshot`, `/grow`, …) without a
+  rig act on the rig the active tab shows (`Workspace::view_rig`: the
+  grid or the Topology view filtered to one), and `/answer` answers the
+  question the Inbox selects when it is the active tab. While typing the
   name the strip lists the commands it may be (`/sp`: `/spawn  /spec
   /specs`); once it is whole, its usage and what it does (`/grow <pod>
   <member> [runtime] [ROLE] · add a seat to the rig`), from
@@ -677,7 +682,9 @@ palette lists it as "workspace: open topology"), `--view topology` or
 the palette, Comms or the command line (a rig that is not there is said,
 as an error). An open one is activated. It starts on the selected
 agent's rig, else the first rig, else the loose agents; the tab reads
-"Topology · docs".
+"Topology · docs". A rig asked for is kept until ainetd's first snapshot
+has come (the store is empty before it), and only then, if it is not
+there, gives way to that default.
 
 Left, the **explorer**: TOPOLOGY, this host (`gethostname`), each rig
 (its status dot, running/seats), its pods in the order the rig lists
@@ -804,7 +811,8 @@ already open stays where it is), as OpenRig shows two seats at once.
   - *Messages* ainetd typed into the terminal: a framed block, "Message
     #4" (or "Reply #9 to #7", "Mention in docs · general"), From (in the
     sender's colour), To (the seat), Sent, a rule, the body, a rule, and
-    `↩ Reply: ainet msg reply 4 "…"`.
+    `↩ Reply: ainet msg reply 4 "…"` (for a mention, `ainet chat send
+    --rig docs --topic general "…"`).
   - Commands of ainet and OpenRig (`ainet queue show …`, `rig send …`,
     after a space, quote, bracket or backtick and followed by one of
     their subcommands, to the closing backtick or the end of the line)
@@ -845,7 +853,9 @@ its transcript yet another (`NO_TRANSCRIPT`).
 the first tool call since your last prompt still waiting for its result
 (`resume_after`), and splices it in (`merge`), when its agent moves (its
 state, its last tool, a message to or from it, a new snapshot; a new
-transcript, a new session in the seat, is read from the start), and every
+transcript, a new session in the seat, is read from the start, and a
+reply still on its way from the old one is dropped by its generation),
+and every
 3 s (`POLL_EVERY`) while it shows, since words are written without a
 hook firing. A hidden tab asks nothing and catches up once shown; one
 request at a time. `FleetModel::conversation` routes the reply to the
@@ -1205,7 +1215,7 @@ All in the modal layer, on the picker and the text field above:
 | File | What | After Zed's |
 |---|---|---|
 | `command_palette.rs` | `CommandPalette` (`ctrl-shift-p`): every action available where the keyboard was (`Window::available_actions`; `menu::*` left out), named in words as Zed's (`humanize`: `workspace::ToggleLeftDock` is "workspace: toggle left dock"), with its key binding there (`ui::KeyBinding::for_action_in`), fuzzy filtered (`normalize` lets `workspace::toggle_left` find it too), the ones run from it lately first (kept with the workspace). Picking one goes back where the keyboard was and runs it there. A line starting with `/`, or one that matches no action, is a console command: `commands::parse` (`command::parse`, no rig in view, so the selected agent's rig) says in its row what it does (`launching docs`) or what is wrong (the usage, `no command /x`); enter runs it, or stays open while it is wrong | `command_palette` |
-| `commands.rs` | the console's command language for the app, shared with Comms and the command line (`run` returns what was wrong, also shown as a toast): requests through the fleet, the console's own commands (`/view`, `/allow`, `/quit`, …) as the app's actions. `/answer <text>` answers the question waiting on you (`commands::question`: the selected agent's first, else the oldest), as the TUI's answers the one selected. `/view fleet` focuses the Fleet, `/view terminals` opens the Terminals grid on every rig, `/view rig:<name>` and `/view <rig>` on that rig (`Workspace::show_rig_terminals`), whichever agent is selected; `/view topology` and `/view topology:<rig>` the Topology view (`Workspace::show_topology`); another name says there is no such view or rig | — |
+| `commands.rs` | the console's command language for the app, shared with Comms and the command line (`run` returns what was wrong, also shown as a toast): requests through the fleet, the console's own commands (`/view`, `/allow`, `/quit`, …) as the app's actions. `/answer <text>` answers the question waiting on you (`commands::question`: the selected agent's first, else the oldest), as the TUI's answers the one selected. `/view fleet` focuses the Fleet, `/view terminals` opens the Terminals grid on every rig, `/view rig:<name>` and `/view <rig>` on that rig (`Workspace::show_rig_terminals`), whichever agent is selected; `/view topology` and `/view topology:<rig>` the Topology view (`Workspace::show_topology`); another name says there is no such view or rig. `/cols [n]` opens the Terminals grid with n columns, or fitted again. `parse_in` takes the rig the active view shows and the Inbox's selected question, as the TUI's `Context` does | — |
 | `up_modal.rs` | `fleet::Up`: `SpecPicker` over the library (`Request::Specs`, through the new `FleetModel::list`), with what is typed offered as a source of its own (a spec file's path, or a name); then `UpModal`: working directory (Browse… asks the system for a folder, `cx.prompt_for_paths`), rig name, fresh seats (`dev.impl, dev.review`). **Plan** shows what would launch (`UpSpec { plan: true }`, `FleetModel::ask`) in the form; **Launch** (or enter in the last field) sends `Up`. Both are `command::up` | `file_finder`, `ui::Modal` |
 | `rig_modals.rs` | `fleet::SwitchRig` (the title bar's rig switcher, which names the selected agent's rig, `title_bar::rig_label`): a `RigPicker`; picking a rig selects its first live agent in the Fleet's order (`rig_modals::first_agent`), so the Fleet, Agent panel, Chatroom and the rig commands follow it. `fleet::Restore`: a `RigPicker`, then `RestoreModal`: the snapshots (`Request::SnapshotList`), the latest by default, picked by click or `up`/`down`; the rig's seats as checkboxes to start fresh; enter restores (`command::restore`). `fleet::Down`: `DownModal` asks about the selected agent's rig (or the only one; else a rig picker first), with **Take a snapshot first** checked; enter takes it down (`command::down`) | — |
 | `seat_modals.rs` | `fleet::Spawn` (`s` in the Fleet): `SpawnModal`, the runtime (claude-code, codex, terminal), working directory (Browse…) and role, as `/spawn` (`command::spawn`). `fleet::Grow`: `GrowModal` for the selected agent's rig (else a rig picker): pod, member, runtime (or the rig's default), role, as `/grow` (`command::grow`); it says so when the pod or member is missing | — |
@@ -1486,14 +1496,14 @@ module; modules without tests of their own are covered where named):
 | `workspace/persist.rs`, `persistence.rs` | 10 | 7 | the file's format and versions, folding gone tabs, bounds, the debounce; a workspace coming back as left (the Fleet's selection too), gone agents dropped quietly, saving once settled, on close and on quit, saved panes kept while ainetd is silent |
 | `modal_layer.rs`, `picker.rs`, `switcher.rs`, `tab_switcher.rs` | | 4 | filtering, keys, escape; the agent switcher (in `workspace.rs`); `ctrl-tab` |
 | `text_input/` | 8 | 5 | the buffer's edits, moves, undo and IME offsets; typing, clipboard, several lines, read-only; Zed's `InputField` on it |
-| `fleet.rs` | | 9 | notices, quiet requests, reconnects, the fetch pump, streamed terminals, changed screens announced, failed and incompatible daemons, the latest view sizing an agent's pane |
+| `fleet.rs` | | 9 | notices, quiet requests, reconnects, the fetch pump, streamed terminals, changed screens announced, failed and incompatible daemons, the latest view sizing an agent's pane (a size from a hidden view not heard) |
 | `fleet_panel.rs`, `message.rs`, `critter.rs` | 6 | 7 | the TUI's order, keys and folds, clicks, the agent menu's requests, `m` and the message modal, critters drawn and animated only while drawn |
 | `agent_panel.rs` | 2 | 1 | the selected agent, the gauge, the sparkline |
 | `terminal_item.rs`, `terminal_element.rs`, `terminal_layout.rs`, `terminal_input.rs` | 16 | 12 | layout, colours, selections, row cache and keys; key encoding; the screen drawn, focus and `Interact`, keys past the workspace, one `Resize`, scrollback, copy and paste, the right-click menu by its keys (Paste, Send Ctrl-C, Copy, Clear Selection, Message…, Zoom; escape types nothing), redrawing only what changed |
 | `terminals.rs` | | 11 | the Terminals grid: tiles in the TUI's order, the rig filter, columns, a click and `ctrl-alt` arrows giving tiles the keys with `Interact`, zoom, a hidden grid fetching nothing, tiles following agents, the size rule, `OpenTerminal` into a tile, views opening it |
-| `conversation.rs` | 3 | 6 | the Conversation view: commands found in text, tool titles and reply hints, asking again from a call still running and merging; the demo's thread drawn, the prompt box's request and the thread growing, a hidden tab catching up and polling, Codex's notice, an older daemon's text, the keys and tiling a rig |
-| `topology.rs` | | 9 | the Topology view: the tree and the docs table by pod, scopes by click and `ctrl-r`, the filter keeping its letters, enter and a double click opening terminals, the agent menu, the tabs, the Graph, Health, Recent showing items, views and commands opening it, an empty fleet |
-| `command_line.rs` | 4 | 6 | the history, lines as the TUI's and their previews; each kind of line sent through the demo link, errors in the line and as toasts, completion, recall, `ctrl-;` and escape, letters never reaching other views' keys, the setting |
+| `conversation.rs` | 3 | 7 | the Conversation view: commands found in text, tool titles and reply hints, asking again from a call still running and merging; the demo's thread drawn, the prompt box's request and the thread growing, a hidden tab catching up and polling, a new session dropping the old one's reply, Codex's notice, an older daemon's text, the keys and tiling a rig |
+| `topology.rs` | | 10 | the Topology view: the tree and the docs table by pod, scopes by click and `ctrl-r`, the filter keeping its letters, enter and a double click opening terminals, the agent menu, the tabs, the Graph, Health, Recent showing items, views and commands opening it, a rig asked for waiting for the first snapshot, an empty fleet |
+| `command_line.rs` | 4 | 8 | the history, lines as the TUI's and their previews; each kind of line sent through the demo link, rig commands on the rig the grid or Topology view shows and `/cols`, `/answer` on the Inbox's question, errors in the line and as toasts, completion, recall, `ctrl-;` and escape, letters never reaching other views' keys, the setting |
 | `inbox.rs` | 4 | 8 | order, detail styles, picks, the glow; the answer keys, cards by selection and click, the Allow, Always and Deny buttons answering their own card, questions, `ctrl-shift-y`, history, alerts |
 | `comms.rs`, `commands.rs` | 6 | 6 | rows, splices, sticking to the end, mentions, code; lines sent as the TUI's, completion, keys, threads, clicks |
 | `queue_panel.rs`, `queue_form.rs`, `chatroom.rs`, `events_panel.rs`, `report.rs` | 1 | 9 | the queue's order and chips, every menu entry and form, right click; chat rooms and the cap; the events log; reports |

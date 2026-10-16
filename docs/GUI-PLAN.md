@@ -685,6 +685,19 @@ app's demo tells conversations that grow as it talks; the console's
 demo answers as before. The TUI only gained a no-op match arm for the
 new `Change::Conversation`.
 
+After review: `--view topology:RIG` keeps its rig until ainetd's first
+snapshot; a terminal size that comes after its view was hidden is not
+heard (nor kept as an heir), and a hidden `TerminalItem` drops the size
+it was about to send; a Conversation tab drops a reply asked of the
+session before a new transcript (a generation count) and asks again
+once the fleet is done applying the reply, never inside its update;
+the command line's `/commands` act on the rig the grid or the Topology
+view shows and `/answer` on the Inbox's selected question
+(`commands::parse_in`), as the TUI's; `/cols [n]` sets the grid's
+columns; a mention's reply hint is a real command (`ainet chat send
+--rig docs --topic general "…"`); the Topology table's line between
+pods is a child, so the selection's left border keeps its colour.
+
 ## 6. Risks
 
 | Risk | Mitigation |

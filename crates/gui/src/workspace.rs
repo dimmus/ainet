@@ -257,6 +257,18 @@ impl Workspace {
         inbox.read(cx).waiting_question(cx)
     }
 
+    /// The rig the active tab shows, if it shows one: the Terminals grid
+    /// or the Topology view filtered to it. Rig commands typed in the
+    /// command line act on it, as the TUI's do on its filtered grid.
+    pub fn view_rig(&self, cx: &App) -> Option<String> {
+        let item = self.active_pane.read(cx).active_item()?.to_any();
+        if let Ok(grid) = item.clone().downcast::<TerminalsItem>() {
+            return grid.read(cx).rig().map(str::to_string);
+        }
+        let topology = item.downcast::<TopologyItem>().ok()?;
+        topology.read(cx).scope().and_then(Scope::rig).map(str::to_string)
+    }
+
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn panes(&self) -> Vec<Entity<Pane>> {
         self.center.panes().into_iter().cloned().collect()

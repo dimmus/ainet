@@ -216,7 +216,6 @@ impl TopologyItem {
         this
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn scope(&self) -> Option<&Scope> {
         self.scope.as_ref()
     }
@@ -277,10 +276,15 @@ impl TopologyItem {
     /// the default), the rows through the filter, the changes. The
     /// selections stay on their row and change while they are shown.
     fn sync(&mut self, cx: &mut Context<Self>) {
-        let store = &self.fleet.read(cx).store;
+        let fleet = self.fleet.read(cx);
+        // Before ainetd's first snapshot the store is empty, so a rig
+        // asked for (`--view topology:RIG`) is kept until it can be told
+        // apart from one that is gone.
+        let ready = fleet.snapshots() > 0;
+        let store = &fleet.store;
         self.tree = topology::tree(store, &self.host);
         let mut moved = false;
-        if self.scope.as_ref().is_none_or(|s| !s.exists(store)) {
+        if self.scope.as_ref().is_none_or(|s| ready && !s.exists(store)) {
             let scope = topology::default_scope(store);
             moved = scope != self.scope;
             self.scope = scope;
@@ -827,8 +831,19 @@ impl TopologyItem {
             } else {
                 gpui::transparent_black()
             })
+            // A line between pods, drawn as a child: a div has one border
+            // colour for all sides, and the left one marks the selection.
             .when(r.first_in_pod && ix > 0, |row| {
-                row.border_t_1().border_color(colors.border_variant)
+                row.child(
+                    div()
+                        .debug_selector(move || format!("TOPOLOGY-POD-LINE-{ix}"))
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .w_full()
+                        .h_px()
+                        .bg(colors.border_variant),
+                )
             })
             .when(selected, |row| row.bg(colors.ghost_element_selected))
             .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
@@ -1257,7 +1272,7 @@ impl Render for TopologyItem {
 #[cfg(all(test, not(target_os = "macos")))]
 mod tests {
     use ainet_core::{QState, Request};
-    use ainet_model::Command;
+    use ainet_model::{Command, Msg};
     use gpui::{Modifiers, TestAppContext, VisualTestContext};
 
     use super::*;
@@ -1372,6 +1387,10 @@ mod tests {
                 cx.debug_bounds(format!("TOPOLOGY-ROW-{ix}").leak()).is_some(),
                 "row {ix} drawn"
             );
+            // A line above each pod but the first, apart from the
+            // selection's left border.
+            let line = cx.debug_bounds(format!("TOPOLOGY-POD-LINE-{ix}").leak());
+            assert_eq!(line.is_some(), ix == 1 || ix == 4, "pod line above row {ix}");
         }
         assert_eq!(
             topology.read_with(cx, |t, _| t.summary().to_string()),
@@ -1679,6 +1698,34 @@ mod tests {
         assert_eq!(wrong.as_deref(), Some("no rig named nope"));
         let tabs = w.read_with(cx, |w, cx| w.active_pane().read(cx).items().count());
         assert_eq!(tabs, 1);
+    }
+
+    #[gpui::test]
+    async fn a_rig_asked_for_waits_for_the_first_snapshot(cx: &mut TestAppContext) {
+        init_test(cx);
+        let (w, cx) = cx.add_window_view(|window, cx| {
+            let fleet = cx.new(|_| FleetModel::offline());
+            Workspace::new(
+                fleet,
+                Some(View::Topology {
+                    rig: Some("infra".into()),
+                }),
+                window,
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        let topology = active::<TopologyItem>(&w, cx).expect("--view topology:infra");
+        let scope = |cx: &mut VisualTestContext| topology.read_with(cx, |t, _| t.scope().cloned());
+        assert_eq!(scope(cx), Some(Scope::Rig("infra".into())));
+
+        // The snapshot arrives later, as ainetd's does: still infra.
+        let fleet = fleet(&w, cx);
+        let snapshot = Msg::Snapshot(Box::new(ainet_model::Demo::new().snapshot()));
+        fleet.update(cx, |f, cx| f.receive(vec![Msg::Connected(true), snapshot], cx));
+        cx.run_until_parked();
+        assert_eq!(scope(cx), Some(Scope::Rig("infra".into())));
+        assert!(!members(&topology, cx).is_empty());
     }
 
     #[gpui::test]

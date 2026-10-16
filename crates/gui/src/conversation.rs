@@ -158,7 +158,11 @@ pub fn tool_title(entry: &ConversationEntry) -> String {
 /// How the agent answers a message it got: the command ainetd suggests.
 pub fn reply_hint(entry: &ConversationEntry) -> Option<String> {
     match (&entry.room, entry.message) {
-        (Some(room), _) => Some(format!("ainet chat send in {room}")),
+        // The room reads "docs · general": the rig, then the topic.
+        (Some(room), _) => Some(match room.split_once(" · ") {
+            Some((rig, topic)) => format!("ainet chat send --rig {rig} --topic {topic} \"…\""),
+            None => format!("ainet chat send --rig {room} \"…\""),
+        }),
         (None, Some(id)) => Some(format!("ainet msg reply {id} \"…\"")),
         (None, None) => None,
     }
@@ -234,6 +238,9 @@ pub struct ConversationItem {
     /// A request is on its way; `again` if something moved meanwhile.
     asking: bool,
     again: bool,
+    /// The session read, counted up when the transcript changes, so a
+    /// reply asked of the old one is not merged into the new.
+    generation: u64,
     /// Its tab is on show; `stale` if something moved while it was not.
     shown: bool,
     stale: bool,
@@ -302,6 +309,7 @@ impl ConversationItem {
             loaded: Loaded::Loading,
             asking: false,
             again: false,
+            generation: 0,
             shown: false,
             stale: false,
             seen: None,
@@ -384,6 +392,7 @@ impl ConversationItem {
         let new_session = seen.as_ref().map(|s| &s.transcript) != self.seen.as_ref().map(|s| &s.transcript);
         self.seen = seen;
         if new_session {
+            self.generation += 1;
             let old = self.entries.len();
             self.entries.clear();
             self.list.splice(0..old, 0);
@@ -410,6 +419,7 @@ impl ConversationItem {
         };
         let this = cx.weak_entity();
         let agent = self.agent.clone();
+        let generation = self.generation;
         self.fleet.update(cx, |fleet, cx| {
             fleet.conversation(
                 &agent,
@@ -417,7 +427,7 @@ impl ConversationItem {
                 TAIL,
                 move |reply, cx| {
                     // Closed meanwhile: nobody to tell.
-                    let _ = this.update(cx, |item, cx| item.receive(after, reply, cx));
+                    let _ = this.update(cx, |item, cx| item.receive(generation, after, reply, cx));
                 },
                 cx,
             )
@@ -426,11 +436,24 @@ impl ConversationItem {
 
     fn receive(
         &mut self,
+        generation: u64,
         after: Option<u64>,
         reply: Result<ainet_core::Conversation, String>,
         cx: &mut Context<Self>,
     ) {
         self.asking = false;
+        // Asked of the session before: its entries and ids (offsets in
+        // the old file) mean nothing in the new one. Read it from the
+        // start instead.
+        if generation != self.generation {
+            self.again = false;
+            if self.shown {
+                self.refresh_soon(cx);
+            } else {
+                self.stale = true;
+            }
+            return;
+        }
         match reply {
             Ok(c) => {
                 match after.filter(|_| c.plain.is_none()) {
@@ -458,10 +481,20 @@ impl ConversationItem {
             Err(why) => self.loaded = Loaded::Failed(why),
         }
         if std::mem::take(&mut self.again) {
-            self.refresh(cx);
+            self.refresh_soon(cx);
         }
         cx.emit(ItemEvent::UpdateTab);
         cx.notify();
+    }
+
+    /// [`Self::refresh`], once the fleet is done: a reply is heard while
+    /// the fleet applies it, and asking again from there would update
+    /// the fleet inside its own update.
+    fn refresh_soon(&mut self, cx: &mut Context<Self>) {
+        let this = cx.weak_entity();
+        cx.defer(move |cx| {
+            let _ = this.update(cx, |item, cx| item.refresh(cx));
+        });
     }
 
     /// Makes the thread follow its end, or not, as Comms does.
@@ -1217,7 +1250,7 @@ mod pure_tests {
         m.room = Some("docs · general".into());
         assert_eq!(
             reply_hint(&m).as_deref(),
-            Some("ainet chat send in docs · general")
+            Some("ainet chat send --rig docs --topic general \"…\"")
         );
     }
 
@@ -1447,6 +1480,31 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(asked(&w, cx).len(), 3);
         assert_eq!(talk.read_with(cx, |c, _| c.entries().len()), before + 1);
+    }
+
+    #[gpui::test]
+    async fn a_new_session_drops_the_old_ones_reply(cx: &mut TestAppContext) {
+        let (w, cx) = demo_workspace(cx);
+        let talk = open(&w, "dev-app@docs", cx);
+        let id = talk.read_with(cx, |c, _| c.agent_id().to_string());
+        let all = talk.read_with(cx, |c, _| c.entries().to_vec());
+        // Asked for what came after the second entry: the old session's
+        // rest is on its way when the seat starts a new transcript.
+        talk.update(cx, |c, cx| {
+            c.entries.truncate(2);
+            c.list.reset(2);
+            c.refresh(cx);
+        });
+        fleet(&w, cx).update(cx, |f, cx| {
+            let agent = f.store.agents.get_mut(&id).expect("the agent");
+            agent.transcript = Some("/tmp/new-session.jsonl".into());
+            cx.notify();
+        });
+        cx.run_until_parked();
+        // The new one is read from its start, not from an old offset.
+        let asked = asked(&w, cx);
+        assert_eq!(asked[1..], [Some(all[1].id), None]);
+        assert_eq!(talk.read_with(cx, |c, _| c.entries().to_vec()), all);
     }
 
     #[gpui::test]
