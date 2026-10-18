@@ -6,6 +6,7 @@
 use std::path::PathBuf;
 
 use ainet_core::protocol::{QSpec, SeatSpec, SpawnSpec, UpSpec};
+use ainet_core::settings::RigSettings;
 use ainet_core::{Agent, Decision, InboxItem, QState, Request, Runtime};
 
 use crate::store::{Entry, Store};
@@ -92,7 +93,7 @@ pub fn parse(cx: &Context, cmd: &str) -> Command {
             up(source, arg(2), None, vec![], arg(0) == Some("plan"))
         }
         "down" => match rig_arg(arg(1)) {
-            Some(rig) => down(&rig, true),
+            Some(rig) => down(&rig, rig_settings().snapshot_on_down),
             None => Command::error("/down <rig>"),
         },
         "restore" => match rig_arg(arg(1)) {
@@ -220,7 +221,9 @@ pub fn parse(cx: &Context, cmd: &str) -> Command {
             let spec = QSpec {
                 destination: dest.into(),
                 summary: rest(2),
-                nudge: true,
+                // The daemon's default (`queue.nudge`): on, unless
+                // settings.json says otherwise.
+                nudge: None,
                 ..Default::default()
             };
             req(Request::QueueCreate(spec), format!("queued for {dest}"))
@@ -241,6 +244,16 @@ pub fn parse(cx: &Context, cmd: &str) -> Command {
             Some(t) => capture(t),
             None => Command::error("/capture <agent>"),
         },
+        // ainet's own settings.
+        "set" => match (arg(1), rest(2)) {
+            (Some(key), value) if !value.is_empty() => set_setting(key, &value),
+            _ => Command::error("/set <key> <value>"),
+        },
+        "unset" => match arg(1) {
+            Some(key) => unset_setting(key),
+            None => Command::error("/unset <key>"),
+        },
+        "config" | "settings" => show_settings(arg(1)),
         "whoami" => match store.selected.clone() {
             Some(id) => req(Request::Whoami { agent: id }, "who".into()),
             None => Command::error("select an agent"),
@@ -249,20 +262,66 @@ pub fn parse(cx: &Context, cmd: &str) -> Command {
     }
 }
 
-/// Spawns a loose agent (`/spawn`): `runtime` in `cwd` (here when not
-/// given; `~/` is home), its role in capitals.
+/// Sets one of ainet's settings (`/set`): the words after the key are
+/// its value, as text for a setting that takes text, else as JSON
+/// (`true`, `600`, `["Bash"]`). Unknown keys are refused here; values
+/// that would not read are refused by ainetd, and nothing is written.
+pub fn set_setting(key: &str, words: &str) -> Command {
+    if let Err(e) = ainet_core::settings::check_key(key) {
+        return Command::Error(e);
+    }
+    let value = ainet_core::settings::value_from_text(key, words);
+    Command::Request(
+        Box::new(Request::SettingsSet {
+            key: key.into(),
+            value,
+        }),
+        format!("set {key}"),
+    )
+}
+
+/// Removes one of ainet's settings (or a group) from settings.json, so
+/// its default applies (`/unset`).
+pub fn unset_setting(key: &str) -> Command {
+    Command::Request(
+        Box::new(Request::SettingsUnset { key: key.into() }),
+        format!("unset {key}"),
+    )
+}
+
+/// The settings in force, or only those under `key` (`/config`).
+pub fn show_settings(key: Option<&str>) -> Command {
+    Command::Request(
+        Box::new(Request::SettingsGet {
+            key: key.map(str::to_string),
+        }),
+        match key {
+            Some(k) => format!("settings: {k}"),
+            None => "settings".into(),
+        },
+    )
+}
+
+/// settings.json's `rigs` section, read on its own each time (the
+/// defaults without a file): `/down`'s snapshot and `/spawn`'s directory.
+pub fn rig_settings() -> RigSettings {
+    ainet_core::settings::load_section(&ainet_core::paths::settings_file(), "rigs").rigs
+}
+
+/// Spawns a loose agent (`/spawn`): `runtime` in `cwd` (when not given,
+/// settings.json's `rigs.default_cwd`, else here; `~/` is home), its role
+/// in capitals.
 pub fn spawn(runtime: Runtime, cwd: Option<&str>, role: &str) -> Command {
-    let cwd = cwd
-        .map(expand)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let cwd = cwd.map(expand).unwrap_or_else(|| {
+        rig_settings()
+            .default_cwd
+            .map(|p| ainet_core::paths::expand(&p))
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
+    });
     let role = role.trim();
     let spec = SpawnSpec {
-        runtime,
-        cwd,
         role: (!role.is_empty()).then(|| role.to_uppercase()),
-        task: None,
-        parent: None,
-        args: vec![],
+        ..SpawnSpec::new(runtime, cwd)
     };
     request(Request::Spawn(spec), "spawned".into())
 }
@@ -298,7 +357,8 @@ pub fn up(source: &str, cwd: Option<&str>, name: Option<&str>, fresh: Vec<String
     request(Request::Up(spec), ok)
 }
 
-/// Takes a rig down (`/down` takes a snapshot first).
+/// Takes a rig down (`/down` takes a snapshot first, unless settings.json
+/// says `rigs.snapshot_on_down: false`).
 pub fn down(rig: &str, snapshot: bool) -> Command {
     let ok = if snapshot {
         format!("{rig} is down (snapshot taken)")
@@ -771,6 +831,11 @@ pub const COMMANDS: &[CommandInfo] = &[
         "[n]",
         "the Terminals grid's columns (none: from its shape)",
     ),
+    info(
+        "config",
+        "[key]",
+        "ainet's settings in force, and where they come from",
+    ),
     info("continue", "<seat>", "nudge a seat to carry on"),
     info("critters", "", "critters small or large"),
     info("deny", "", "deny the request waiting on you"),
@@ -796,6 +861,7 @@ pub const COMMANDS: &[CommandInfo] = &[
     info("relaunch", "<seat>", "start a seat's agent afresh"),
     info("remove", "<seat>", "take a seat out of its rig"),
     info("restore", "<rig>", "bring a rig back from a snapshot"),
+    info("set", "<key> <value>", "change one of ainet's settings"),
     info("shrink", "<pod>", "take a pod out of the rig"),
     info("snapshot", "<rig>", "take a snapshot of a rig"),
     info("snapshots", "<rig>", "a rig's snapshots"),
@@ -806,6 +872,7 @@ pub const COMMANDS: &[CommandInfo] = &[
     ),
     info("spec", "<name>", "a spec from the library"),
     info("specs", "", "the spec library"),
+    info("unset", "<key>", "a setting back to its default"),
     info("up", "<spec file | library name | rig>", "launch a team"),
     info(
         "view",
@@ -815,6 +882,10 @@ pub const COMMANDS: &[CommandInfo] = &[
     info("watchdog", "<seat> <minutes>", "wake a seat every few minutes"),
     info("whoami", "", "who the selected agent is"),
 ];
+
+/// Commands that Tab completes only when no other one fits: the settings
+/// commands, added after Tab completion was learnt by heart.
+const LATER: &[&str] = &["config", "unset"];
 
 /// The commands whose name starts with `partial` (no `/`), by name.
 pub fn commands_starting(partial: &str) -> impl Iterator<Item = &'static CommandInfo> + '_ {
@@ -832,7 +903,13 @@ pub fn command_named(line: &str) -> Option<&'static CommandInfo> {
 /// `None` when nothing is added: no such name, or one already typed.
 pub fn complete_command(input: &str) -> Option<String> {
     let partial = input.strip_prefix('/').filter(|p| !p.contains(' '))?;
-    let mut names = commands_starting(partial).map(|c| c.name);
+    // Commands added later than the others stand aside while one of the
+    // others fits, so Tab completes as it did before them (`/u` to
+    // `/up`, `/con` to `/continue`).
+    let older = commands_starting(partial).any(|c| !LATER.contains(&c.name));
+    let mut names = commands_starting(partial)
+        .filter(|c| !older || !LATER.contains(&c.name))
+        .map(|c| c.name);
     let first = names.next()?;
     let (common, only) = names.fold((first, true), |(common, _), name| {
         let len = common
@@ -1543,6 +1620,12 @@ mod tests {
         );
         assert_eq!(complete_command("/rel").as_deref(), Some("/relaunch "));
         assert_eq!(complete_command("/nope"), None);
+        // As before the settings commands, which complete when only they fit.
+        assert_eq!(complete_command("/u").as_deref(), Some("/up "));
+        assert_eq!(complete_command("/con").as_deref(), Some("/continue "));
+        assert_eq!(complete_command("/c"), None);
+        assert_eq!(complete_command("/conf").as_deref(), Some("/config "));
+        assert_eq!(complete_command("/un").as_deref(), Some("/unset "));
         assert_eq!(complete_command("/grow dev"), None, "only the name");
         assert_eq!(complete_command("grow"), None);
         let names: Vec<_> = commands_starting("sp").map(|c| c.name).collect();

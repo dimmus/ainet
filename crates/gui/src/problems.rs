@@ -56,6 +56,15 @@ pub fn set(source: Source, problem: Option<String>, cx: &mut App) {
     cx.refresh_windows();
 }
 
+/// The problem `source` has now, if any.
+pub fn get(source: Source, cx: &App) -> Option<String> {
+    cx.try_global::<Problems>().and_then(|p| {
+        p.0.iter()
+            .find(|(s, _)| *s == source)
+            .map(|(_, text)| text.clone())
+    })
+}
+
 /// Every current problem as one line each, for the status bar.
 pub fn lines(cx: &App) -> Vec<String> {
     cx.try_global::<Problems>()

@@ -59,7 +59,8 @@ terminals streamed from ainetd, the Inbox, Comms, the Queue, Chatroom
 and Events, the Map, the command palette), with Zed's themes plus
 Deepharness and Omarchy, Zed's fonts, and Zed-style settings
 (`~/.config/ainet/settings.json`) and keymaps
-(`~/.config/ainet/keymap.json`) that apply as you save. It opens as you
+(`~/.config/ainet/keymap.json`) that apply as you save, with a Settings
+view (`ctrl-,`) to change them and a keymap editor that records keys. It opens as you
 left it: the window, docks, splits and tabs (an agent's terminal while
 the agent lives), per daemon socket, from
 `~/.local/state/ainet/gui.json`. The plan is
@@ -152,6 +153,148 @@ Messages never land under what you are typing: while you type into an
 agent's terminal, or its seat has a typing guard, they are held and
 delivered after. Watchdogs (`ainet watchdog register`) wake idle seats to
 check their queue.
+
+## Configuration
+
+Everything is optional: with no settings file ainet does what it always
+did. `~/.config/ainet/settings.json` (`$XDG_CONFIG_HOME` respected) is JSON
+with comments and trailing commas. The desktop app reads its own keys
+(`theme`, `terminal`, …) and ainetd and the console read theirs; each
+ignores the other's sections and keeps them when it writes. ainetd follows
+the file while it runs (checked every second) and applies a change at
+once where it can; a file that does not read, or says something out of
+range, is reported in ainetd's log and the last good settings stay.
+Unknown keys in ainet's sections are reported and ignored. Where
+ainetd's socket is and whether it is started are read from the `daemon`
+section alone, so a mistake elsewhere in the file cannot send the console
+to another socket or start a daemon you turned off; and one ainetd holds
+its database (`ainet.sqlite.lock`), so a second one refuses to start. The schema
+(`crates/gui/assets/settings-schema.json`) describes every key with its
+default.
+
+```jsonc
+{
+  "daemon": {
+    "autostart": true,          // off: the console and the app ask you to run `ainet daemon`
+    "restore_rigs": false,      // start again the rigs that were running when ainetd stopped
+    "log": { "level": "info", "append": false, "max_size_mb": 0, "keep": 1 }
+  },
+  "messaging": {
+    "paste_settle_ms": 60, "flush_gap_ms": 400,
+    "hold_while_interacting": true, "typing_guard": false,
+    "message_note": "(Answer with the ainet tool reply_message id={id} — …)"
+  },
+  "queue": { "nudge": true, "watchdog": { "min_interval_secs": 30, "default_interval_secs": 600 } },
+  "rigs": { "spec_dirs": [], "default_cwd": null, "snapshot_on_down": true, "keep_snapshots": null },
+  "discovery": { "claude_sessions": true, "tmux": true, "interval_ms": 3000 },
+  "retention": { "messages_in_memory": 5000, "inbox_items": 200, "scrollback_lines": 5000,
+                 "events_max_age_days": null, "inbox_expiry_mins": null },
+  "cost": { "context_windows": { "claude-opus-5": 1000000 } },
+  "runtimes": {
+    "claude": {
+      "model": "sonnet", "effort": "high",
+      "permission_mode": null,          // "acceptEdits", "bypassPermissions", … loosen safety
+      "allowed_tools": [], "disallowed_tools": ["WebFetch"],
+      "mcp_servers": { "docs": { "command": "docs-mcp", "args": ["--stdio"] } },
+      "args": [], "env": {}
+    },
+    "shell": { "binary": "/bin/bash", "args": ["-l"] }
+  },
+  "permissions": {
+    "hold_secs": 580,                   // then Claude Code's own dialog takes over
+    "persist_always": false,            // keep /always answers across sessions and restarts
+    "sensitive_paths": ["secrets.toml", "~/work/keys"],
+    "spec_policies": false,             // apply a spec's permission_policy
+    "global_rules": [ { "command": "cargo test" } ]
+  }
+}
+```
+
+| Section | What it sets | When it applies |
+|---|---|---|
+| `daemon` | `autostart` (console and app), `socket`, `restore_rigs`, `log` (`level`, `file`, `append`, `max_size_mb` rotation, `keep`) | autostart at once; the rest when ainetd next starts (`socket` is refused while ainetd runs: `ainet shutdown` first) |
+| `messaging` | pause between paste and Enter, between held messages; holding while you type; typing guard of new seats; the note that ends a delivered message or mention | at once (typing guard: new seats) |
+| `queue` | `nudge` default; watchdogs' `default_interval_secs`, `min_interval_secs`, `message`, `tick_secs` | at once |
+| `rigs` | more spec directories, `default_cwd` for `create`/`spawn` (and `/spawn` in the TUI and the app), `snapshot_on_down` for `ainet down` (and `/down`, the app's Down), `keep_snapshots` (pruning, opt-in) | at once |
+| `discovery` | track every Claude Code session (`claude_sessions`), scan tmux, how often | at once |
+| `retention` | in-memory caps for messages, chat, inbox and scrollback; logged events pruned by age or count and answered inbox items expired (opt-in) | at once (scrollback: new terminals) |
+| `cost` | context windows by model-id prefix; prices (not used yet: no view shows cost) | at once |
+| `runtimes` | per runtime (`claude`, `codex`, `shell`): the program, default model and effort, Claude Code's permission mode, more arguments and environment, tools allowed without asking (`mcp__ainet` always is) and refused, more MCP servers (merged with ainet's), `--strict-mcp-config`; `readiness` timings. A spec's `effort` is passed with `spec_effort` | new seats |
+| `permissions` | how long a request is held (`hold_secs`; seats' hook timeout follows, and a hold never outlasts the hook it came through), `/always` rules kept across sessions and restarts (`persist_always`), more `sensitive_paths` `/always` never covers, a spec's `permission_policy` applied (`spec_policies`), `global_rules` that allow without asking | at once (hold: new seats' hook timeout) |
+| `hooks` | which Claude Code settings file `ainet install-hooks --write` edits | at once |
+
+Settings that loosen safety (permission modes such as `bypassPermissions`,
+tools allowed without asking, persisted `/always` rules, global rules,
+`builtin:yolo` from a spec) are off unless set, say so in their
+descriptions, and take only values from a closed list, so a typo is an
+error, not a looser agent. Codex has no permission modes or tool lists:
+setting them for `runtimes.codex` is an error rather than a restriction
+that does nothing. With `spec_policies` on, `builtin:locked` starts Claude
+Code seats in `plan` mode, `builtin:default` and `builtin:standard` in its
+default, `builtin:yolo` with `bypassPermissions`; other policies are
+reported and ignored. `ainet up <spec> --plan` shows each seat's mode.
+
+From the console, without opening the file:
+
+```sh
+ainet config list [KEY] [--changed]   # every setting: value, source, when a change applies (* = not the default)
+ainet config get queue.nudge          # one value (text bare, the rest as JSON); a group lists its settings
+ainet config set queue.nudge false    # text needs no quotes; lists and maps are JSON
+ainet config unset runtimes.claude    # a setting or a whole group back to its defaults
+ainet config path [--all]             # settings.json; --all: every path ainet uses, and versions
+ainet config edit                     # $VISUAL / $EDITOR on the file, then checked and reloaded
+ainet always list [AGENT]             # /always rules in force, the global ones too
+ainet always revoke AGENT KEY|--all
+ainet hooks status|install|uninstall  # ainet's hooks in Claude Code's settings
+```
+
+`set` and `unset` edit the file in place, keeping comments and the desktop
+app's keys; an unknown key or a value that would not read (a wrong type,
+out of range, a misspelt mode) is refused and nothing is written. With
+ainetd running they go through it, so the change is in force at once;
+without it (or with an older ainetd, which is said) the file is read and
+written directly. A value that lets agents do more without asking is
+called less safe as it is set. `--json` gives each of them as JSON. In
+the TUI, `/config [key]` shows the settings in force, `/set <key> <value>`
+and `/unset <key>` change them.
+
+In the desktop app, `ctrl-,` (or the gear in the title bar) opens the
+Settings view: a search box over categories, each field with its
+description, default, a dot when changed, a reset and when a change
+applies. The app's own settings are written to the file at once; ainet's
+go through ainetd as `ainet config set` does. Each of ainet's sections
+has its category (Runtimes with a part per runtime; Permissions with the
+`/always` rules in force and a Revoke for each; Rigs & Specs with the
+spec library and where each spec comes from; Hooks with each hook event's
+state and Install, Repair, Uninstall; Cost with a price table), and
+Diagnostics shows the paths, versions, ainetd's pid and uptime, the
+connection and the end of its log, with a Copy Diagnostics button (values
+of environment variables and MCP servers are left out). A change that
+lets agents do more without asking you (a looser permission mode, a tool
+allowed or no longer disallowed, rules kept, global rules, specs'
+policies, a `--dangerously…` argument) carries a warning and is
+confirmed before it is written; so is every change to Claude Code's
+settings, naming the file and the backup kept. Without ainetd the
+settings are written to the file, and what lives in ainetd says it is
+not running. `ctrl-alt-,` opens its
+Keymap category, where bindings are changed by pressing the new keys
+(written to keymap.json). The palette's "open settings file" and "open
+keymap file" open the files themselves.
+
+ainet's hooks reach the seats it starts on their own command line; for
+Claude Code sessions you start yourself, `ainet hooks install` (or
+`ainet install-hooks --write`) merges them into Claude Code's settings,
+keeping a backup of the file; `ainet hooks status` says whether they are
+there and up to date (after a change of `hold_secs`, install again), and
+`ainet hooks uninstall` takes them out. `ainet install-hooks` alone prints
+the block to merge by hand. ainet never writes Claude Code's settings
+unless you run one of these (or press the desktop app's button for it).
+
+Environment variables that meant something before still win over the
+file: `AINET_SOCKET` over `daemon.socket`, `AINET_LOG` over
+`daemon.log.level` (environment, then file, then default). The others
+(`AINET_BIN`, `AINET_AGENT_ID`, `CLAUDE_CONFIG_DIR`, `SHELL`, `AINET_VIEW`,
+`AINET_WINDOW_DECORATIONS`, `XDG_*`) work as before.
 
 ## How it works
 

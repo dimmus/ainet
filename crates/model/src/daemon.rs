@@ -1,25 +1,68 @@
 //! Starting ainetd when a front end needs it. The daemon always runs as
 //! `ainet daemon` from the console binary: hooks, MCP configs and agents'
 //! shells call that binary by path, so a front end that is not `ainet`
-//! itself (the GUI) must find it rather than start itself.
+//! itself (the GUI) must find it rather than start itself. Whether it is
+//! started at all, and where its log goes, is `daemon` in settings.json.
 
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use ainet_core::client::Client;
+use ainet_core::settings::{DaemonSettings, LogSettings};
 use ainet_core::{Request, Response, paths, protocol};
 use anyhow::{Context, Result, bail};
 
 /// Starts ainetd in the background with `ainet daemon` unless it is already
-/// running, and checks it speaks our protocol.
+/// running, and checks it speaks our protocol. settings.json may turn the
+/// starting off (`daemon.autostart`); its `daemon` section is read on its
+/// own, so a mistake elsewhere in the file does not start a daemon you
+/// said not to.
 pub fn ensure_daemon(socket: &Path, ainet: &Path) -> Result<()> {
+    let settings = ainet_core::settings::load_section(&paths::settings_file(), "daemon").daemon;
+    ensure_daemon_with(socket, ainet, &settings)
+}
+
+/// The socket of an ainetd already running on `database`, which holds its
+/// lock: `None` when none does.
+pub fn running_elsewhere(database: &Path) -> Option<PathBuf> {
+    let lock = paths::daemon_lock(database);
+    let file = File::open(&lock).ok()?;
+    match file.try_lock_shared() {
+        // Nobody holds it; ours goes as the file closes.
+        Ok(()) => None,
+        Err(_) => Some(PathBuf::from(
+            std::fs::read_to_string(&lock).unwrap_or_default().trim(),
+        )),
+    }
+}
+
+/// [`ensure_daemon`] with these daemon settings.
+pub fn ensure_daemon_with(socket: &Path, ainet: &Path, settings: &DaemonSettings) -> Result<()> {
     if Client::connect(socket).is_ok() {
         return check_version(socket);
     }
-    let log_dir = paths::state_dir();
-    std::fs::create_dir_all(&log_dir)?;
-    let log = std::fs::File::create(log_dir.join("ainetd.log"))?;
+    // One ainetd per database: one running on another socket (settings.json's
+    // `daemon.socket` changed since it started) would refuse a second.
+    if let Some(other) =
+        running_elsewhere(&paths::database()).filter(|o| !o.as_os_str().is_empty() && o != socket)
+    {
+        bail!(
+            "ainetd is running on {}, not {}: settings.json's daemon.socket changed since it started? Stop it with `AINET_SOCKET={} ainet shutdown`, then try again",
+            other.display(),
+            socket.display(),
+            other.display()
+        );
+    }
+    if !settings.autostart {
+        bail!(
+            "ainetd is not running ({}), and settings.json does not start it (daemon.autostart is off): start it with `ainet daemon`",
+            socket.display()
+        );
+    }
+    let log_path = log_file(&settings.log);
+    let log = open_log(&log_path, &settings.log)?;
     let mut cmd = Command::new(ainet);
     cmd.arg("daemon")
         .stdin(Stdio::null())
@@ -40,10 +83,45 @@ pub fn ensure_daemon(socket: &Path, ainet: &Path) -> Result<()> {
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    bail!(
-        "ainetd did not start; see {}",
-        log_dir.join("ainetd.log").display()
-    )
+    bail!("ainetd did not start; see {}", log_path.display())
+}
+
+/// Where an autostarted daemon logs: `daemon.log.file`, else `ainetd.log`
+/// in the state directory.
+pub fn log_file(log: &LogSettings) -> PathBuf {
+    log.path()
+}
+
+/// Opens the daemon's log: moved aside first once it reached
+/// `daemon.log.max_size_mb` (`ainetd.log.1`, the older ones shifted, at
+/// most `keep`), then added to (`append`) or started afresh, as ainet
+/// always did.
+pub fn open_log(path: &Path, log: &LogSettings) -> Result<File> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    if log.max_size_mb > 0 && size >= log.max_size_mb * 1024 * 1024 {
+        let keep = log.keep.max(1);
+        let numbered = |n: u32| {
+            let mut p = path.as_os_str().to_owned();
+            p.push(format!(".{n}"));
+            PathBuf::from(p)
+        };
+        let _ = std::fs::remove_file(numbered(keep));
+        for n in (1..keep).rev() {
+            let _ = std::fs::rename(numbered(n), numbered(n + 1));
+        }
+        std::fs::rename(path, numbered(1)).with_context(|| format!("rotate {}", path.display()))?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .append(log.append)
+        .truncate(!log.append)
+        .open(path)
+        .with_context(|| format!("open {}", path.display()))?;
+    Ok(file)
 }
 
 /// Says `Hello` to the daemon at `socket`: fails unless it is running and
@@ -78,4 +156,87 @@ pub fn console_binary() -> Option<PathBuf> {
                 .find(|p| p.is_file())
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dir(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("ainet-model-daemon-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn the_log_starts_afresh_by_default() {
+        let d = dir("fresh");
+        let path = d.join("ainetd.log");
+        std::fs::write(&path, "old run\n").unwrap();
+        let log = LogSettings::default();
+        assert_eq!(log_file(&log), paths::daemon_log());
+        use std::io::Write as _;
+        writeln!(open_log(&path, &log).unwrap(), "new run").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new run\n");
+        assert!(!d.join("ainetd.log.1").exists(), "never rotated");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn the_log_appends_and_rotates_when_asked() {
+        use std::io::Write as _;
+        let d = dir("rotate");
+        let path = d.join("ainetd.log");
+        let log = LogSettings {
+            append: true,
+            max_size_mb: 1,
+            keep: 2,
+            file: Some(path.clone()),
+            ..LogSettings::default()
+        };
+        assert_eq!(log_file(&log), path);
+        std::fs::write(&path, "one\n").unwrap();
+        writeln!(open_log(&path, &log).unwrap(), "two").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "one\ntwo\n", "appended");
+        let big = "x".repeat(1024 * 1024);
+        for run in ["a", "b", "c"] {
+            std::fs::write(&path, format!("{run}{big}")).unwrap();
+            open_log(&path, &log).unwrap();
+        }
+        let first = |p: &Path| std::fs::read_to_string(p).unwrap().chars().next();
+        assert_eq!(first(&d.join("ainetd.log.1")), Some('c'));
+        assert_eq!(first(&d.join("ainetd.log.2")), Some('b'));
+        assert!(!d.join("ainetd.log.3").exists(), "keep says two");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "", "a new one");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn autostart_off_says_so_instead_of_starting() {
+        let d = dir("off");
+        let socket = d.join("none.sock");
+        let off = DaemonSettings {
+            autostart: false,
+            ..DaemonSettings::default()
+        };
+        // Not run: the program does not exist, so starting would fail
+        // differently.
+        let e = ensure_daemon_with(&socket, Path::new("/nonexistent/ainet"), &off).unwrap_err();
+        assert!(e.to_string().contains("daemon.autostart is off"), "{e}");
+        let on = ensure_daemon_with(
+            &socket,
+            Path::new("/nonexistent/ainet"),
+            &DaemonSettings {
+                log: LogSettings {
+                    file: Some(d.join("ainetd.log")),
+                    ..LogSettings::default()
+                },
+                ..DaemonSettings::default()
+            },
+        )
+        .unwrap_err();
+        assert!(on.to_string().contains("start ainetd"), "tried to start it: {on}");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
 }

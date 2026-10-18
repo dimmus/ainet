@@ -5,7 +5,8 @@
 //! `/usr/local/bin/ainet hook`). Entries are recognised by that command, so
 //! installing again replaces the old ones (also those of an ainet binary at
 //! another path). The settings file is backed up first
-//! (`settings.json.bak.ainet.<unix seconds>`), written to a temporary file
+//! (`settings.json.bak.ainet.<unix seconds>`, with `.1`, `.2`, … when that
+//! second already has one), written to a temporary file
 //! (mode 0600) and renamed into place. Every other key and hook entry is
 //! kept. Like Den, the file is rewritten with keys sorted and two-space
 //! indentation (Den's Go writer also escapes `<`, `>` and `&` as `<` and
@@ -174,9 +175,50 @@ pub struct UninstallReport {
     pub removed: usize,
 }
 
+/// A [`SPECS`] event's timeout, with `PermissionRequest`'s as given (it
+/// must outlast the time a request is held).
+fn timeout_of(sp: &HookSpec, permission_timeout: u64) -> u64 {
+    if sp.event == "PermissionRequest" {
+        permission_timeout
+    } else {
+        sp.timeout
+    }
+}
+
+/// One settings entry running `command` for `sp`.
+fn entry_for(sp: &HookSpec, command: &str, permission_timeout: u64) -> Value {
+    let mut entry = Map::new();
+    entry.insert(
+        "hooks".into(),
+        json!([{"type": "command", "command": command, "timeout": timeout_of(sp, permission_timeout)}]),
+    );
+    if !sp.matcher.is_empty() {
+        entry.insert("matcher".into(), Value::String(sp.matcher.into()));
+    }
+    Value::Object(entry)
+}
+
+/// The `hooks` block [`install`] writes, as `{"hooks": {…}}`: what to
+/// merge into Claude Code's settings by hand.
+pub fn hooks_block(command: &str, permission_timeout: u64) -> Value {
+    let mut hooks = Map::new();
+    for sp in SPECS {
+        hooks.insert(
+            sp.event.into(),
+            json!([entry_for(sp, command, permission_timeout)]),
+        );
+    }
+    json!({ "hooks": hooks })
+}
+
 /// Adds the hook entries for `command` (see [`hook_command`]) to the settings
 /// file. Installing twice is safe: our old entries are replaced.
 pub fn install(settings_path: &Path, command: &str) -> Result<InstallReport> {
+    install_with(settings_path, command, super::PERMISSION_TIMEOUT_SECS)
+}
+
+/// [`install`] with the `PermissionRequest` hook's timeout.
+pub fn install_with(settings_path: &Path, command: &str, permission_timeout: u64) -> Result<InstallReport> {
     if command.trim().is_empty() {
         bail!("no hook command");
     }
@@ -187,20 +229,13 @@ pub fn install(settings_path: &Path, command: &str) -> Result<InstallReport> {
     };
     let replaced = strip(&mut hooks, command);
     for sp in SPECS {
-        let mut entry = Map::new();
-        entry.insert(
-            "hooks".into(),
-            json!([{"type": "command", "command": command, "timeout": sp.timeout}]),
-        );
-        if !sp.matcher.is_empty() {
-            entry.insert("matcher".into(), Value::String(sp.matcher.into()));
-        }
+        let entry = entry_for(sp, command, permission_timeout);
         let list = hooks.entry(sp.event).or_insert_with(|| Value::Array(Vec::new()));
         if !list.is_array() {
             *list = Value::Array(Vec::new());
         }
         if let Value::Array(l) = list {
-            l.push(Value::Object(entry));
+            l.push(entry);
         }
     }
     settings.insert("hooks".into(), Value::Object(hooks));
@@ -261,6 +296,126 @@ pub fn installed(settings_path: &Path, command: &str) -> bool {
     })
 }
 
+/// Where ainet's hooks stand in a settings file ([`status`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HookStatus {
+    pub settings_path: PathBuf,
+    /// The file exists.
+    pub exists: bool,
+    /// Why the file could not be read, if it could not.
+    pub error: Option<String>,
+    /// Entries of ours (any ainet binary's `… hook`).
+    pub ours: usize,
+    /// [`SPECS`] events with no entry running exactly `command` at the
+    /// expected timeout and matcher.
+    pub missing: Vec<&'static str>,
+    /// Entries of ours that run another command (an ainet binary at
+    /// another path) or have another timeout: installing again replaces
+    /// them.
+    pub stale: usize,
+}
+
+impl HookStatus {
+    /// Every event is installed as it should be, and nothing stale.
+    pub fn current(&self) -> bool {
+        self.error.is_none() && self.missing.is_empty() && self.stale == 0
+    }
+
+    /// One line on it, for people.
+    pub fn summary(&self) -> String {
+        let path = self.settings_path.display();
+        if let Some(e) = &self.error {
+            return format!("{path}: cannot read it: {e}");
+        }
+        if self.ours == 0 {
+            return format!("not installed in {path}");
+        }
+        if self.current() {
+            return format!("installed in {path}");
+        }
+        let mut why = Vec::new();
+        if !self.missing.is_empty() {
+            why.push(format!("missing {}", self.missing.join(", ")));
+        }
+        if self.stale > 0 {
+            why.push(format!(
+                "{} outdated entr{}",
+                self.stale,
+                if self.stale == 1 { "y" } else { "ies" }
+            ));
+        }
+        format!("installed in {path}, needs repair ({})", why.join("; "))
+    }
+}
+
+/// How ainet's hooks running `command` stand in a settings file: what is
+/// there, what is missing and what is outdated. Reads only.
+pub fn status(settings_path: &Path, command: &str, permission_timeout: u64) -> HookStatus {
+    let mut st = HookStatus {
+        settings_path: settings_path.to_path_buf(),
+        exists: settings_path.exists(),
+        error: None,
+        ours: 0,
+        missing: Vec::new(),
+        stale: 0,
+    };
+    let settings = match load(settings_path) {
+        Ok((s, _)) => s,
+        Err(e) => {
+            st.error = Some(format!("{e:#}"));
+            return st;
+        }
+    };
+    let hooks = match settings.get("hooks") {
+        Some(Value::Object(h)) => h.clone(),
+        _ => Map::new(),
+    };
+    let wanted: Vec<(&'static str, Value)> = SPECS
+        .iter()
+        .map(|sp| (sp.event, entry_for(sp, command, permission_timeout)))
+        .collect();
+    for (event, list) in &hooks {
+        let Value::Array(list) = list else { continue };
+        for e in list.iter().filter(|e| entry_is_ours(e, command)) {
+            st.ours += 1;
+            let exact = wanted.iter().any(|(ev, w)| ev == event && w == e);
+            if !exact {
+                st.stale += 1;
+            }
+        }
+    }
+    for (event, w) in &wanted {
+        let present = hooks
+            .get(*event)
+            .and_then(Value::as_array)
+            .is_some_and(|l| l.iter().any(|e| e == w));
+        if !present {
+            st.missing.push(event);
+        }
+    }
+    st
+}
+
+/// The timeout of ainet's `PermissionRequest` hook running `command` in
+/// a settings file: how long Claude Code lets it hold a request before
+/// ending it. `None` when the hook is not there or gives none.
+pub fn permission_timeout(settings_path: &Path, command: &str) -> Option<u64> {
+    let (settings, _) = load(settings_path).ok()?;
+    settings
+        .get("hooks")?
+        .get("PermissionRequest")?
+        .as_array()?
+        .iter()
+        .flat_map(|e| e.get("hooks").and_then(Value::as_array).into_iter().flatten())
+        .filter(|h| {
+            h.get("command")
+                .and_then(Value::as_str)
+                .is_some_and(|c| is_ours(c, command))
+        })
+        .filter_map(|h| h.get("timeout").and_then(Value::as_u64))
+        .min()
+}
+
 /// The settings as an object, and the file's bytes when it existed.
 type Loaded = (Map<String, Value>, Option<Vec<u8>>);
 
@@ -283,9 +438,19 @@ fn save(path: &Path, raw: Option<&[u8]>, settings: &Map<String, Value>) -> Resul
     let mut backup = None;
     if let Some(raw) = raw {
         let secs = util::now_ms() / 1000;
-        let mut b = path.as_os_str().to_owned();
-        b.push(format!(".bak.ainet.{secs}"));
-        let b = PathBuf::from(b);
+        // Two changes within a second must not overwrite the first backup
+        // (the file as you had it): the second takes a suffix.
+        let b = (0..)
+            .map(|n| {
+                let mut b = path.as_os_str().to_owned();
+                b.push(format!(".bak.ainet.{secs}"));
+                if n > 0 {
+                    b.push(format!(".{n}"));
+                }
+                PathBuf::from(b)
+            })
+            .find(|b| !b.exists())
+            .unwrap_or_default();
         write_private(&b, raw)?;
         backup = Some(b);
     }

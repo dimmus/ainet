@@ -410,10 +410,19 @@ pub struct DownModal {
 
 impl DownModal {
     pub fn new(fleet: Entity<FleetModel>, rig: String, cx: &mut Context<Self>) -> Self {
+        // As settings.json's `rigs.snapshot_on_down` says (yes without a
+        // file), and the checkbox changes it for this once.
+        let snapshot = crate::settings::file(cx)
+            .map(|f| {
+                ainet_core::settings::load_section(&f, "rigs")
+                    .rigs
+                    .snapshot_on_down
+            })
+            .unwrap_or(true);
         DownModal {
             fleet,
             rig,
-            snapshot: true,
+            snapshot,
             focus: cx.focus_handle(),
         }
     }
@@ -565,6 +574,21 @@ mod tests {
             sent(&w, cx).last(),
             Some(Request::Down { snapshot: false, .. })
         ));
+
+        // settings.json's `rigs.snapshot_on_down` is the default.
+        let dir = std::env::temp_dir().join(format!("ainet-gui-down-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("settings.json");
+        std::fs::write(&file, r#"{ "rigs": { "snapshot_on_down": false } }"#).unwrap();
+        cx.update(|_, cx| crate::settings::save_to(file.clone(), cx));
+        cx.dispatch_action(Down);
+        cx.simulate_keystrokes("enter");
+        assert!(matches!(
+            sent(&w, cx).last(),
+            Some(Request::Down { snapshot: false, .. })
+        ));
+        cx.update(|_, cx| crate::settings::save_to(dir.join("none.json"), cx));
+        let _ = std::fs::remove_dir_all(&dir);
 
         // With nobody selected and two rigs: which rig first.
         fleet(&w, cx).update(cx, |f, cx| {

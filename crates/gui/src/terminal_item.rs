@@ -871,6 +871,26 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn typing_shows_in_the_demos_terminal(cx: &mut TestAppContext) {
+        let (_, item, cx) = terminal(cx);
+        settle(cx);
+        let shown = |cx: &mut VisualTestContext| {
+            cx.run_until_parked();
+            cx.executor().advance_clock(Duration::from_millis(200));
+            cx.run_until_parked();
+            item.read_with(cx, |t, cx| t.screen(cx).map(|s| s.contents()).unwrap_or_default())
+        };
+        // The keys reach the (pretend) agent and come back on its screen,
+        // so typing in the demo is seen, not lost.
+        cx.simulate_keystrokes("h e l l o");
+        let text = shown(cx);
+        assert!(text.contains("> hello"), "{text}");
+        cx.simulate_keystrokes("enter");
+        let text = shown(cx);
+        assert!(text.contains("No agent hears this"), "{text}");
+    }
+
+    #[gpui::test]
     async fn focus_holds_the_agents_messages(cx: &mut TestAppContext) {
         let (w, item, cx) = terminal(cx);
         let fleet = fleet(&w, cx);

@@ -91,6 +91,7 @@ impl Daemon {
                 remove: &inherited_session_vars(),
                 rows: ROWS,
                 cols: COLS,
+                scrollback: self.settings().retention.scrollback_lines,
             },
             self.pane_tx.clone(),
         )?;
@@ -105,6 +106,10 @@ impl Daemon {
             "spawn",
             &serde_json::json!({ "program": cmd.program, "seat": agent.seat }),
         );
+        // The command was made under this same lock, with this timeout
+        // in its hooks (`Daemon::base`).
+        self.hook_timeouts
+            .insert(agent.id.clone(), self.settings().permissions.hook_timeout_secs());
         self.panes.insert(agent.id.clone(), pane);
         self.agents.insert(agent.id.clone(), agent.clone());
         self.emit(Event::Agent { agent: agent.clone() });
@@ -182,8 +187,17 @@ impl Daemon {
         item.id = self.next_item;
         self.emit(Event::Inbox { item: item.clone() });
         self.inbox.push(item);
-        // Keep the inbox bounded: finished turns age out, held items never do.
-        let mut excess = self.inbox.len().saturating_sub(200);
+        self.trim_inbox();
+        self.next_item
+    }
+
+    /// Keeps the inbox bounded (`retention.inbox_items`): finished turns
+    /// age out, held items never do.
+    pub(crate) fn trim_inbox(&mut self) {
+        let mut excess = self
+            .inbox
+            .len()
+            .saturating_sub(self.settings().retention.inbox_items);
         self.inbox.retain(|i| {
             if excess > 0 && !i.waiting {
                 excess -= 1;
@@ -192,7 +206,6 @@ impl Daemon {
                 true
             }
         });
-        self.next_item
     }
 
     /// Releases every held request of an agent: it was answered in the
@@ -238,11 +251,23 @@ impl Daemon {
 pub(crate) fn spawn_loose(d: &Shared, spec: SpawnSpec) -> Result<Agent> {
     let mut d = lock(d);
     let id = uuid::Uuid::new_v4().to_string();
-    let mut agent = new_agent(&id, spec.runtime, &spec.cwd);
+    // No directory given: `rigs.default_cwd`, else home.
+    let cwd = if spec.cwd.as_os_str().is_empty() {
+        d.default_cwd()
+    } else {
+        spec.cwd
+    };
+    let mut agent = new_agent(&id, spec.runtime, &cwd);
     agent.role = spec.role;
     agent.task = spec.task;
     agent.parent = spec.parent;
-    let cmd = crate::launch::loose_command(&d, &agent, &spec.args);
+    let ask = crate::runtimes::Ask {
+        effort_asked: spec.effort,
+        permission_mode: spec.permission_mode,
+        env: Some(&spec.env),
+        ..Default::default()
+    };
+    let cmd = crate::launch::loose_command(&d, &agent, &ask, &spec.args);
     d.start_pane(agent, &cmd)
 }
 
@@ -429,7 +454,7 @@ fn transcript_lines(path: &Path, tail: usize, grep: Option<&str>) -> Vec<String>
 /// Claude Code transcript, or a notice for a runtime ainet cannot read and
 /// a session that has not named its transcript yet.
 pub(crate) fn conversation(d: &Shared, key: &str, tail: usize, after: Option<u64>) -> Response {
-    let (runtime, path) = {
+    let (runtime, path, notes) = {
         let d = lock(d);
         let Some(id) = d.find_agent(key, None) else {
             return err(format!("no agent {key}"));
@@ -437,7 +462,9 @@ pub(crate) fn conversation(d: &Shared, key: &str, tail: usize, after: Option<u64
         let Some(agent) = d.agents.get(&id) else {
             return err(format!("no agent {key}"));
         };
-        (agent.runtime, agent.transcript.clone())
+        let m = &d.settings().messaging;
+        let notes = [m.message_note.clone(), m.mention_note.clone()];
+        (agent.runtime, agent.transcript.clone(), notes)
     };
     let notice = |text: &str| Response::Conversation {
         conversation: Conversation {
@@ -453,7 +480,7 @@ pub(crate) fn conversation(d: &Shared, key: &str, tail: usize, after: Option<u64
     };
     let tail = if tail == 0 { CONVERSATION_TAIL } else { tail };
     Response::Conversation {
-        conversation: conversation_of(ainet_claude::transcript::thread(&path, after, tail)),
+        conversation: conversation_of(ainet_claude::transcript::thread(&path, after, tail), &notes),
     }
 }
 
@@ -461,14 +488,15 @@ pub(crate) fn conversation(d: &Shared, key: &str, tail: usize, after: Option<u64
 const CONVERSATION_TAIL: usize = 200;
 
 /// A transcript's thread as the wire's entries: a prompt ainetd typed in
-/// for a message becomes that message.
-fn conversation_of(thread: ainet_claude::transcript::Thread) -> Conversation {
+/// for a message becomes that message, whichever of `notes` it ends with.
+fn conversation_of(thread: ainet_claude::transcript::Thread, notes: &[String]) -> Conversation {
     use ainet_claude::transcript::EntryKind as Kind;
+    let notes: Vec<&str> = notes.iter().map(String::as_str).collect();
     let entries = thread
         .items
         .into_iter()
         .map(|item| match item.kind {
-            Kind::You => ConversationEntry::prompt(item.pos, item.at_ms, &item.text),
+            Kind::You => ConversationEntry::prompt_with(item.pos, item.at_ms, &item.text, &notes),
             Kind::Text => ConversationEntry {
                 at: item.at_ms,
                 ..ConversationEntry::new(item.pos, EntryKind::Reply, item.text)
@@ -502,7 +530,7 @@ mod tests {
     fn a_transcript_becomes_entries_with_its_messages_known() {
         let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../claude/tests/fixtures/transcript-2.1.289/session.jsonl");
-        let c = conversation_of(ainet_claude::transcript::thread(&fixture, None, 0));
+        let c = conversation_of(ainet_claude::transcript::thread(&fixture, None, 0), &[]);
         let kinds: Vec<EntryKind> = c.entries.iter().map(|e| e.kind).collect();
         use EntryKind::*;
         assert_eq!(kinds, [You, Reply, Tool, Tool, Tool, Inbound, Tool, Reply, Tool]);
@@ -523,7 +551,10 @@ mod tests {
         assert_eq!(c.model.as_deref(), Some("Opus 5.5"));
         assert_eq!(c.permission_mode.as_deref(), Some("acceptEdits"));
         // Asking again from the call still running brings it and nothing older.
-        let again = conversation_of(ainet_claude::transcript::thread(&fixture, Some(reply.id - 1), 0));
+        let again = conversation_of(
+            ainet_claude::transcript::thread(&fixture, Some(reply.id - 1), 0),
+            &[],
+        );
         assert_eq!(again.entries, vec![reply.clone()]);
     }
 }

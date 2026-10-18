@@ -1246,6 +1246,10 @@ fn draw_help(f: &mut Frame, pal: &Palette, area: Rect) {
             "/spawn [claude|codex|shell] [dir]",
             "one agent outside any rig; /close [name]",
         ),
+        (
+            "/config [key]  /set <key> <v>  /unset",
+            "ainet's settings: in force, change one, back to default",
+        ),
     ];
     let table = Table::new(
         rows.into_iter().map(|(k, d)| {

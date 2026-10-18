@@ -15,6 +15,7 @@ use gpui::{AppContext, HeadlessAppContext, WindowHandle, px, size};
 use crate::conversation::ConversationItem;
 use crate::fleet::FleetModel;
 use crate::pane_group::SplitDirection;
+use crate::settings_view::pages::Page;
 use crate::topology::SubView;
 use crate::workspace::Workspace;
 
@@ -66,7 +67,7 @@ fn the_demo_workspace() {
     std::fs::create_dir_all(out_dir()).expect("target/screenshots");
 
     capture(&mut cx, window, "workspace");
-    let views: [(&str, OpenView); 8] = [
+    let views: [(&str, OpenView); 14] = [
         ("terminal", |w, window, cx| {
             let selected = w.fleet().read(cx).store.selected.clone();
             if let Some(id) = selected {
@@ -93,6 +94,24 @@ fn the_demo_workspace() {
         ("topology-health", |w, window, cx| {
             let t = w.open_topology(window, cx);
             t.update(cx, |t, cx| t.show_view(SubView::Health, cx));
+        }),
+        ("settings", |w, window, cx| {
+            w.open_settings(Some(Page::Terminal), window, cx);
+        }),
+        ("settings-keymap", |w, window, cx| {
+            w.open_settings(Some(Page::Keymap), window, cx);
+        }),
+        ("settings-runtimes", |w, window, cx| {
+            w.open_settings(Some(Page::Runtimes), window, cx);
+        }),
+        ("settings-permissions", |w, window, cx| {
+            w.open_settings(Some(Page::Permissions), window, cx);
+        }),
+        ("settings-hooks", |w, window, cx| {
+            w.open_settings(Some(Page::Hooks), window, cx);
+        }),
+        ("settings-diagnostics", |w, window, cx| {
+            w.open_settings(Some(Page::Diagnostics), window, cx);
         }),
         // Two conversations side by side, as OpenRig's.
         ("conversations", |w, window, cx| {

@@ -29,10 +29,15 @@ actions!(
         NewWindow,
         /// Closes the window.
         CloseWindow,
-        /// Opens settings.json in the system's editor for JSON.
+        /// Opens the Settings view: every setting of the app and of ainet,
+        /// searchable, by category.
         OpenSettings,
-        /// Opens keymap.json in the system's editor for JSON.
+        /// Opens settings.json in the system's editor for JSON.
+        OpenSettingsFile,
+        /// Opens the Settings view on the key bindings.
         OpenKeymap,
+        /// Opens keymap.json in the system's editor for JSON.
+        OpenKeymapFile,
         /// Opens the Comms stream as a tab.
         OpenComms,
         /// Opens the Inbox as a tab.

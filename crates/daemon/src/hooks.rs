@@ -14,14 +14,16 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use ainet_claude::hooks::Decision as ClaudeDecision;
 use ainet_claude::question::{self, Question};
+use ainet_core::settings::CostSettings;
 use ainet_core::{AgentState, Decision, InboxItem, InboxKind, Response, Runtime, now_ms};
 use serde_json::Value;
 
 use crate::agents::new_agent;
-use crate::{Daemon, PERMISSION_HOLD, Shared, err, lock};
+use crate::{Daemon, Shared, err, lock};
 
 /// What a held hook is sent when you answer.
 pub(crate) enum HookAnswer {
@@ -82,11 +84,18 @@ pub(crate) struct Summary {
     pub last_tool: Option<String>,
 }
 
-pub(crate) fn summarize(path: &Path) -> Option<Summary> {
+/// What the Fleet shows from a transcript; a context window set in
+/// settings.json (`cost.context_windows`) wins over ainet's guess.
+pub(crate) fn summarize(path: &Path, cost: &CostSettings) -> Option<Summary> {
     if !path.is_file() {
         return None;
     }
-    let usage = ainet_claude::transcript::read_usage(path);
+    let usage = ainet_claude::transcript::read_usage(path).map(|mut u| {
+        if let Some(window) = cost.context_window(&u.model) {
+            u.window = window as i64;
+        }
+        u
+    });
     let facts = ainet_claude::transcript::read_facts(path);
     let last_tool = ainet_claude::transcript::tail(path, 8)
         .into_iter()
@@ -210,12 +219,9 @@ pub(crate) async fn handle(
                 let tool = text(&payload, "tool_name").unwrap_or_default();
                 let input = payload.get("tool_input").cloned().unwrap_or(Value::Null);
                 let input_raw = input.to_string();
-                // An earlier /always covers it: allow without asking.
-                let covered = d
-                    .always
-                    .get(&id)
-                    .is_some_and(|rules| rules.iter().any(|r| r.matches(&tool, &input, &cwd)));
-                if covered {
+                // An earlier /always, or a global rule, covers it: allow
+                // without asking.
+                if d.always_covering(&id, &tool, &input, &cwd).is_some() {
                     let decision = ClaudeDecision::Allow {
                         message: ainet_claude::hooks::ALWAYS_MESSAGE.into(),
                     };
@@ -264,7 +270,17 @@ pub(crate) async fn handle(
                     },
                 );
                 d.set_state(&id, AgentState::NeedsYou);
-                held = Some((item_id, rx, tool, input_raw));
+                let hold = d.settings().permissions.hold_secs;
+                // A pane's hook timeout is known; a hook of yours is read
+                // from Claude Code's settings, off the lock.
+                let limit = match d.hook_timeouts.get(&id) {
+                    Some(t) => Limit::Known(*t),
+                    None => Limit::Installed(
+                        crate::admin::claude_settings_file(d.settings()),
+                        ainet_claude::hooks::hook_command(&d.exe),
+                    ),
+                };
+                held = Some((item_id, rx, tool, input_raw, hold, limit));
             }
             "Stop" => {
                 d.release_held(&id);
@@ -301,7 +317,7 @@ pub(crate) async fn handle(
             }
             "SessionEnd" => {
                 d.release_held(&id);
-                d.always.remove(&id);
+                d.always_session_end(&id);
                 if !d.panes.contains_key(&id) {
                     d.set_state(&id, AgentState::Gone);
                 }
@@ -312,12 +328,23 @@ pub(crate) async fn handle(
         held
     };
 
-    let Some((item, rx, tool, input_raw)) = held else {
+    let Some((item, rx, tool, input_raw, hold, limit)) = held else {
         return Response::HookReply { output: None };
     };
-    // Hold the hook open until you answer; on timeout or release, print
-    // nothing and Claude Code's own dialog stays in charge.
-    let answer = match tokio::time::timeout(PERMISSION_HOLD, rx).await {
+    let hook_timeout = match limit {
+        Limit::Known(t) => Some(t),
+        Limit::Installed(path, command) => {
+            tokio::task::spawn_blocking(move || ainet_claude::hooks::permission_timeout(&path, &command))
+                .await
+                .ok()
+                .flatten()
+        }
+    };
+    let hold = capped_hold(hold, hook_timeout);
+    // Hold the hook open until you answer (`permissions.hold_secs`); on
+    // timeout or release, print nothing and Claude Code's own dialog stays
+    // in charge.
+    let answer = match tokio::time::timeout(hold, rx).await {
         Ok(Ok(a)) => a,
         _ => {
             let mut g = lock(d);
@@ -342,6 +369,28 @@ pub(crate) async fn handle(
     }
 }
 
+/// Where the hook's own timeout comes from.
+enum Limit {
+    /// A pane ainet started, with this timeout in its hooks.
+    Known(u64),
+    /// A hook of yours: the timeout in this Claude Code settings file, for
+    /// the hook running this command.
+    Installed(PathBuf, String),
+}
+
+/// The hold (`permissions.hold_secs`), ended before the hook's own
+/// timeout: Claude Code ends the hook then, and an answer given later
+/// would be lost while the agent shows its dialog. The hold may have been
+/// raised since the hook was set up. A hook whose timeout is not known
+/// holds at most ainet's default (inside the 600 s ainet installs).
+fn capped_hold(hold_secs: u64, hook_timeout: Option<u64>) -> Duration {
+    // `hook_timeout_secs` is the hold and this.
+    const MARGIN: u64 = 20;
+    let default = ainet_core::settings::PermissionSettings::default().hold_secs;
+    let limit = hook_timeout.map_or(default, |t| t.saturating_sub(MARGIN));
+    Duration::from_secs(hold_secs.min(limit).max(1))
+}
+
 /// What the agent reads on a deny: `lead`, then your reason if you gave
 /// one, else `otherwise` (`Denied from ainet by your human: use cargo`).
 fn deny_text(lead: &str, otherwise: &str, why: Option<String>) -> String {
@@ -361,13 +410,7 @@ pub(crate) fn answer(d: &Shared, item: u64, decision: Decision, message: Option<
     let mut note = None;
     if decision == Decision::Always {
         let input: Value = serde_json::from_str(&held.input_raw).unwrap_or(Value::Null);
-        match ainet_claude::always::derive(&held.tool, &input, &held.cwd) {
-            Ok(rule) => {
-                note = Some(format!("always allowing {} for this session", rule.scope()));
-                g.always.entry(held.agent.clone()).or_default().push(rule);
-            }
-            Err(refusal) => note = Some(format!("allowed once; no always rule: {refusal:?}")),
-        }
+        note = Some(g.always_add(&held.agent, &held.tool, &input, &held.cwd));
     }
     g.resolve(item);
     let _ = held.tx.send(HookAnswer::Decide(decision, message));
@@ -431,6 +474,44 @@ impl Daemon {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn context_windows_from_settings_win_over_the_guess() {
+        let dir = std::env::temp_dir().join(format!("ainetd-window-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"type":"assistant","message":{"model":"claude-opus-5-5","usage":{"input_tokens":100000,"output_tokens":5}}}"#,
+        )
+        .unwrap();
+        let mut cost = CostSettings::default();
+        let guessed = summarize(&path, &cost).unwrap().context;
+        assert_eq!(guessed, Some(0.5), "200k by default");
+        cost.context_windows.insert("claude-opus-5".into(), 400_000);
+        assert_eq!(summarize(&path, &cost).unwrap().context, Some(0.25));
+        cost.context_windows = [("claude-sonnet".to_string(), 1_000_000)].into();
+        assert_eq!(
+            summarize(&path, &cost).unwrap().context,
+            Some(0.5),
+            "another model's"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The hold never outlasts the hook: by default it is what it always
+    /// was; raised, it waits for a hook set up to match.
+    #[test]
+    fn the_hold_ends_before_the_hook_does() {
+        let secs = |d: Duration| d.as_secs();
+        assert_eq!(secs(capped_hold(580, Some(600))), 580, "the defaults, as before");
+        assert_eq!(secs(capped_hold(580, None)), 580);
+        assert_eq!(secs(capped_hold(1200, Some(600))), 580, "raised after launch");
+        assert_eq!(secs(capped_hold(1200, Some(1220))), 1200);
+        assert_eq!(secs(capped_hold(1200, None)), 580, "a hook of unknown timeout");
+        assert_eq!(secs(capped_hold(500, Some(120))), 100, "lowered at install");
+        assert_eq!(secs(capped_hold(60, Some(5))), 1);
+    }
 
     #[test]
     fn a_deny_says_why_when_you_did() {

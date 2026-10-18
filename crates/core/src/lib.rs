@@ -1,14 +1,16 @@
 //! Types shared by the daemon, the TUI and the command line: what an agent
-//! is, what the inbox holds, the wire protocol between them, and where files
-//! live.
+//! is, what the inbox holds, the wire protocol between them, where files
+//! live, and the settings they read.
 
 pub mod agent;
 pub mod client;
 pub mod comms;
 pub mod conversation;
+pub mod jsonc;
 pub mod paths;
 pub mod protocol;
 pub mod rig;
+pub mod settings;
 
 pub use agent::{Agent, AgentState, Decision, InboxItem, InboxKind, Runtime};
 pub use comms::{ChatMessage, Message, QBlock, QItem, QNote, QState, Watchdog};

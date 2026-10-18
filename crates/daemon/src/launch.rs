@@ -10,17 +10,22 @@
 //!   mcp__ainet` so talking to the team never needs a permission prompt,
 //! - `--settings` with ainet's hooks, so its state is tracked even if you
 //!   never ran `ainet install-hooks`.
+//!
+//! settings.json's `runtimes` and the seat add to that (`runtimes`).
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use ainet_core::settings::RuntimeSettings;
+use ainet_core::settings::{Effort, PermissionMode};
 use ainet_core::{Agent, AgentState, Edge, EdgeKind, InboxItem, InboxKind, Runtime, SeatStatus, now_ms};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::task::JoinSet;
 
 use crate::agents::{Command, new_agent};
+use crate::runtimes::{self, Ask, Base};
 use crate::{Daemon, Shared, lock};
 
 /// One seat's launch plan: everything needed to start (or restart) it.
@@ -42,6 +47,21 @@ pub(crate) struct SeatPlan {
     pub guidance: Vec<(String, String)>,
     pub send_text: Vec<String>,
     pub restore_send_text: Vec<String>,
+    /// OpenRig's `permission_policy`, applied with
+    /// `permissions.spec_policies`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_policy: Option<String>,
+    /// Asked for when the seat was added (`SeatSpec`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<PermissionMode>,
+    /// An effort asked for when the seat was added, passed whatever
+    /// `spec_effort` says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort_asked: Option<Effort>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
 }
 
 impl From<&ainet_spec::ResolvedSeat> for SeatPlan {
@@ -66,6 +86,11 @@ impl From<&ainet_spec::ResolvedSeat> for SeatPlan {
                 .collect(),
             send_text: s.send_text.clone(),
             restore_send_text: s.restore_send_text.clone(),
+            permission_policy: s.permission_policy.clone(),
+            permission_mode: s.permission_mode,
+            effort_asked: None,
+            args: s.args.clone(),
+            env: s.env.clone(),
         }
     }
 }
@@ -96,6 +121,31 @@ impl SeatPlan {
             send_text: self.send_text.clone(),
             restore_send_text: self.restore_send_text.clone(),
             skills: Vec::new(),
+            permission_policy: self.permission_policy.clone(),
+            permission_mode: self.permission_mode,
+            args: self.args.clone(),
+            env: self.env.clone(),
+        }
+    }
+
+    /// A seat added outside a spec: what its request asked for too.
+    pub(crate) fn added(s: &ainet_spec::ResolvedSeat, spec: &ainet_core::protocol::SeatSpec) -> SeatPlan {
+        SeatPlan {
+            effort_asked: spec.effort,
+            ..SeatPlan::from(s)
+        }
+    }
+
+    /// What the seat asks for beyond its runtime's settings.
+    pub(crate) fn ask(&self) -> Ask<'_> {
+        Ask {
+            model: self.model.as_deref(),
+            effort: self.effort.as_deref(),
+            effort_asked: self.effort_asked,
+            permission_mode: self.permission_mode,
+            permission_policy: self.permission_policy.as_deref(),
+            args: &self.args,
+            env: Some(&self.env),
         }
     }
 
@@ -169,7 +219,17 @@ pub(crate) fn on_path(program: &str) -> bool {
         .unwrap_or(false)
 }
 
-pub(crate) fn program(runtime: Runtime) -> String {
+/// The program a runtime runs: `runtimes.<runtime>.binary` from
+/// settings.json, else `claude`, `codex` or `$SHELL` (else `/bin/sh`).
+pub(crate) fn program(runtimes: &RuntimeSettings, runtime: Runtime) -> String {
+    let configured = match runtime {
+        Runtime::ClaudeCode => &runtimes.claude.binary,
+        Runtime::Codex => &runtimes.codex.binary,
+        Runtime::Shell => &runtimes.shell.binary,
+    };
+    if let Some(b) = configured.as_deref().filter(|b| !b.trim().is_empty()) {
+        return ainet_core::paths::expand(Path::new(b)).display().to_string();
+    }
     match runtime {
         Runtime::ClaudeCode => "claude".into(),
         Runtime::Codex => "codex".into(),
@@ -177,107 +237,15 @@ pub(crate) fn program(runtime: Runtime) -> String {
     }
 }
 
-fn shell_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', r"'\''"))
-}
-
 impl Daemon {
-    /// The `ainet` MCP server, as Claude Code's `--mcp-config` wants it.
-    fn mcp_config(&self, id: &str) -> serde_json::Value {
-        json!({
-            "mcpServers": {
-                "ainet": {
-                    "type": "stdio",
-                    "command": self.exe.display().to_string(),
-                    "args": ["mcp"],
-                    "env": { "AINET_AGENT_ID": id, "AINET_SOCKET": self.socket.display().to_string() }
-                }
-            }
-        })
-    }
-
-    /// ainet's hooks for one session, passed with `--settings`. They are
-    /// marked so the daemon can tell them from your global ones.
-    fn hook_settings(&self) -> serde_json::Value {
-        let cmd = format!(
-            "AINET_HOOK_SOURCE=seat {} hook",
-            shell_quote(&self.exe.display().to_string())
-        );
-        let entry =
-            |timeout: u32| json!([{ "hooks": [{ "type": "command", "command": cmd, "timeout": timeout }] }]);
-        let mut hooks = serde_json::Map::new();
-        for event in [
-            "SessionStart",
-            "SessionEnd",
-            "UserPromptSubmit",
-            "Notification",
-            "Stop",
-            "StopFailure",
-            "PostToolUse",
-            "PostToolUseFailure",
-        ] {
-            hooks.insert(event.into(), entry(10));
+    /// What ainet gives agent `id`: its MCP server and hooks.
+    pub(crate) fn base<'a>(&'a self, id: &'a str) -> Base<'a> {
+        Base {
+            id,
+            exe: &self.exe,
+            socket: &self.socket,
+            permission_timeout: self.settings().permissions.hook_timeout_secs(),
         }
-        hooks.insert(
-            "PreToolUse".into(),
-            json!([{ "matcher": "AskUserQuestion", "hooks": [{ "type": "command", "command": cmd, "timeout": 10 }] }]),
-        );
-        hooks.insert("PermissionRequest".into(), entry(600));
-        json!({ "hooks": hooks })
-    }
-
-    fn claude_args(
-        &self,
-        id: &str,
-        resume: bool,
-        model: Option<&str>,
-        prompt: &str,
-        extra: &[String],
-    ) -> Vec<String> {
-        let mut args = vec![
-            if resume { "--resume" } else { "--session-id" }.to_string(),
-            id.to_string(),
-        ];
-        if let Some(m) = model {
-            args.extend(["--model".into(), m.into()]);
-        }
-        args.extend(["--append-system-prompt".into(), prompt.to_string()]);
-        args.extend(["--mcp-config".into(), self.mcp_config(id).to_string()]);
-        args.extend(["--allowedTools".into(), "mcp__ainet".into()]);
-        args.extend(["--settings".into(), self.hook_settings().to_string()]);
-        args.extend(extra.iter().cloned());
-        args
-    }
-
-    fn codex_args(
-        &self,
-        id: &str,
-        model: Option<&str>,
-        prompt: Option<&str>,
-        extra: &[String],
-    ) -> Vec<String> {
-        let q = |s: &str| serde_json::to_string(s).unwrap_or_default();
-        let mut args = Vec::new();
-        if let Some(m) = model {
-            args.extend(["-m".into(), m.into()]);
-        }
-        args.extend([
-            "-c".into(),
-            format!("mcp_servers.ainet.command={}", q(&self.exe.display().to_string())),
-            "-c".into(),
-            "mcp_servers.ainet.args=[\"mcp\"]".into(),
-            "-c".into(),
-            format!(
-                "mcp_servers.ainet.env={{AINET_AGENT_ID={}, AINET_SOCKET={}}}",
-                q(id),
-                q(&self.socket.display().to_string())
-            ),
-        ]);
-        args.extend(extra.iter().cloned());
-        if let Some(p) = prompt {
-            args.push(p.to_string());
-        }
-        args
     }
 
     /// Who this seat is and how to work with the team, for its system prompt.
@@ -376,14 +344,33 @@ Keep messages short and concrete; say what you need and by when. Do not wait in 
     ) -> Command {
         let prompt = self.system_prompt(plan, seat, agent);
         let seat_rec = self.find_seat(&seat.address, None).cloned();
-        let env = self.agent_env(&agent.id, seat_rec.as_ref());
-        let args = match seat.runtime {
-            Runtime::ClaudeCode => self.claude_args(&agent.id, resume, seat.model.as_deref(), &prompt, &[]),
-            Runtime::Codex => self.codex_args(&agent.id, seat.model.as_deref(), Some(&prompt), &[]),
-            Runtime::Shell => Vec::new(),
-        };
+        let ask = seat.ask();
+        let settings = self.settings();
+        if let Err(why) = runtimes::policy_mode(settings, &ask) {
+            tracing::warn!("{}: {why}", seat.address);
+        }
+        if seat.runtime == Runtime::ClaudeCode
+            && let Some(mode) = runtimes::permission_mode(settings, &ask).filter(|m| m.loosens())
+        {
+            tracing::warn!(
+                "{} starts in permission mode {}: it acts without asking you",
+                seat.address,
+                mode.as_str()
+            );
+        }
+        let mut env = runtimes::env(settings, seat.runtime, &ask);
+        env.extend(self.agent_env(&agent.id, seat_rec.as_ref()));
+        let args = runtimes::args(
+            seat.runtime,
+            &self.base(&agent.id),
+            settings,
+            &ask,
+            resume,
+            Some(&prompt),
+            &[],
+        );
         Command {
-            program: program(seat.runtime),
+            program: program(&settings.runtimes, seat.runtime),
             args,
             env,
         }
@@ -391,19 +378,27 @@ Keep messages short and concrete; say what you need and by when. Do not wait in 
 }
 
 /// The command for an agent started outside any rig (`ainet spawn`).
-pub(crate) fn loose_command(d: &Daemon, agent: &Agent, extra: &[String]) -> Command {
+pub(crate) fn loose_command(d: &Daemon, agent: &Agent, ask: &Ask, extra: &[String]) -> Command {
     let prompt = format!(
         "# ainet\nYou run under ainet as {} (agent id {}). Other agents may message you: messages arrive typed into this terminal as \"[ainet] message #N from …\"; answer them with the ainet MCP tool reply_message(id=N, …). Use list_agents to see who else is running, send_message / ask_agent to talk to them, and send_message(to=\"operator\") to reach your human.",
         agent.name, agent.id
     );
-    let env = d.agent_env(&agent.id, None);
-    let args = match agent.runtime {
-        Runtime::ClaudeCode => d.claude_args(&agent.id, false, None, &prompt, extra),
-        Runtime::Codex => d.codex_args(&agent.id, None, None, extra),
-        Runtime::Shell => extra.to_vec(),
-    };
+    let settings = d.settings();
+    let mut env = runtimes::env(settings, agent.runtime, ask);
+    env.extend(d.agent_env(&agent.id, None));
+    // Codex gets no first message here: a loose agent waits for yours.
+    let prompt = (agent.runtime == Runtime::ClaudeCode).then_some(prompt.as_str());
+    let args = runtimes::args(
+        agent.runtime,
+        &d.base(&agent.id),
+        settings,
+        ask,
+        false,
+        prompt,
+        extra,
+    );
     Command {
-        program: program(agent.runtime),
+        program: program(&settings.runtimes, agent.runtime),
         args,
         env,
     }
@@ -417,7 +412,7 @@ pub(crate) async fn start_seat(
     address: String,
     fresh: bool,
 ) -> anyhow::Result<String> {
-    let (id, runtime, resume, texts) = {
+    let (id, runtime, resume, texts, gap) = {
         let mut g = lock(&d);
         let state = g.rigs.get(&rig).ok_or_else(|| anyhow::anyhow!("no rig {rig}"))?;
         let plan = state.plan.clone();
@@ -430,12 +425,10 @@ pub(crate) async fn start_seat(
             .seat(&address)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("no seat {address}"))?;
-        if !on_path(&program(seat_plan.runtime)) {
+        let program = program(&g.settings().runtimes, seat_plan.runtime);
+        if !on_path(&program) {
             g.set_seat_status(&rig, &address, SeatStatus::Failed);
-            anyhow::bail!(
-                "{} is not installed (needed by {address})",
-                program(seat_plan.runtime)
-            );
+            anyhow::bail!("{program} is not installed (needed by {address})");
         }
         let resume = !fresh
             && seat_plan.restore_policy == "resume_if_possible"
@@ -462,7 +455,8 @@ pub(crate) async fn start_seat(
         } else {
             seat_plan.send_text.clone()
         };
-        (id, seat_plan.runtime, resume, texts)
+        let gap = Duration::from_millis(g.settings().runtimes.readiness.startup_text_gap_ms);
+        (id, seat_plan.runtime, resume, texts, gap)
     };
     let ready = wait_ready(&d, &id, runtime).await;
     if !ready {
@@ -477,7 +471,7 @@ pub(crate) async fn start_seat(
         if let Err(e) = crate::comms::deliver_text(&d, &id, &text).await {
             tracing::warn!("startup text for {address}: {e:#}");
         }
-        tokio::time::sleep(Duration::from_millis(1200)).await;
+        tokio::time::sleep(gap).await;
     }
     let mut g = lock(&d);
     // Shells and Codex send no hooks: ready means idle.
@@ -495,14 +489,17 @@ pub(crate) async fn start_seat(
     Ok(id)
 }
 
-/// Waits until the agent in a fresh pane can take input.
+/// Waits until the agent in a fresh pane can take input
+/// (`runtimes.readiness` says how long and how quiet).
 async fn wait_ready(d: &Shared, id: &str, runtime: Runtime) -> bool {
     let started = Instant::now();
     let mut asked_trust = false;
-    let mut deadline = Duration::from_secs(60);
+    let mut deadline = Duration::from_secs(lock(d).settings().runtimes.readiness.timeout_secs);
     loop {
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        let poll = lock(d).settings().runtimes.readiness.poll_ms;
+        tokio::time::sleep(Duration::from_millis(poll)).await;
         let mut g = lock(d);
+        let r = g.settings().runtimes.readiness.clone();
         let Some(pane) = g.panes.get(id) else { return false };
         let screen = pane.rows().join("\n");
         let quiet = g
@@ -515,7 +512,7 @@ async fn wait_ready(d: &Shared, id: &str, runtime: Runtime) -> bool {
             // Your call, not ours: say so and wait for you.
             if !asked_trust {
                 asked_trust = true;
-                deadline = started.elapsed() + Duration::from_secs(600);
+                deadline = started.elapsed() + Duration::from_secs(r.trust_timeout_secs);
                 let cwd = g
                     .agents
                     .get(id)
@@ -543,10 +540,10 @@ async fn wait_ready(d: &Shared, id: &str, runtime: Runtime) -> bool {
                 let prompt = screen.contains("? for shortcuts")
                     || screen.contains("│ >")
                     || screen.lines().any(|l| l.trim_start().starts_with('>'));
-                (hooked || prompt) && quiet > Duration::from_millis(800)
+                (hooked || prompt) && quiet > Duration::from_millis(r.quiet_ms.claude)
             }
-            Runtime::Codex => printed && quiet > Duration::from_millis(1500),
-            Runtime::Shell => printed && quiet > Duration::from_millis(400),
+            Runtime::Codex => printed && quiet > Duration::from_millis(r.quiet_ms.codex),
+            Runtime::Shell => printed && quiet > Duration::from_millis(r.quiet_ms.shell),
         };
         if ready {
             return true;
@@ -675,6 +672,11 @@ mod tests {
             guidance: vec![],
             send_text: vec![],
             restore_send_text: vec![],
+            permission_policy: None,
+            permission_mode: None,
+            effort_asked: None,
+            args: vec![],
+            env: BTreeMap::new(),
         }
     }
 

@@ -2,12 +2,14 @@
 //! commands and the MCP server agents talk through. Symlinked as `rig`, it
 //! answers to OpenRig's command names.
 
+mod admin;
 mod cli;
 mod commands;
 mod conn;
 mod hook;
 mod mcp;
 mod output;
+mod settings;
 
 use std::process::ExitCode;
 

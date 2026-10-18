@@ -138,6 +138,18 @@ impl Table {
         Table { rates }
     }
 
+    /// The built-in table with `rates` on top (model-id prefix → price),
+    /// as settings.json's `cost.prices` gives them.
+    pub fn with_rates(rates: impl IntoIterator<Item = (String, Price)>) -> Table {
+        let mut table = Table::default();
+        for (prefix, price) in rates {
+            if !prefix.is_empty() {
+                table.rates.insert(prefix, (price, false));
+            }
+        }
+        table
+    }
+
     fn lookup(&self, model: &str) -> Option<(Price, bool)> {
         self.rates
             .iter()
@@ -454,6 +466,24 @@ mod tests {
         let p = t.price("claude-opus-5-5").unwrap();
         assert!(p.input == 8.0 && p.output == 40.0 && near(p.cache_write, 10.0) && near(p.cache_read, 0.8));
         assert!(t.price("bad").is_none() && t.price("short").is_none());
+    }
+
+    #[test]
+    fn rates_from_settings_go_over_the_builtin_table() {
+        let t = Table::with_rates([
+            ("claude-opus-5".to_string(), p(1.0, 2.0, 3.0, 4.0)),
+            ("my-model".to_string(), p(5.0, 6.0, 7.0, 8.0)),
+            (String::new(), p(9.0, 9.0, 9.0, 9.0)),
+        ]);
+        assert_eq!(t.price("claude-opus-5-1").unwrap().input, 1.0);
+        assert_eq!(
+            t.price("claude-opus-5-5").unwrap().input,
+            4.0,
+            "a longer built-in prefix wins"
+        );
+        assert_eq!(t.price("my-model-x").unwrap().output, 6.0);
+        assert!(t.price("other").is_none(), "an empty prefix is ignored");
+        assert_eq!(Table::with_rates([]), Table::default());
     }
 
     #[test]

@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+use ainet_core::settings::PermissionMode;
 use ainet_core::{Edge, EdgeKind, Runtime};
 
 use crate::files;
@@ -70,6 +71,11 @@ pub struct MemberIn {
     pub startup: Option<RawStartup>,
     pub guidance: Option<String>,
     pub first_message: Option<String>,
+    /// OpenRig's `permission_policy`, the member's over the rig's.
+    pub permission_policy: Option<String>,
+    pub permission_mode: Option<PermissionMode>,
+    pub args: Vec<String>,
+    pub env: BTreeMap<String, String>,
 }
 
 fn owned(v: &Option<Text>) -> Option<String> {
@@ -90,6 +96,7 @@ impl MemberIn {
             role: owned(&m.role),
             restore_policy: owned(&m.restore_policy),
             startup: m.startup.clone(),
+            permission_policy: raw::loose(&m.extra, "permission_policy").map(str::to_string),
             ..Self::default()
         }
     }
@@ -128,6 +135,8 @@ pub struct Resolver<'a> {
     errors: Vec<String>,
     warnings: Vec<String>,
     agents: HashMap<PathBuf, Option<Rc<Agent>>>,
+    /// The rig's `permission_policy`, for members without their own.
+    policy: Option<String>,
 }
 
 fn push_unique(list: &mut Vec<String>, msg: String) {
@@ -184,6 +193,7 @@ impl<'a> Resolver<'a> {
             errors: Vec::new(),
             warnings: Vec::new(),
             agents: HashMap::new(),
+            policy: None,
         }
     }
 
@@ -253,6 +263,7 @@ impl<'a> Resolver<'a> {
             self.warn("no `version`: OpenRig needs version: \"0.2\"".into());
         }
         self.extra_keys("rig", &raw.extra, &IGNORED_RIG_KEYS, &QUIET_RIG_KEYS);
+        self.policy = raw::loose(&raw.extra, "permission_policy").map(str::to_string);
 
         let dir = self.origin.dir.to_path_buf();
         let mut layers = Vec::new();
@@ -654,6 +665,10 @@ impl<'a> Resolver<'a> {
             send_text,
             restore_send_text,
             skills,
+            permission_policy: m.permission_policy.clone().or_else(|| self.policy.clone()),
+            permission_mode: m.permission_mode,
+            args: m.args.clone(),
+            env: m.env.clone(),
         })
     }
 
@@ -698,6 +713,10 @@ impl<'a> Resolver<'a> {
             send_text,
             restore_send_text,
             skills: Vec::new(),
+            permission_policy: None,
+            permission_mode: None,
+            args: m.args.clone(),
+            env: m.env.clone(),
         })
     }
 

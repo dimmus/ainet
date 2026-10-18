@@ -18,8 +18,8 @@ use anyhow::{Context, Result};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use tokio::sync::mpsc::{self, UnboundedSender, error::TrySendError};
 
-/// Rows of scrollback each pane keeps.
-const SCROLLBACK: usize = 5_000;
+/// Rows of scrollback a pane keeps unless its [`Launch`] says otherwise.
+pub const SCROLLBACK: usize = 5_000;
 
 /// Pieces of output an attachment may fall behind by before it loses
 /// them (and is sent the whole screen instead, see [`Attachment::lagged`]).
@@ -47,6 +47,8 @@ pub struct Launch<'a> {
     pub remove: &'a [String],
     pub rows: u16,
     pub cols: u16,
+    /// Rows of scrollback to keep ([`SCROLLBACK`] is ainet's default).
+    pub scrollback: usize,
 }
 
 /// What an attachment hears, in the order it happened.
@@ -288,7 +290,7 @@ impl Pane {
         let mut reader = pair.master.try_clone_reader().context("pty reader")?;
         let writer = pair.master.take_writer().context("pty writer")?;
         let screen = Arc::new(Mutex::new(Term {
-            parser: vt100::Parser::new(launch.rows, launch.cols, SCROLLBACK),
+            parser: vt100::Parser::new(launch.rows, launch.cols, launch.scrollback),
             taps: Vec::new(),
             done: false,
         }));
@@ -526,6 +528,7 @@ mod tests {
                 remove: &[],
                 rows: 10,
                 cols: 40,
+                scrollback: SCROLLBACK,
             },
             tx,
         )
@@ -561,6 +564,7 @@ mod tests {
                 remove: &[],
                 rows: 10,
                 cols: 40,
+                scrollback: SCROLLBACK,
             },
             tx,
         )
@@ -592,6 +596,7 @@ mod tests {
                 remove: &[],
                 rows: 6,
                 cols: 30,
+                scrollback: SCROLLBACK,
             },
             tx,
         )

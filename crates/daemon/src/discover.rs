@@ -5,7 +5,8 @@
 //! socket), so they all show up in the Fleet and can be messaged, as in Den.
 //! Agents running in tmux can be adopted into a rig seat (OpenRig's
 //! `discover` / `adopt`): ainet then types into them with tmux and reads
-//! their screen with `capture-pane`.
+//! their screen with `capture-pane`. Both are `discovery` in settings.json:
+//! on by default, and each can be turned off.
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -234,7 +235,11 @@ impl Daemon {
                 self.publish(&id);
             }
         }
-        // Sessions we only knew from the file, now gone.
+        self.sweep_gone_sessions(live);
+    }
+
+    /// Sessions we only knew from the file, now gone.
+    fn sweep_gone_sessions(&mut self, live: &[LiveSession]) {
         let gone: Vec<String> = self
             .agents
             .values()
@@ -257,8 +262,9 @@ impl Daemon {
             .filter(|a| a.state.is_live() && a.runtime == Runtime::ClaudeCode)
             .filter_map(|a| a.transcript.clone().map(|t| (a.id.clone(), t)))
             .collect();
+        let cost = self.settings().cost.clone();
         for (id, path) in ids {
-            let summary = crate::hooks::summarize(&path);
+            let summary = crate::hooks::summarize(&path, &cost);
             let Some(s) = summary else { continue };
             if let Some(a) = self.agents.get_mut(&id) {
                 let before = (a.context, a.model.clone(), a.last_tool.clone());
@@ -279,26 +285,51 @@ impl Daemon {
     }
 }
 
-/// Keeps the fleet in step with the machine.
+/// Keeps the fleet in step with the machine: Claude Code's sessions every
+/// `discovery.interval_ms`, from the start (with
+/// `discovery.claude_sessions` off, only those already tracked are seen
+/// to end), transcripts every `discovery.transcripts_ms`, first on the
+/// second pass (by default every other pass, as before).
 pub(crate) async fn ticker(d: Shared) {
-    let mut every = tokio::time::interval(Duration::from_secs(3));
-    let mut n: u64 = 0;
+    let sessions_dir = lock(&d).claude_sessions.clone();
+    let first_every = Duration::from_millis(lock(&d).settings().discovery.interval_ms);
+    let mut next_transcripts = std::time::Instant::now() + first_every;
     loop {
-        every.tick().await;
-        n += 1;
-        let live = tokio::task::spawn_blocking(sessions::live_sessions)
+        let (every, sessions_on, transcripts) = {
+            let g = lock(&d);
+            let s = &g.settings().discovery;
+            (
+                Duration::from_millis(s.interval_ms),
+                s.claude_sessions,
+                Duration::from_millis(s.transcripts_ms),
+            )
+        };
+        let dir = sessions_dir.clone();
+        let live = tokio::task::spawn_blocking(move || sessions::live_sessions_in(&dir))
             .await
             .unwrap_or_default();
-        let mut g = lock(&d);
-        g.sync_sessions(&live);
-        if n.is_multiple_of(2) {
-            g.refresh_transcripts();
+        {
+            let mut g = lock(&d);
+            if sessions_on {
+                g.sync_sessions(&live);
+            } else {
+                g.sweep_gone_sessions(&live);
+            }
         }
+        let now = std::time::Instant::now();
+        if now >= next_transcripts {
+            next_transcripts = now + transcripts;
+            lock(&d).refresh_transcripts();
+        }
+        tokio::time::sleep(every).await;
     }
 }
 
 pub(crate) fn discover(d: &Shared) -> Response {
     let g = lock(d);
+    // Asked for: Claude Code's sessions are listed even when they are not
+    // tracked on their own; tmux only when `discovery.tmux` is on.
+    let tmux_on = g.settings().discovery.tmux;
     let mut found: Vec<Discovered> = Vec::new();
     let adopted = |pane: &str| -> Option<String> {
         g.tmux
@@ -307,7 +338,8 @@ pub(crate) fn discover(d: &Shared) -> Response {
             .and_then(|(a, _)| g.agents.get(a))
             .and_then(|a| a.seat.clone())
     };
-    for p in tmux_panes() {
+    let panes = if tmux_on { tmux_panes() } else { Vec::new() };
+    for p in panes {
         if let Some((runtime, pid)) = agent_under(p.pid) {
             found.push(Discovered {
                 id: p.id.clone(),
@@ -320,7 +352,10 @@ pub(crate) fn discover(d: &Shared) -> Response {
             });
         }
     }
-    for s in sessions::live_sessions().into_iter().filter(|s| s.alive) {
+    for s in sessions::live_sessions_in(&g.claude_sessions)
+        .into_iter()
+        .filter(|s| s.alive)
+    {
         let in_tmux = found.iter().any(|f| f.pid == Some(s.pid as u32));
         let owned = g.panes.contains_key(&s.session_id);
         if in_tmux || owned {
@@ -389,7 +424,7 @@ pub(crate) fn adopt(d: &Shared, id: &str, rig: &str, spec: SeatSpec) -> Response
         Ok(s) => s,
         Err(e) => return err(format!("{e:#}")),
     };
-    let plan = SeatPlan::from(&resolved);
+    let plan = SeatPlan::added(&resolved, &spec);
     if !g.rigs.contains_key(rig) {
         let rp = crate::launch::RigPlan {
             name: rig.to_string(),

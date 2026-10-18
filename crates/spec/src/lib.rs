@@ -28,7 +28,7 @@ use ainet_core::protocol::SeatSpec;
 use anyhow::{Context, bail};
 
 pub use export::to_yaml;
-pub use library::{library, load_named, spec_yaml};
+pub use library::{library, library_from, load_named, load_named_from, spec_yaml, spec_yaml_from};
 pub use order::launch_order;
 
 /// A piece of guidance for an agent's system prompt.
@@ -69,6 +69,15 @@ pub struct ResolvedSeat {
     pub restore_send_text: Vec<String>,
     /// Skill directories (or files) to install for the seat.
     pub skills: Vec<PathBuf>,
+    /// OpenRig's `permission_policy` (the member's, else the rig's): read
+    /// and reported; ainetd applies it only when settings.json says to.
+    pub permission_policy: Option<String>,
+    /// Claude Code's permission mode, from a seat added outside a spec.
+    pub permission_mode: Option<ainet_core::settings::PermissionMode>,
+    /// More arguments for the agent CLI, from a seat added outside a spec.
+    pub args: Vec<String>,
+    /// More environment variables, from a seat added outside a spec.
+    pub env: std::collections::BTreeMap<String, String>,
 }
 
 /// A rig resolved from a spec.
@@ -176,9 +185,14 @@ pub fn parse(yaml: &str, root: &Path, spec_path: Option<&Path>) -> anyhow::Resul
 /// Checks a spec without launching anything. Takes a path, or the name of a
 /// library spec when no such path exists.
 pub fn validate(path: &Path) -> Report {
+    validate_from(&[ainet_core::paths::specs_dir()], path)
+}
+
+/// [`validate`] with the user's specs in `dirs`.
+pub fn validate_from(dirs: &[PathBuf], path: &Path) -> Report {
     if !path.exists()
         && let Some(name) = path.to_str().filter(|n| !n.contains('/'))
-        && let Some(report) = library::validate_named(name)
+        && let Some(report) = library::validate_named(dirs, name)
     {
         return report;
     }
@@ -218,6 +232,10 @@ pub fn seat_from_spec(rig: &str, root: &Path, spec: &SeatSpec) -> anyhow::Result
         role: spec.role.clone(),
         guidance: spec.guidance.clone(),
         first_message: spec.first_message.clone(),
+        effort: spec.effort.map(|e| e.as_str().to_string()),
+        permission_mode: spec.permission_mode,
+        args: spec.args.clone(),
+        env: spec.env.clone(),
         ..resolve::MemberIn::default()
     };
     let what = format!("seat {}.{}", spec.pod, spec.member);

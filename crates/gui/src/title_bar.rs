@@ -15,7 +15,9 @@ use ui::{Indicator, Tooltip, prelude::*};
 
 use ainet_model::Store;
 
-use crate::actions::{OpenComms, OpenConversation, OpenInbox, OpenMap, OpenTopology, SwitchRig, TileAll};
+use crate::actions::{
+    OpenComms, OpenConversation, OpenInbox, OpenMap, OpenSettings, OpenTopology, SwitchRig, TileAll,
+};
 use crate::fleet::{Connection, FleetModel};
 use crate::inbox::waiting_badge;
 use crate::quit;
@@ -54,7 +56,7 @@ pub fn connection_badge(connection: &Connection) -> (Color, &'static str) {
 
 /// The views the title bar opens, as (id, icon, tooltip, action): every
 /// view is one click away, not only behind its key or the palette.
-fn views() -> [(&'static str, IconName, &'static str, Box<dyn Action>); 6] {
+fn views() -> [(&'static str, IconName, &'static str, Box<dyn Action>); 7] {
     [
         (
             "title-terminals",
@@ -77,6 +79,12 @@ fn views() -> [(&'static str, IconName, &'static str, Box<dyn Action>); 6] {
             Box::new(OpenConversation),
         ),
         ("title-inbox", IconName::Bell, "Inbox", Box::new(OpenInbox)),
+        (
+            "title-settings",
+            IconName::Settings,
+            "Settings",
+            Box::new(OpenSettings),
+        ),
     ]
 }
 

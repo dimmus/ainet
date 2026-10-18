@@ -286,8 +286,34 @@ pub enum Cmd {
         #[arg(long)]
         octant: bool,
     },
-    /// Print the hooks block for ~/.claude/settings.json.
-    InstallHooks,
+    /// ainet's hooks in Claude Code's settings (`hooks.claude_settings`,
+    /// else ~/.claude/settings.json): prints the block to merge by hand,
+    /// or with a flag writes it (a backup is kept), removes it or checks
+    /// it. ainet's own seats get their hooks without it.
+    InstallHooks {
+        /// Install (or repair) them in Claude Code's settings file.
+        #[arg(long, conflicts_with_all = ["remove", "status"])]
+        write: bool,
+        /// Remove every ainet hook from Claude Code's settings file.
+        #[arg(long, conflicts_with = "status")]
+        remove: bool,
+        /// Say whether they are installed and up to date; changes nothing.
+        #[arg(long)]
+        status: bool,
+    },
+    /// ainet's settings (settings.json): read them, change one, edit the
+    /// file. Works without ainetd; a running one puts a change in force
+    /// at once.
+    #[command(subcommand)]
+    Config(ConfigCmd),
+    /// `/always` rules in force: list them, revoke them.
+    #[command(subcommand)]
+    Always(AlwaysCmd),
+    /// ainet's hooks in Claude Code's settings (`hooks.claude_settings`,
+    /// else ~/.claude/settings.json): check, install, remove. Changes keep
+    /// a backup of the file.
+    #[command(subcommand)]
+    Hooks(HooksCmd),
     /// Stop ainetd and the agents it owns.
     Shutdown,
     /// Run ainetd in the foreground.
@@ -568,6 +594,65 @@ pub enum WatchdogCmd {
         #[arg(long)]
         reason: Option<String>,
     },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ConfigCmd {
+    /// One setting's value, or the settings of a group (`queue`).
+    Get { key: String },
+    /// Change one setting: `ainet config set queue.nudge false`. Text
+    /// needs no quotes; lists and maps are JSON.
+    Set {
+        key: String,
+        #[arg(required = true, num_args = 1.., allow_hyphen_values = true, trailing_var_arg = true)]
+        value: Vec<String>,
+    },
+    /// Remove a setting (or a group) from the file: its default applies.
+    Unset { key: String },
+    /// Every setting: its value, where it comes from, when a change
+    /// applies; `*` marks those not at their default.
+    List {
+        /// Only this setting or group.
+        key: Option<String>,
+        /// Only the settings not at their default.
+        #[arg(long)]
+        changed: bool,
+    },
+    /// Where settings.json is; with --all, every path ainet uses and its
+    /// version.
+    Path {
+        #[arg(long)]
+        all: bool,
+    },
+    /// Open settings.json in $VISUAL or $EDITOR, then check it and have
+    /// a running ainetd read it.
+    Edit,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum AlwaysCmd {
+    /// The rules in force: one agent's, or every agent's and the global
+    /// ones from settings.json.
+    List { agent: Option<String> },
+    /// Revoke an agent's rule by its key, as `list` shows it, or all of
+    /// its rules with --all.
+    Revoke {
+        agent: String,
+        #[arg(required_unless_present = "all", conflicts_with = "all")]
+        rule: Option<String>,
+        #[arg(long)]
+        all: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum HooksCmd {
+    /// Whether they are installed and up to date; changes nothing.
+    Status,
+    /// Install (or repair) them, keeping a backup of the file.
+    Install,
+    /// Remove every ainet hook, keeping a backup of the file.
+    Uninstall,
 }
 
 #[derive(Subcommand, Debug)]
@@ -1009,6 +1094,103 @@ mod tests {
         assert_eq!(parse_duration("45"), Ok(45));
         assert!(parse_duration("2w").is_err());
         assert!(parse_duration("h").is_err());
+    }
+
+    #[test]
+    fn config_commands() {
+        match parse(&[
+            "ainet",
+            "config",
+            "set",
+            "runtimes.claude.args",
+            "--verbose",
+            "-x",
+        ])
+        .cmd
+        {
+            Some(Cmd::Config(ConfigCmd::Set { key, value })) => {
+                assert_eq!(key, "runtimes.claude.args");
+                assert_eq!(value, ["--verbose", "-x"]);
+            }
+            other => panic!("{other:?}"),
+        }
+        match parse(&["ainet", "config", "set", "queue.watchdog.message", "wake", "up"]).cmd {
+            Some(Cmd::Config(ConfigCmd::Set { value, .. })) => assert_eq!(value, ["wake", "up"]),
+            other => panic!("{other:?}"),
+        }
+        assert!(Cli::try_parse_from(["ainet", "config", "set", "queue.nudge"]).is_err());
+        assert!(matches!(
+            parse(&["ainet", "config", "get", "queue.nudge", "--json"]).cmd,
+            Some(Cmd::Config(ConfigCmd::Get { .. }))
+        ));
+        assert!(matches!(
+            parse(&["ainet", "config", "unset", "queue"]).cmd,
+            Some(Cmd::Config(ConfigCmd::Unset { .. }))
+        ));
+        assert!(matches!(
+            parse(&["ainet", "config", "list", "queue", "--changed"]).cmd,
+            Some(Cmd::Config(ConfigCmd::List {
+                key: Some(_),
+                changed: true
+            }))
+        ));
+        assert!(matches!(
+            parse(&["ainet", "config", "list"]).cmd,
+            Some(Cmd::Config(ConfigCmd::List {
+                key: None,
+                changed: false
+            }))
+        ));
+        assert!(matches!(
+            parse(&["ainet", "config", "path", "--all"]).cmd,
+            Some(Cmd::Config(ConfigCmd::Path { all: true }))
+        ));
+        assert!(matches!(
+            parse(&["ainet", "config", "edit"]).cmd,
+            Some(Cmd::Config(ConfigCmd::Edit))
+        ));
+        assert!(Cli::try_parse_from(["ainet", "config", "frob"]).is_err());
+    }
+
+    #[test]
+    fn always_and_hooks_commands() {
+        assert!(matches!(
+            parse(&["ainet", "always", "list"]).cmd,
+            Some(Cmd::Always(AlwaysCmd::List { agent: None }))
+        ));
+        assert!(matches!(
+            parse(&["ainet", "always", "list", "dev.impl"]).cmd,
+            Some(Cmd::Always(AlwaysCmd::List { agent: Some(_) }))
+        ));
+        assert!(matches!(
+            parse(&["ainet", "always", "revoke", "a1", "Bash:cargo test"]).cmd,
+            Some(Cmd::Always(AlwaysCmd::Revoke {
+                rule: Some(_),
+                all: false,
+                ..
+            }))
+        ));
+        assert!(matches!(
+            parse(&["ainet", "always", "revoke", "a1", "--all"]).cmd,
+            Some(Cmd::Always(AlwaysCmd::Revoke {
+                rule: None,
+                all: true,
+                ..
+            }))
+        ));
+        // Revoking everything is said outright, never by leaving the key out.
+        assert!(Cli::try_parse_from(["ainet", "always", "revoke", "a1"]).is_err());
+        assert!(Cli::try_parse_from(["ainet", "always", "revoke", "a1", "k", "--all"]).is_err());
+        for (verb, want) in [("status", 0), ("install", 1), ("uninstall", 2)] {
+            let got = match parse(&["ainet", "hooks", verb]).cmd {
+                Some(Cmd::Hooks(HooksCmd::Status)) => 0,
+                Some(Cmd::Hooks(HooksCmd::Install)) => 1,
+                Some(Cmd::Hooks(HooksCmd::Uninstall)) => 2,
+                other => panic!("{other:?}"),
+            };
+            assert_eq!(got, want);
+        }
+        assert!(Cli::try_parse_from(["ainet", "hooks"]).is_err());
     }
 
     #[test]

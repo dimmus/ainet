@@ -1,8 +1,8 @@
-//! Setting one value in a JSON-with-comments file (settings.json) by
-//! editing its text: everything else (comments, order, spacing, trailing
-//! commas) stays as written. Zed does this with tree-sitter
-//! (`settings_json`); a small scanner does here, since only an object's
-//! members need finding.
+//! Setting or removing one value in a JSON-with-comments file
+//! (settings.json) by editing its text: everything else (comments, order,
+//! spacing, trailing commas) stays as written. Zed does this with
+//! tree-sitter (`settings_json`); a small scanner does here, since only an
+//! object's members need finding.
 
 use std::ops::Range;
 
@@ -21,10 +21,11 @@ pub fn set(text: &str, path: &[&str], value: &str) -> Result<String, String> {
     let mut open = start;
     for (depth, key) in path.iter().enumerate() {
         match find(text, open, key)? {
-            (Some(at), _) if depth + 1 == path.len() => {
+            (Some(m), _) if depth + 1 == path.len() => {
+                let at = m.value;
                 return Ok(format!("{}{value}{}", &text[..at.start], &text[at.end..]));
             }
-            (Some(at), _) if bytes[at.start] == b'{' => open = at.start,
+            (Some(m), _) if bytes[m.value.start] == b'{' => open = m.value.start,
             (Some(_), _) => return Err(format!("\"{key}\" is not an object")),
             (None, members) => {
                 let indent = "  ".repeat(depth + 1);
@@ -58,9 +59,61 @@ fn member(path: &[&str], value: &str, depth: usize) -> String {
     }
 }
 
-/// In the object opening at `open`: where `key`'s value is, if it is
+/// `text` without the value at `path`: its member goes, with the comma
+/// after it and, when nothing else was on them, its lines. A path that is
+/// not there leaves the text as it is.
+pub fn unset(text: &str, path: &[&str]) -> Result<String, String> {
+    let bytes = text.as_bytes();
+    let start = skip_trivia(bytes, 0)?;
+    if start == bytes.len() || path.is_empty() {
+        return Ok(text.to_string());
+    }
+    if bytes[start] != b'{' {
+        return Err("the file is not a JSON object".into());
+    }
+    let mut open = start;
+    for (depth, key) in path.iter().enumerate() {
+        let Some(m) = find(text, open, key)?.0 else {
+            return Ok(text.to_string());
+        };
+        if depth + 1 < path.len() {
+            if bytes[m.value.start] != b'{' {
+                return Ok(text.to_string());
+            }
+            open = m.value.start;
+            continue;
+        }
+        let mut from = m.key;
+        let mut to = m.value.end;
+        // The comma after it, past spaces (a comment may sit between).
+        let mut j = to;
+        while bytes.get(j).is_some_and(|c| *c == b' ' || *c == b'\t') {
+            j += 1;
+        }
+        if bytes.get(j) == Some(&b',') {
+            to = j + 1;
+        }
+        // Its whole line, when the member had the line to itself.
+        let line_start = text[..from].rfind('\n').map_or(0, |n| n + 1);
+        let rest_end = text[to..].find('\n').map_or(text.len(), |n| to + n);
+        if text[line_start..from].trim().is_empty() && text[to..rest_end].trim().is_empty() {
+            from = line_start;
+            to = (rest_end + 1).min(text.len());
+        }
+        return Ok(format!("{}{}", &text[..from], &text[to..]));
+    }
+    Ok(text.to_string())
+}
+
+/// Where a member is: its key's opening quote, and its value.
+struct Member {
+    key: usize,
+    value: Range<usize>,
+}
+
+/// In the object opening at `open`: where `key`'s member is, if it is
 /// there, and how many members were read.
-fn find(text: &str, open: usize, key: &str) -> Result<(Option<Range<usize>>, usize), String> {
+fn find(text: &str, open: usize, key: &str) -> Result<(Option<Member>, usize), String> {
     let bytes = text.as_bytes();
     let mut i = open + 1;
     let mut members = 0;
@@ -71,6 +124,7 @@ fn find(text: &str, open: usize, key: &str) -> Result<(Option<Range<usize>>, usi
             Some(b'}') => return Ok((None, members)),
             Some(b',') => i += 1,
             Some(b'"') => {
+                let key_at = i;
                 let end = string_end(bytes, i)?;
                 let name: String = serde_json::from_str(&text[i..end]).map_err(|e| e.to_string())?;
                 i = skip_trivia(bytes, end)?;
@@ -81,7 +135,13 @@ fn find(text: &str, open: usize, key: &str) -> Result<(Option<Range<usize>>, usi
                 let at = value(bytes, i)?;
                 members += 1;
                 if name == key {
-                    return Ok((Some(at), members));
+                    return Ok((
+                        Some(Member {
+                            key: key_at,
+                            value: at,
+                        }),
+                        members,
+                    ));
                 }
                 i = at.end;
             }
@@ -119,7 +179,7 @@ fn skip_trivia(bytes: &[u8], mut i: usize) -> Result<usize, String> {
 }
 
 /// Past the string starting at `i` (its opening quote).
-fn string_end(bytes: &[u8], mut i: usize) -> Result<usize, String> {
+pub(super) fn string_end(bytes: &[u8], mut i: usize) -> Result<usize, String> {
     i += 1;
     loop {
         match bytes.get(i) {
@@ -217,6 +277,32 @@ mod tests {
         let text = r#"{ "a": "} \" \"theme\": 1", /* "theme": 2 } */ "b": [1, {"theme": 3}], "theme": 4 }"#;
         let done = set(text, &["theme"], "5").unwrap();
         assert!(done.ends_with(r#""theme": 5 }"#), "{done}");
+    }
+
+    #[test]
+    fn unsets_a_member_and_keeps_the_rest() {
+        let text = "// Mine.\n{\n  \"a\": 1, // one\n  \"b\": { \"c\": 2, \"d\": 3 },\n  \"e\": 4\n}\n";
+        assert_eq!(
+            unset(text, &["e"]).unwrap(),
+            "// Mine.\n{\n  \"a\": 1, // one\n  \"b\": { \"c\": 2, \"d\": 3 },\n}\n"
+        );
+        // The comment after it stays: it may say something about the next.
+        assert_eq!(
+            unset(text, &["a"]).unwrap(),
+            "// Mine.\n{\n   // one\n  \"b\": { \"c\": 2, \"d\": 3 },\n  \"e\": 4\n}\n"
+        );
+        assert_eq!(unset(text, &["b", "c"]).unwrap(), text.replace("\"c\": 2,", ""));
+        assert_eq!(unset(text, &["b", "x"]).unwrap(), text, "not there");
+        assert_eq!(unset(text, &["a", "x"]).unwrap(), text, "not an object");
+        assert_eq!(unset("", &["a"]).unwrap(), "");
+        for edited in [
+            unset(text, &["a"]).unwrap(),
+            unset(text, &["b"]).unwrap(),
+            unset(text, &["e"]).unwrap(),
+        ] {
+            assert!(super::super::to_value(&edited).is_ok(), "{edited}");
+        }
+        assert!(unset("[1]", &["a"]).is_err());
     }
 
     #[test]

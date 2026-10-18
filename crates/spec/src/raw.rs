@@ -53,8 +53,65 @@ pub fn text(v: &Option<Text>) -> Option<&str> {
     v.as_ref().map(|t| t.0.trim()).filter(|s| !s.is_empty())
 }
 
-/// Keys a level didn't recognise.
-pub type Extra = BTreeMap<String, IgnoredAny>;
+/// Keys a level didn't recognise, or knows but does not model: a scalar's
+/// text is kept (a `permission_policy`), anything else only its key.
+pub type Extra = BTreeMap<String, Loose>;
+
+/// A value of a key ainet does not model: a scalar as text, else nothing.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Loose(pub Option<String>);
+
+impl<'de> Deserialize<'de> for Loose {
+    fn deserialize<D: de::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = Loose;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("any value")
+            }
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<Loose, E> {
+                Ok(Loose(Some(v.to_string())))
+            }
+            fn visit_bool<E: de::Error>(self, v: bool) -> Result<Loose, E> {
+                Ok(Loose(Some(v.to_string())))
+            }
+            fn visit_i64<E: de::Error>(self, v: i64) -> Result<Loose, E> {
+                Ok(Loose(Some(v.to_string())))
+            }
+            fn visit_u64<E: de::Error>(self, v: u64) -> Result<Loose, E> {
+                Ok(Loose(Some(v.to_string())))
+            }
+            fn visit_f64<E: de::Error>(self, v: f64) -> Result<Loose, E> {
+                Ok(Loose(Some(v.to_string())))
+            }
+            fn visit_unit<E: de::Error>(self) -> Result<Loose, E> {
+                Ok(Loose(None))
+            }
+            fn visit_none<E: de::Error>(self) -> Result<Loose, E> {
+                Ok(Loose(None))
+            }
+            fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<Loose, A::Error> {
+                while seq.next_element::<IgnoredAny>()?.is_some() {}
+                Ok(Loose(None))
+            }
+            fn visit_map<A: de::MapAccess<'de>>(self, mut map: A) -> Result<Loose, A::Error> {
+                while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+                Ok(Loose(None))
+            }
+        }
+        d.deserialize_any(V)
+    }
+}
+
+/// The trimmed text of a scalar kept in `extra`, `None` when absent,
+/// blank or not a scalar.
+pub fn loose<'a>(extra: &'a Extra, key: &str) -> Option<&'a str> {
+    extra
+        .get(key)
+        .and_then(|v| v.0.as_deref())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
 
 #[derive(Debug, Default, Deserialize)]
 pub struct RawRig {

@@ -57,6 +57,29 @@ impl Store {
         }
     }
 
+    /// Deletes logged events older than `before` (Unix ms) and all but the
+    /// newest `keep`. Returns how many went.
+    pub fn prune_events(&self, before: Option<i64>, keep: Option<u64>) -> usize {
+        let mut gone = 0;
+        if let Some(ts) = before {
+            match self.db.execute("DELETE FROM events WHERE ts < ?1", params![ts]) {
+                Ok(n) => gone += n,
+                Err(e) => tracing::warn!("event log: {e}"),
+            }
+        }
+        if let Some(keep) = keep {
+            let res = self.db.execute(
+                "DELETE FROM events WHERE id NOT IN (SELECT id FROM events ORDER BY id DESC LIMIT ?1)",
+                params![i64::try_from(keep).unwrap_or(i64::MAX)],
+            );
+            match res {
+                Ok(n) => gone += n,
+                Err(e) => tracing::warn!("event log: {e}"),
+            }
+        }
+        gone
+    }
+
     pub fn count(&self) -> i64 {
         self.db
             .query_row("SELECT count(*) FROM events", [], |r| r.get(0))
@@ -155,6 +178,23 @@ mod tests {
         let s = Store::in_memory().unwrap();
         s.log(1, Some("a"), "Stop", &serde_json::json!({"x": 1}));
         assert_eq!(s.count(), 1);
+    }
+
+    #[test]
+    fn prunes_events_by_age_and_count_only_when_asked() {
+        let s = Store::in_memory().unwrap();
+        for ts in 1..=10 {
+            s.log(ts, None, "Stop", &serde_json::json!({}));
+        }
+        assert_eq!(s.prune_events(None, None), 0);
+        assert_eq!(s.count(), 10, "nothing by default");
+        assert_eq!(s.prune_events(Some(4), None), 3);
+        assert_eq!(s.count(), 7);
+        assert_eq!(s.prune_events(None, Some(5)), 2);
+        let oldest: i64 =
+            s.db.query_row("SELECT min(ts) FROM events", [], |r| r.get(0))
+                .unwrap();
+        assert_eq!((s.count(), oldest), (5, 6), "the newest stay");
     }
 
     #[test]

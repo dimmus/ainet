@@ -17,6 +17,8 @@ use ainet_core::{
 
 use crate::link::Listing;
 
+mod settings;
+
 const MIN: i64 = 60_000;
 
 /// Conversation entries made from messages start here, past the script's.
@@ -230,6 +232,14 @@ pub struct Demo {
     full: bool,
     /// Answers `Request::Conversation` as a daemon from before it did.
     old_daemon: bool,
+    /// What you are typing into each agent's terminal (the desktop app's
+    /// demo only), and the lines you sent: there is no agent to hear
+    /// them, but typing should not look dead.
+    typing: std::collections::HashMap<String, String>,
+    said: std::collections::HashMap<String, Vec<String>>,
+    /// ainet's own settings, `/always` rules, hooks and paths, pretend
+    /// (the desktop app's demo only).
+    settings: settings::DemoSettings,
 }
 
 impl Default for Demo {
@@ -267,21 +277,23 @@ impl Demo {
     fn full_only(req: &Request) -> bool {
         match req {
             Request::Up(spec) => spec.plan,
-            _ => matches!(
-                req,
-                Request::QueueClaim { .. }
-                    | Request::QueueUnclaim { .. }
-                    | Request::QueueUpdate { .. }
-                    | Request::QueueHandoff { .. }
-                    | Request::QueueBlock { .. }
-                    | Request::QueueShow { .. }
-                    | Request::Transcript { .. }
-                    | Request::Conversation { .. }
-                    | Request::SpecShow { .. }
-                    | Request::Export { .. }
-                    | Request::Specs
-                    | Request::SnapshotList { .. }
-            ),
+            _ => {
+                matches!(
+                    req,
+                    Request::QueueClaim { .. }
+                        | Request::QueueUnclaim { .. }
+                        | Request::QueueUpdate { .. }
+                        | Request::QueueHandoff { .. }
+                        | Request::QueueBlock { .. }
+                        | Request::QueueShow { .. }
+                        | Request::Transcript { .. }
+                        | Request::Conversation { .. }
+                        | Request::SpecShow { .. }
+                        | Request::Export { .. }
+                        | Request::Specs
+                        | Request::SnapshotList { .. }
+                ) || crate::config::is_config(req)
+            }
         }
     }
 
@@ -382,7 +394,16 @@ impl Demo {
                 }
             })
             .collect();
+        let settings = settings::DemoSettings::new(
+            &home,
+            &agents
+                .iter()
+                .take(2)
+                .map(|a| (a.id.clone(), a.cwd.clone()))
+                .collect::<Vec<_>>(),
+        );
         let mut demo = Demo {
+            settings,
             agents,
             rigs,
             inbox: Vec::new(),
@@ -395,6 +416,8 @@ impl Demo {
             rng: 0x2545_f491_4f6c_dd1d,
             full: false,
             old_daemon: false,
+            typing: Default::default(),
+            said: Default::default(),
         };
         demo.push_item(
             4,
@@ -605,6 +628,24 @@ impl Demo {
         self.agents.iter().position(|a| a.id == id)
     }
 
+    /// The answer to a request about ainet itself (settings, `/always`
+    /// rules, hooks, paths); `None` for others.
+    fn respond_config(&mut self, req: &Request) -> Option<Response> {
+        let agents: Vec<(String, String)> = self
+            .agents
+            .iter()
+            .map(|a| (a.id.clone(), a.name.clone()))
+            .collect();
+        let find = move |key: &str| {
+            let key = key.to_lowercase();
+            agents
+                .iter()
+                .find(|(id, name)| *id == key || name.to_lowercase() == key || id.starts_with(&key))
+                .map(|(id, _)| id.clone())
+        };
+        self.settings.respond(req, find)
+    }
+
     /// Advances the simulation one tick (~120 ms).
     pub fn step(&mut self, tick: u64) -> Vec<Event> {
         let mut events = Vec::new();
@@ -704,6 +745,14 @@ impl Demo {
     pub fn handle(&mut self, req: &Request) -> (Vec<Event>, Result<Option<String>, String>) {
         if !self.full && Self::full_only(req) {
             return (vec![], Err(CANNOT.into()));
+        }
+        if let Some(resp) = self.respond_config(req) {
+            return match resp {
+                Response::Error { message } => (vec![], Err(message)),
+                Response::Settings { settings } if settings.changed.is_some() => (vec![], Ok(None)),
+                Response::Text { text } => (vec![], Ok(Some(text))),
+                other => (vec![], Ok(Some(crate::popup::render(&other)))),
+            };
         }
         match req {
             Request::Answer { item, decision, .. } => (self.answer(*item, *decision), Ok(None)),
@@ -979,6 +1028,9 @@ impl Demo {
                 message: CANNOT.into(),
             };
         }
+        if let Some(resp) = self.respond_config(req) {
+            return resp;
+        }
         match req {
             Request::Conversation { .. } if self.old_daemon => Response::Error {
                 message: "bad request: unknown variant `conversation`".into(),
@@ -1227,6 +1279,14 @@ impl Demo {
             rows.push(format!("⏺ ainet - reply_message (id: {})", m.id));
             rows.push("  ⎿  delivered".into());
         }
+        // What you sent from the desktop app's demo, answered honestly.
+        let said = self.said.get(&agent.id).map(Vec::as_slice).unwrap_or(&[]);
+        for line in &said[said.len().saturating_sub(3)..] {
+            rows.push(String::new());
+            rows.push(format!("> {line}"));
+            rows.push("⏺ (demo) No agent hears this: the demo fleet is pretend. Run".into());
+            rows.push("  without --demo to type to real agents.".into());
+        }
         rows.push(String::new());
         match agent.state {
             AgentState::Working => rows.push(format!(
@@ -1242,6 +1302,52 @@ impl Demo {
             _ => {}
         }
         rows
+    }
+
+    /// Keystrokes typed into `agent`'s terminal, as ainetd would get them
+    /// (`Request::Input`): the desktop app's demo keeps the line in the
+    /// prompt box, and enter "sends" it. The console's demo ignores them,
+    /// as it always did. Returns whether the terminal changed.
+    pub fn input(&mut self, agent: &str, data: &str) -> bool {
+        if !self.full || !self.agents.iter().any(|a| a.id == agent) {
+            return false;
+        }
+        let pasted = data
+            .strip_prefix("\x1b[200~")
+            .and_then(|d| d.strip_suffix("\x1b[201~"));
+        let line = self.typing.entry(agent.to_string()).or_default();
+        if let Some(text) = pasted {
+            line.push_str(&text.replace(['\r', '\n'], " "));
+            return true;
+        }
+        // Arrows, function keys and the like move nothing here.
+        if data.starts_with('\x1b') {
+            return false;
+        }
+        let mut changed = false;
+        for c in data.chars() {
+            match c {
+                '\r' | '\n' => {
+                    let sent = std::mem::take(line);
+                    if !sent.trim().is_empty() {
+                        self.said.entry(agent.to_string()).or_default().push(sent);
+                    }
+                    changed = true;
+                }
+                '\x7f' | '\x08' => changed |= line.pop().is_some(),
+                // ctrl-c and ctrl-u clear the line, as at a prompt.
+                '\x03' | '\x15' => {
+                    changed |= !line.is_empty();
+                    line.clear();
+                }
+                c if !c.is_control() => {
+                    line.push(c);
+                    changed = true;
+                }
+                _ => {}
+            }
+        }
+        changed
     }
 
     /// Up to `lines` rows of a believable scrollback, then the screen's
@@ -1321,7 +1427,18 @@ impl Demo {
         }
         let base = rows - 4;
         put(base, dim, &format!("╭{}╮", "─".repeat(inner)));
-        put(base + 1, "37", &format!("│{}│", fit(" > ", inner)));
+        let typed = self.typing.get(&agent.id).map(String::as_str).unwrap_or("");
+        // The end of a long line, as a prompt scrolls it.
+        let room = inner.saturating_sub(4);
+        let shown: String = typed
+            .chars()
+            .skip(typed.chars().count().saturating_sub(room))
+            .collect();
+        put(
+            base + 1,
+            "37",
+            &format!("│{}│", fit(&format!(" > {shown}"), inner)),
+        );
         put(base + 2, dim, &format!("╰{}╯", "─".repeat(inner)));
         let mode = if agent.state == AgentState::NeedsYou {
             "  ⏵⏵ waiting for permission"
@@ -1329,7 +1446,7 @@ impl Demo {
             "  ? for shortcuts"
         };
         put(base + 3, dim, &fit(mode, cols));
-        out.push_str(&format!("\x1b[{};5H", base + 2));
+        out.push_str(&format!("\x1b[{};{}H", base + 2, 5 + shown.chars().count()));
         out
     }
 }
@@ -1404,6 +1521,50 @@ fn rig_yaml(rig: &Rig) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The rows of `agent`'s demo terminal as a vt100 screen shows them,
+    /// and where its cursor is.
+    fn drawn(demo: &Demo, agent: &Agent) -> (Vec<String>, (u16, u16)) {
+        let mut parser = vt100::Parser::new(24, 80, 0);
+        parser.process(demo.terminal(agent, 0, 24, 80).as_bytes());
+        let screen = parser.screen();
+        let rows = screen.rows(0, 80).map(|r| r.trim_end().to_string()).collect();
+        (rows, screen.cursor_position())
+    }
+
+    #[test]
+    fn the_apps_demo_echoes_what_you_type_and_the_consoles_does_not() {
+        let mut demo = Demo::full();
+        let agent = demo.agents[0].clone();
+        let prompt = |demo: &Demo| drawn(demo, &agent).0[21].clone();
+
+        assert!(demo.input(&agent.id, "hello"));
+        assert!(prompt(&demo).starts_with("│ > hello"), "{}", prompt(&demo));
+        // The cursor waits after the text.
+        assert_eq!(drawn(&demo, &agent).1, (21, 9));
+        assert!(demo.input(&agent.id, "\x7f\x7f"));
+        assert!(prompt(&demo).starts_with("│ > hel "));
+        // Arrows move nothing; a paste lands on the line.
+        assert!(!demo.input(&agent.id, "\x1b[A"));
+        assert!(demo.input(&agent.id, "\x1b[200~p\nq\x1b[201~"));
+        assert!(prompt(&demo).starts_with("│ > help q"));
+
+        // Enter sends the line: the screen says no one hears it, and the
+        // prompt is empty again; a line after the enter starts anew.
+        assert!(demo.input(&agent.id, "\rnext"));
+        let screen = demo.screen(&agent, 0);
+        assert!(screen.contains(&"> help q".to_string()), "{screen:?}");
+        assert!(screen.iter().any(|l| l.contains("No agent hears this")));
+        assert!(prompt(&demo).starts_with("│ > next"));
+        assert!(demo.input(&agent.id, "\x15"), "ctrl-u clears");
+        assert!(prompt(&demo).starts_with("│ >  "));
+
+        // The console's demo ignores keystrokes, as it always did.
+        let mut console = Demo::new();
+        let before = console.terminal(&agent, 0, 24, 80);
+        assert!(!console.input(&agent.id, "hello\r"));
+        assert_eq!(console.terminal(&agent, 0, 24, 80), before);
+    }
 
     #[test]
     fn history_reaches_above_the_screen() {

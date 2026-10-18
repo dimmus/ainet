@@ -25,6 +25,8 @@ impl Daemon {
             socket: socket.clone(),
             database: dir.join("state.db"),
             exe: PathBuf::from("ainet"),
+            settings: None,
+            claude_sessions: dir.join("claude-sessions"),
         };
         std::thread::spawn(move || {
             let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -46,12 +48,8 @@ impl Daemon {
     /// A shell agent running `script`, once it printed `ready`.
     fn shell(&self, script: &str) -> String {
         let spec = SpawnSpec {
-            runtime: Runtime::Shell,
-            cwd: self.dir.clone(),
-            role: None,
-            task: None,
-            parent: None,
             args: vec!["-c".into(), script.into()],
+            ..SpawnSpec::new(Runtime::Shell, self.dir.clone())
         };
         let Response::Spawned { agent } = self.call(&Request::Spawn(spec)) else {
             panic!("no agent");

@@ -7,15 +7,22 @@
 //! replies, a chatroom per rig) and hand each other work (`queue`), and adopts
 //! agents running elsewhere (`discover`). Clients (the TUI, the CLI, the MCP
 //! server, `ainet hook`) talk to it over a Unix socket, one JSON object per
-//! line (`ainet_core::protocol`).
+//! line (`ainet_core::protocol`). What it can be told in settings.json is
+//! followed while it runs (`config`), and what it keeps is pruned as
+//! those settings say (`retention`).
 
+mod admin;
 mod agents;
+mod always;
 mod comms;
+mod config;
 mod discover;
 mod hooks;
 mod launch;
 mod queue;
+mod retention;
 mod rigs;
+mod runtimes;
 mod store;
 mod stream;
 
@@ -33,25 +40,23 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Notify, broadcast, mpsc};
 
+pub use admin::{HookAction, claude_settings_file, hook_action};
 pub use store::Store;
-
-/// How long a permission request is held for you before the agent's own
-/// terminal dialog takes over. Claude Code's hook timeout is set to 600 s.
-pub const PERMISSION_HOLD: Duration = Duration::from_secs(580);
 
 /// Activity sparkline: buckets of this width, this many of them.
 const ACTIVITY_BUCKET_MS: i64 = 30_000;
 const ACTIVITY_BUCKETS: usize = 20;
-
-/// How much history the daemon keeps in memory (all of it stays on disk).
-const KEEP_MESSAGES: usize = 5_000;
-const KEEP_CHAT: usize = 5_000;
 
 pub struct Options {
     pub socket: PathBuf,
     pub database: PathBuf,
     /// The `ainet` binary, for the MCP server and hooks injected into seats.
     pub exe: PathBuf,
+    /// settings.json, followed while the daemon runs; none means the
+    /// defaults (tests).
+    pub settings: Option<PathBuf>,
+    /// Where Claude Code announces its sessions (`~/.claude/sessions`).
+    pub claude_sessions: PathBuf,
 }
 
 impl Default for Options {
@@ -60,6 +65,8 @@ impl Default for Options {
             socket: ainet_core::paths::socket(),
             database: ainet_core::paths::database(),
             exe: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("ainet")),
+            settings: Some(ainet_core::paths::settings_file()),
+            claude_sessions: ainet_claude::sessions::sessions_dir(),
         }
     }
 }
@@ -73,8 +80,12 @@ struct Daemon {
     next_item: u64,
     /// Held `PermissionRequest`s, by inbox item.
     held_req: HashMap<u64, hooks::Held>,
-    /// Den's `/always` rules, per agent, for the life of its session.
-    always: HashMap<String, Vec<ainet_claude::always::Rule>>,
+    /// Den's `/always` rules, per agent, for the life of its session or
+    /// kept (`permissions.persist_always`).
+    always: HashMap<String, Vec<always::Kept>>,
+    /// The `PermissionRequest` hook timeout each pane was started with:
+    /// a hold must end before Claude Code ends the hook.
+    hook_timeouts: HashMap<String, u64>,
     activity: HashMap<String, VecDeque<i64>>,
     last_output: HashMap<String, Instant>,
     /// Agents whose terminal you are typing into right now.
@@ -94,7 +105,16 @@ struct Daemon {
     pane_tx: mpsc::UnboundedSender<PaneEvent>,
     store: Store,
     socket: PathBuf,
+    database: PathBuf,
     exe: PathBuf,
+    /// settings.json as it is in force.
+    config: config::Config,
+    /// Shutting down: rigs are saved as they were and stay so.
+    stopping: bool,
+    /// Where Claude Code announces its sessions.
+    claude_sessions: PathBuf,
+    /// When this ainetd started (ms since the epoch).
+    started: i64,
 }
 
 type Shared = Arc<Mutex<Daemon>>;
@@ -117,20 +137,26 @@ impl Daemon {
 
     /// Reads what must outlive a restart. Panes died with the old daemon, so
     /// their seats come back stopped; `ainet start` or `ainet up <rig>`
-    /// restores them.
-    fn load(&mut self) {
+    /// restores them, or the daemon does (`daemon.restore_rigs`). Returns
+    /// the rigs that had seats running.
+    fn load(&mut self) -> Vec<String> {
+        let mut were_running = Vec::new();
         self.rigs = self
             .store
             .scan::<rigs::RigState>("rig", "")
             .into_iter()
             .map(|(name, mut state)| {
-                state.mark_all_stopped();
+                if state.mark_all_stopped() {
+                    were_running.push(name.clone());
+                }
                 (name, state)
             })
             .collect();
-        self.messages = self.store.tail("message", KEEP_MESSAGES);
+        let keep = &self.config.settings.retention;
+        let (keep_messages, keep_chat) = (keep.messages_in_memory, keep.chat_in_memory);
+        self.messages = self.store.tail("message", keep_messages);
         self.next_message = self.messages.last().map(|m| m.id).unwrap_or(0);
-        self.chat = self.store.tail("chat", KEEP_CHAT);
+        self.chat = self.store.tail("chat", keep_chat);
         self.next_chat = self.chat.last().map(|m| m.id).unwrap_or(0);
         self.queue = self
             .store
@@ -146,16 +172,23 @@ impl Daemon {
             .map(|(_, w)| (w.id.clone(), w))
             .collect();
         self.next_watchdog = self.store.get("counter", "watchdog").unwrap_or(0);
+        self.always_load();
+        were_running
     }
 }
 
 /// Runs the daemon until `Shutdown` or Ctrl+C.
 pub async fn run(opts: Options) -> Result<()> {
+    // Held until this returns: one ainetd per database.
+    let _lock = lock_database(&opts.database, &opts.socket).await?;
     let listener = bind(&opts.socket)?;
     tracing::info!("listening on {}", opts.socket.display());
 
     let (pane_tx, pane_rx) = mpsc::unbounded_channel();
     let (events, _) = broadcast::channel(4096);
+    let follower = ainet_core::settings::Follower::new(opts.settings.clone());
+    let config = config::Config::new(&follower);
+    config.log();
     let mut daemon = Daemon {
         agents: BTreeMap::new(),
         panes: HashMap::new(),
@@ -164,6 +197,7 @@ pub async fn run(opts: Options) -> Result<()> {
         next_item: 0,
         held_req: HashMap::new(),
         always: HashMap::new(),
+        hook_timeouts: HashMap::new(),
         activity: HashMap::new(),
         last_output: HashMap::new(),
         interactive: HashSet::new(),
@@ -180,15 +214,31 @@ pub async fn run(opts: Options) -> Result<()> {
         pane_tx,
         store: Store::open(&opts.database).context("open the state database")?,
         socket: opts.socket.clone(),
+        database: opts.database.clone(),
         exe: opts.exe.clone(),
+        config,
+        stopping: false,
+        claude_sessions: opts.claude_sessions.clone(),
+        started: ainet_core::now_ms(),
     };
-    daemon.load();
+    let were_running = daemon.load();
+    let restore = daemon.settings().daemon.restore_rigs;
     let shared: Shared = Arc::new(Mutex::new(daemon));
     let shutdown = Arc::new(Notify::new());
 
     tokio::spawn(pane_events(Arc::clone(&shared), pane_rx));
     tokio::spawn(queue::ticker(Arc::clone(&shared)));
     tokio::spawn(discover::ticker(Arc::clone(&shared)));
+    tokio::spawn(config::follow(Arc::clone(&shared), follower));
+    tokio::spawn(retention::ticker(Arc::clone(&shared)));
+    if restore {
+        for rig in were_running {
+            tracing::info!("restoring rig {rig}, running when ainetd last stopped");
+            if let Response::Error { message } = rigs::restore_current(&shared, &rig) {
+                tracing::warn!("restoring rig {rig}: {message}");
+            }
+        }
+    }
 
     loop {
         tokio::select! {
@@ -202,13 +252,61 @@ pub async fn run(opts: Options) -> Result<()> {
     }
     let _ = std::fs::remove_file(&opts.socket);
     // Dropping the panes kills the agents' processes; their seats are saved
-    // as they were, so the next start can restore them.
+    // as they were, so the next start can restore them. Their exits, heard
+    // while the runtime winds down, must not save them as stopped.
     let mut d = lock(&shared);
     for state in d.rigs.values() {
         d.store.put("rig", &state.rig.name, state);
     }
+    d.stopping = true;
     d.panes.clear();
     Ok(())
+}
+
+/// Takes the database's lock ([`ainet_core::paths::daemon_lock`]) and
+/// writes our socket in it. Two daemons on one database would split the
+/// fleet between them; that happens when settings.json's `daemon.socket`
+/// changes while one runs, and a client starts another on the new socket.
+/// A daemon just stopping may still hold it for a moment, so it is
+/// tried for two seconds.
+async fn lock_database(database: &Path, socket: &Path) -> Result<std::fs::File> {
+    use std::io::Write;
+    let path = ainet_core::paths::daemon_lock(database);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("open {}", path.display()))?;
+    let start = Instant::now();
+    loop {
+        match file.try_lock() {
+            Ok(()) => break,
+            Err(std::fs::TryLockError::WouldBlock) if start.elapsed() < Duration::from_secs(2) => {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Err(std::fs::TryLockError::WouldBlock) => {
+                let other = std::fs::read_to_string(&path).unwrap_or_default();
+                bail!(
+                    "another ainetd uses {} and listens on {}; stop it first (`AINET_SOCKET={} ainet shutdown`)",
+                    database.display(),
+                    other.trim(),
+                    other.trim()
+                );
+            }
+            Err(std::fs::TryLockError::Error(e)) => {
+                return Err(e).with_context(|| format!("lock {}", path.display()));
+            }
+        }
+    }
+    file.set_len(0)?;
+    file.write_all(socket.as_os_str().as_encoded_bytes())?;
+    file.flush()?;
+    Ok(file)
 }
 
 fn bind(path: &Path) -> Result<UnixListener> {
@@ -376,16 +474,32 @@ async fn handle(req: Request, d: &Shared) -> Response {
         Request::Create { rig, seat } => rigs::create(d, &rig, seat),
         Request::Export { rig } => rigs::export(d, &rig),
         Request::Import { path } => rigs::import(d, &path),
-        Request::Specs => Response::Specs {
-            specs: ainet_spec::library(),
-        },
-        Request::SpecShow { name } => match ainet_spec::spec_yaml(&name) {
-            Ok(text) => Response::Text { text },
-            Err(e) => err(format!("{e:#}")),
-        },
-        Request::Validate { path } => Response::Text {
-            text: ainet_spec::validate(&path).to_string(),
-        },
+        // The directories first, then the reading without the daemon's
+        // lock: they may be slow (your own `rigs.spec_dirs`).
+        Request::Specs => {
+            let dirs = lock(d).spec_dirs();
+            match tokio::task::spawn_blocking(move || ainet_spec::library_from(&dirs)).await {
+                Ok(specs) => Response::Specs { specs },
+                Err(e) => err(format!("specs: {e}")),
+            }
+        }
+        Request::SpecShow { name } => {
+            let dirs = lock(d).spec_dirs();
+            match tokio::task::spawn_blocking(move || ainet_spec::spec_yaml_from(&dirs, &name)).await {
+                Ok(Ok(text)) => Response::Text { text },
+                Ok(Err(e)) => err(format!("{e:#}")),
+                Err(e) => err(format!("specs: {e}")),
+            }
+        }
+        Request::Validate { path } => {
+            let dirs = lock(d).spec_dirs();
+            match tokio::task::spawn_blocking(move || ainet_spec::validate_from(&dirs, &path).to_string())
+                .await
+            {
+                Ok(text) => Response::Text { text },
+                Err(e) => err(format!("validate: {e}")),
+            }
+        }
         Request::Discover => discover::discover(d),
         Request::Adopt { id, rig, seat } => discover::adopt(d, &id, &rig, seat),
         Request::Release { seat } => discover::release(d, &seat),
@@ -472,6 +586,17 @@ async fn handle(req: Request, d: &Shared) -> Response {
             watchdogs: lock(d).watchdogs.values().cloned().collect(),
         },
         Request::WatchdogStop { id, reason } => queue::watchdog_stop(d, &id, reason),
+        Request::AlwaysList { agent } => always::list(d, agent),
+        Request::AlwaysRevoke { agent, rule } => always::revoke(d, &agent, rule),
+        Request::SettingsGet { key } => admin::settings_get(d, key.as_deref()),
+        Request::SettingsSet { key, value } => admin::settings_set(d, key, Some(value)).await,
+        Request::SettingsUnset { key } => admin::settings_set(d, key, None).await,
+        Request::SettingsReload => admin::settings_reload(d, None).await,
+        Request::HookStatus => admin::hooks(d, admin::HookAction::Status).await,
+        Request::HookInstall => admin::hooks(d, admin::HookAction::Install).await,
+        Request::HookUninstall => admin::hooks(d, admin::HookAction::Uninstall).await,
+        Request::Paths => admin::paths(d),
+        Request::LogTail { lines } => admin::log_tail(d, lines).await,
     }
 }
 

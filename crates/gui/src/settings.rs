@@ -4,6 +4,10 @@
 //! takes the app down: the last good settings stay, and the status bar says
 //! what is wrong until it is fixed.
 //!
+//! The same file holds the sections ainetd and the console read (`daemon`,
+//! `messaging`, …: `ainet_core::settings`); the app ignores them here and
+//! keeps them when it saves, and the published schema covers both.
+//!
 //! The settings also back the [`ThemeSettingsProvider`] that Zed's `theme`
 //! and `ui` crates read fonts, sizes and density from.
 
@@ -16,11 +20,11 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use theme::{Appearance, SystemAppearance, ThemeSettingsProvider, UiDensity};
 
-use crate::{json_edit, problems, themes, watch};
+use crate::{problems, themes, watch};
 
 /// Where the settings live: `$XDG_CONFIG_HOME/ainet/settings.json`.
 pub fn settings_file() -> PathBuf {
-    ainet_core::paths::config_dir().join("settings.json")
+    ainet_core::paths::settings_file()
 }
 
 /// What a new settings file starts as when opened from the app.
@@ -42,6 +46,12 @@ pub const TEMPLATE: &str = r#"// ainet desktop settings. Every field is optional
   // "critters": { "size": "large" },
   // "command_line": true, // the cmd line above the status bar
   // "confirm_quit": false,
+  //
+  // ainetd and the console read their own sections of this file:
+  // "daemon", "runtimes", "permissions", "messaging", "queue", "rigs",
+  // "discovery", "hooks", "retention" and "cost" (the schema has them all):
+  // "messaging": { "hold_while_interacting": true, "flush_gap_ms": 400 },
+  // "rigs": { "keep_snapshots": 20 },
 }
 "#;
 
@@ -327,6 +337,8 @@ pub struct AppSettings {
     buffer_font: Font,
     /// The file they come from and are saved to (none in tests).
     file: Option<PathBuf>,
+    /// Without a file (tests), the text saved so far.
+    memory: String,
     _watch: Option<Task<()>>,
 }
 
@@ -339,6 +351,7 @@ impl AppSettings {
             buffer_font: font(settings.terminal.font_family.clone()),
             settings,
             file: None,
+            memory: String::new(),
             _watch: None,
         }
     }
@@ -383,21 +396,60 @@ pub fn save_to(file: PathBuf, cx: &mut App) {
 /// appearance, the one for the system's appearance now), and the rest
 /// stays as written.
 pub fn save_theme(name: &str, cx: &mut App) -> Result<(), String> {
+    let appearance = SystemAppearance::global(cx).0;
+    edit_text(cx, |text| with_theme(text, name, appearance))
+}
+
+/// Sets the app's own setting at `path` (`["terminal", "font_size"]`) to
+/// `value` in settings.json, or removes it with `None` so its default
+/// applies. Only that value changes in the file's text; what would not
+/// read as the app's settings is refused and nothing is written.
+pub fn save_value(path: &[&str], value: Option<&serde_json::Value>, cx: &mut App) -> Result<(), String> {
+    let key = path.join(".");
+    edit_text(cx, |text| {
+        parse(text).map_err(|e| format!("settings.json does not parse: {e}; fix it first"))?;
+        let edited = match value {
+            Some(value) => {
+                let json = serde_json::to_string(value).map_err(|e| e.to_string())?;
+                ainet_core::jsonc::set(text, path, &json)
+            }
+            None => ainet_core::jsonc::unset(text, path),
+        }
+        .map_err(|e| format!("settings.json: {e}"))?;
+        parse(&edited).map_err(|e| match value {
+            Some(value) => format!("{key} cannot be {value}: {e}"),
+            None => format!("without {key}: {e}"),
+        })?;
+        Ok(edited)
+    })
+}
+
+/// Edits settings.json's text with `edit` and puts the result in force:
+/// written to the file whole, or kept in memory without one (tests).
+fn edit_text(cx: &mut App, edit: impl FnOnce(&str) -> Result<String, String>) -> Result<(), String> {
     let file = cx.global::<AppSettings>().file.clone();
     let text = match &file {
         Some(file) => read_settings(file)?,
-        None => String::new(),
+        None => cx.global::<AppSettings>().memory.clone(),
     };
-    let text = with_theme(&text, name, SystemAppearance::global(cx).0)?;
-    if let Some(file) = &file {
-        write_whole(file, &text).map_err(|e| format!("cannot save {}: {e}", file.display()))?;
-        reload(&text, cx);
-    } else {
-        let mut next = get(cx).clone();
-        next.theme = parse(&text)?.theme;
-        set(next, cx);
+    let edited = edit(&text)?;
+    match &file {
+        Some(file) => {
+            write_whole(file, &edited).map_err(|e| format!("cannot save {}: {e}", file.display()))?;
+            reload(&edited, cx);
+        }
+        None => {
+            let next = parse(&edited)?;
+            cx.global_mut::<AppSettings>().memory = edited;
+            set(next, cx);
+        }
     }
     Ok(())
+}
+
+/// The settings file the app follows and saves to (none in tests).
+pub fn file(cx: &App) -> Option<PathBuf> {
+    cx.global::<AppSettings>().file.clone()
 }
 
 /// settings.json's text, empty while there is none. Any other failure
@@ -457,7 +509,7 @@ pub fn with_theme(text: &str, name: &str, appearance: Appearance) -> Result<Stri
         _ => &["theme"],
     };
     let value = serde_json::to_string(name).map_err(|e| e.to_string())?;
-    let edited = json_edit::set(text, path, &value).map_err(|e| format!("settings.json: {e}"))?;
+    let edited = ainet_core::jsonc::set(text, path, &value).map_err(|e| format!("settings.json: {e}"))?;
     // What was written must read back as asked.
     match parse(&edited)?.theme {
         Some(theme) if theme.name(appearance) == name => Ok(edited),
@@ -468,6 +520,10 @@ pub fn with_theme(text: &str, name: &str, appearance: Appearance) -> Result<Stri
 /// Takes new settings from the file's text, or keeps the last good ones and
 /// reports why not.
 pub fn reload(text: &str, cx: &mut App) {
+    // Without a file (tests), the text is the one later edits start from.
+    if cx.global::<AppSettings>().file.is_none() {
+        cx.global_mut::<AppSettings>().memory = text.to_string();
+    }
     match parse(text) {
         Ok(settings) => {
             problems::set(problems::Source::Settings, None, cx);
@@ -484,9 +540,11 @@ pub fn set(settings: Settings, cx: &mut App) {
     }
     let watch = cx.global_mut::<AppSettings>()._watch.take();
     let file = cx.global_mut::<AppSettings>().file.take();
+    let memory = std::mem::take(&mut cx.global_mut::<AppSettings>().memory);
     let mut next = AppSettings::new(settings);
     next._watch = watch;
     next.file = file;
+    next.memory = memory;
     cx.set_global(next);
     apply_theme(cx);
     cx.refresh_windows();
@@ -608,10 +666,34 @@ mod tests {
     }
 
     /// The JSON schema for settings.json, as `assets/settings-schema.json`
-    /// holds it.
+    /// holds it: the app's keys and ainetd's sections in one.
     fn schema() -> String {
-        let schema = schemars::schema_for!(Settings);
+        let app = serde_json::to_value(schemars::schema_for!(Settings)).unwrap();
+        let schema = compose(app, ainet_core::settings::schema());
         serde_json::to_string_pretty(&schema).unwrap() + "\n"
+    }
+
+    /// `app`'s schema with `core`'s properties and definitions added.
+    fn compose(mut app: serde_json::Value, core: serde_json::Value) -> serde_json::Value {
+        for part in ["properties", "$defs"] {
+            let Some(from) = core.get(part).and_then(|v| v.as_object()).cloned() else {
+                continue;
+            };
+            let into = app
+                .as_object_mut()
+                .unwrap()
+                .entry(part)
+                .or_insert_with(|| serde_json::json!({}))
+                .as_object_mut()
+                .unwrap();
+            for (k, v) in from {
+                assert!(
+                    into.insert(k.clone(), v).is_none(),
+                    "{part}/{k} is in both schemas"
+                );
+            }
+        }
+        app
     }
 
     #[test]
@@ -637,7 +719,10 @@ mod tests {
             "critters",
             "command_line",
             "confirm_quit",
-        ] {
+        ]
+        .iter()
+        .chain(ainet_core::settings::SECTIONS)
+        {
             assert!(properties.get(field).is_some(), "{field} in the schema");
         }
         // The template points editors at it, where the repository keeps it.
@@ -683,6 +768,14 @@ mod tests {
         assert_eq!(s.critters.size, CritterSize::Small);
         assert!(!s.command_line);
         assert!(s.confirm_quit);
+    }
+
+    #[test]
+    fn the_daemons_sections_are_not_the_apps_and_stay_when_it_saves() {
+        let text = "{\n  // ainetd's\n  \"messaging\": { \"flush_gap_ms\": \"not a number\" },\n  \"ui_font_size\": 15\n}\n";
+        assert_eq!(parse(text).unwrap().ui_font_size, 15., "another reader's section");
+        let saved = with_theme(text, "One Dark", Appearance::Dark).unwrap();
+        assert!(saved.contains("// ainetd's\n  \"messaging\": { \"flush_gap_ms\": \"not a number\" }"));
     }
 
     #[test]

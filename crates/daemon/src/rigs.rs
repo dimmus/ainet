@@ -11,9 +11,10 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use ainet_core::protocol::{SeatSpec, UpSpec};
+use ainet_core::settings::Settings;
 use ainet_core::{
-    Edge, EdgeKind, Event, Response, Rig, RigStatus, Seat, SeatStatus, SnapshotInfo, Transport, Whoami,
-    now_ms,
+    Edge, EdgeKind, Event, Response, Rig, RigStatus, Runtime, Seat, SeatStatus, SnapshotInfo, Transport,
+    Whoami, now_ms,
 };
 use serde::{Deserialize, Serialize};
 
@@ -29,8 +30,14 @@ pub(crate) struct RigState {
 }
 
 impl RigState {
-    fn new(plan: RigPlan) -> Self {
-        let seats = plan.seats.iter().map(|s| seat_record(&plan.name, s)).collect();
+    /// A rig from its plan; its seats' typing guards start as
+    /// `typing_guard` says (`messaging.typing_guard`).
+    fn new(plan: RigPlan, typing_guard: bool) -> Self {
+        let seats = plan
+            .seats
+            .iter()
+            .map(|s| seat_record(&plan.name, s, typing_guard))
+            .collect();
         let rig = Rig {
             name: plan.name.clone(),
             summary: plan.summary.clone(),
@@ -45,13 +52,17 @@ impl RigState {
     }
 
     /// After a daemon restart: panes are gone, sessions are kept for resume.
-    pub(crate) fn mark_all_stopped(&mut self) {
+    /// True when any of them was running (or starting).
+    pub(crate) fn mark_all_stopped(&mut self) -> bool {
+        let mut were_running = false;
         for s in &mut self.rig.seats {
             if s.transport == Transport::Pane && s.status != SeatStatus::Stopped {
+                were_running |= matches!(s.status, SeatStatus::Running | SeatStatus::Launching);
                 s.status = SeatStatus::Stopped;
             }
         }
         self.recompute();
+        were_running
     }
 
     fn recompute(&mut self) {
@@ -72,7 +83,7 @@ impl RigState {
     }
 }
 
-fn seat_record(rig: &str, s: &SeatPlan) -> Seat {
+fn seat_record(rig: &str, s: &SeatPlan, typing_guard: bool) -> Seat {
     Seat {
         address: s.address.clone(),
         logical: s.logical.clone(),
@@ -88,7 +99,7 @@ fn seat_record(rig: &str, s: &SeatPlan) -> Seat {
         status: SeatStatus::Pending,
         transport: Transport::Pane,
         restore_policy: s.restore_policy.clone(),
-        typing_guard: false,
+        typing_guard,
         held: 0,
     }
 }
@@ -102,7 +113,40 @@ struct SnapshotRecord {
 }
 
 impl Daemon {
+    /// Where your own specs are: `~/.config/ainet/specs`, then the
+    /// directories settings.json adds (`rigs.spec_dirs`).
+    pub(crate) fn spec_dirs(&self) -> Vec<std::path::PathBuf> {
+        std::iter::once(ainet_core::paths::specs_dir())
+            .chain(
+                self.settings()
+                    .rigs
+                    .spec_dirs
+                    .iter()
+                    .map(|p| ainet_core::paths::expand(p)),
+            )
+            .collect()
+    }
+
+    /// Where a seat or agent runs when it was given no directory:
+    /// `rigs.default_cwd`, else your home.
+    pub(crate) fn default_cwd(&self) -> std::path::PathBuf {
+        match &self.settings().rigs.default_cwd {
+            Some(p) => ainet_core::paths::expand(p),
+            None => std::env::var_os("HOME")
+                .map(Into::into)
+                .unwrap_or_else(|| "/".into()),
+        }
+    }
+
+    /// Typing guards of new seats (`messaging.typing_guard`).
+    fn typing_guard(&self) -> bool {
+        self.settings().messaging.typing_guard
+    }
+
     pub(crate) fn save_rig(&mut self, name: &str) {
+        if self.stopping {
+            return;
+        }
         if let Some(state) = self.rigs.get_mut(name) {
             state.recompute();
             for seat in &mut state.rig.seats {
@@ -212,7 +256,8 @@ impl Daemon {
 }
 
 /// What `up --plan` prints.
-fn describe(plan: &RigPlan) -> String {
+fn describe(plan: &RigPlan, settings: &Settings) -> String {
+    let runtimes = &settings.runtimes;
     let mut out = format!(
         "rig {}  ({} seats, root {})\n",
         plan.name,
@@ -224,7 +269,7 @@ fn describe(plan: &RigPlan) -> String {
     }
     out.push_str("\nseats, in launch order:\n");
     for s in &plan.seats {
-        let installed = if on_path(&program(s.runtime)) {
+        let installed = if on_path(&program(runtimes, s.runtime)) {
             ""
         } else {
             "   (not installed!)"
@@ -237,6 +282,17 @@ fn describe(plan: &RigPlan) -> String {
             s.cwd.display(),
             installed
         ));
+        let mode = (s.runtime == Runtime::ClaudeCode)
+            .then(|| crate::runtimes::permission_mode(settings, &s.ask()))
+            .flatten();
+        if let Some(m) = mode {
+            let less_safe = if m.loosens() { ", less safe" } else { "" };
+            out.push_str(&format!(
+                "  {:<28} permission mode {}{less_safe}\n",
+                "",
+                m.as_str()
+            ));
+        }
     }
     if !plan.edges.is_empty() {
         out.push_str("\nedges:\n");
@@ -244,8 +300,29 @@ fn describe(plan: &RigPlan) -> String {
             out.push_str(&format!("  {} {} {}\n", e.from, e.kind.label(), e.to));
         }
     }
-    for w in &plan.warnings {
+    for w in policy_warnings(plan, settings) {
         out.push_str(&format!("warning: {w}\n"));
+    }
+    out
+}
+
+/// The spec's warnings, with `permission_policy` told as it is applied
+/// when settings.json says to apply policies.
+fn policy_warnings(plan: &RigPlan, settings: &Settings) -> Vec<String> {
+    let mut out = plan.warnings.clone();
+    if !settings.permissions.spec_policies {
+        return out;
+    }
+    out.retain(|w| !w.ends_with("`permission_policy` is accepted but ainet ignores it"));
+    for s in plan.seats.iter().filter(|s| s.permission_policy.is_some()) {
+        match crate::runtimes::policy_mode(settings, &s.ask()) {
+            Err(why) => out.push(format!("seat {}: {why}", s.logical)),
+            Ok(_) if s.runtime == Runtime::Codex => out.push(format!(
+                "seat {}: permission_policy applies to Claude Code seats only; ignored",
+                s.logical
+            )),
+            Ok(_) => {}
+        }
     }
     out
 }
@@ -259,7 +336,8 @@ pub(crate) fn up(d: &Shared, spec: UpSpec) -> Response {
     let resolved = if Path::new(&spec.source).exists() {
         ainet_spec::load(Path::new(&spec.source))
     } else {
-        ainet_spec::load_named(&spec.source)
+        let dirs = lock(d).spec_dirs();
+        ainet_spec::load_named_from(&dirs, &spec.source)
     };
     let resolved = match resolved {
         Ok(r) => r,
@@ -275,15 +353,16 @@ pub(crate) fn up(d: &Shared, spec: UpSpec) -> Response {
     if let Some(name) = &spec.name {
         plan.rename(name);
     }
+    let runtimes = lock(d).settings().runtimes.clone();
     if spec.plan {
         return Response::Text {
-            text: describe(&plan),
+            text: describe(&plan, &lock(d).settings().clone()),
         };
     }
     if let Some(missing) = plan
         .seats
         .iter()
-        .map(|s| program(s.runtime))
+        .map(|s| program(&runtimes, s.runtime))
         .find(|p| !on_path(p))
     {
         return err(format!(
@@ -308,7 +387,7 @@ pub(crate) fn up(d: &Shared, spec: UpSpec) -> Response {
                 "rig {name} is already running: use ainet grow to add seats, or ainet down {name} first"
             ));
         }
-        let mut state = RigState::new(plan);
+        let mut state = RigState::new(plan, g.typing_guard());
         if let Some(prev) = previous {
             for s in &mut state.rig.seats {
                 s.agent = prev.rig.seat(&s.address).and_then(|p| p.agent.clone());
@@ -393,8 +472,27 @@ pub(crate) fn snapshot_create(d: &Shared, rig: &str, label: Option<String>) -> R
         "snapshot",
         &serde_json::json!({ "rig": rig, "id": info.id }),
     );
+    if let Some(keep) = g.settings().rigs.keep_snapshots {
+        g.prune_snapshots(rig, keep as usize);
+    }
     Response::Snapshots {
         snapshots: vec![info],
+    }
+}
+
+impl Daemon {
+    /// Deletes all but the newest `keep` snapshots of a rig
+    /// (`rigs.keep_snapshots`).
+    fn prune_snapshots(&self, rig: &str, keep: usize) {
+        let keys: Vec<String> = self
+            .store
+            .scan::<serde_json::Value>("snapshot", &format!("{rig}/"))
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
+        for key in keys.iter().take(keys.len().saturating_sub(keep)) {
+            self.store.delete("snapshot", key);
+        }
     }
 }
 
@@ -412,10 +510,24 @@ pub(crate) fn snapshot_list(d: &Shared, rig: &str) -> Response {
 /// Brings stopped seats back: from a snapshot (the latest when none is
 /// named), else from what ainet last knew.
 pub(crate) fn restore(d: &Shared, rig: &str, snapshot: Option<&str>, fresh: &[String]) -> Response {
+    restore_from(d, rig, Some(snapshot), fresh)
+}
+
+/// Brings a rig's stopped seats back as ainet last knew them, not from a
+/// snapshot: what `daemon.restore_rigs` does at start.
+pub(crate) fn restore_current(d: &Shared, rig: &str) -> Response {
+    restore_from(d, rig, None, &[])
+}
+
+/// [`restore`]; `snapshot` is `None` to skip snapshots altogether.
+fn restore_from(d: &Shared, rig: &str, snapshot: Option<Option<&str>>, fresh: &[String]) -> Response {
     let to_launch = {
         let mut g = lock(d);
-        let records = g.store.scan::<SnapshotRecord>("snapshot", &format!("{rig}/"));
-        let record = match snapshot {
+        let records = match snapshot {
+            Some(_) => g.store.scan::<SnapshotRecord>("snapshot", &format!("{rig}/")),
+            None => Vec::new(),
+        };
+        let record = match snapshot.flatten() {
             Some(id) => match records.into_iter().find(|(_, r)| r.info.id == id) {
                 Some((_, r)) => Some(r),
                 None => return err(format!("no snapshot {id} for {rig}")),
@@ -426,7 +538,7 @@ pub(crate) fn restore(d: &Shared, rig: &str, snapshot: Option<&str>, fresh: &[St
         let mut state = match (current, record) {
             (Some(cur), None) => cur,
             (cur, Some(rec)) => {
-                let mut st = RigState::new(rec.plan.clone());
+                let mut st = RigState::new(rec.plan.clone(), g.typing_guard());
                 for s in &mut st.rig.seats {
                     s.agent = rec.sessions.get(&s.address).cloned();
                     s.status = SeatStatus::Stopped;
@@ -458,7 +570,7 @@ pub(crate) fn restore(d: &Shared, rig: &str, snapshot: Option<&str>, fresh: &[St
             .seats
             .iter()
             .filter(|s| to_launch.contains(&s.address))
-            .map(|s| program(s.runtime))
+            .map(|s| program(&g.settings().runtimes, s.runtime))
             .find(|p| !on_path(p))
         {
             return err(format!("{missing} is not installed, and this rig needs it"));
@@ -480,7 +592,7 @@ pub(crate) fn grow(d: &Shared, rig: &str, seats: Vec<SeatSpec>, edges: Vec<Edge>
         let mut plans = Vec::new();
         for spec in &seats {
             let seat = match ainet_spec::seat_from_spec(rig, &state.plan.root, spec) {
-                Ok(s) => SeatPlan::from(&s),
+                Ok(s) => SeatPlan::added(&s, spec),
                 Err(e) => return err(format!("{e:#}")),
             };
             if state.plan.seat(&seat.address).is_some()
@@ -488,14 +600,16 @@ pub(crate) fn grow(d: &Shared, rig: &str, seats: Vec<SeatSpec>, edges: Vec<Edge>
             {
                 return err(format!("{} already exists", seat.address));
             }
-            if !on_path(&program(seat.runtime)) {
-                return err(format!("{} is not installed", program(seat.runtime)));
+            let program = program(&g.settings().runtimes, seat.runtime);
+            if !on_path(&program) {
+                return err(format!("{program} is not installed"));
             }
             plans.push(seat);
         }
+        let typing_guard = g.typing_guard();
         let st = g.rigs.get_mut(rig).expect("checked above");
         for p in &plans {
-            st.rig.seats.push(seat_record(rig, p));
+            st.rig.seats.push(seat_record(rig, p, typing_guard));
             st.plan.seats.push(p.clone());
         }
         st.plan.edges.extend(edges.iter().cloned());
@@ -577,11 +691,7 @@ pub(crate) fn create(d: &Shared, rig: &str, mut seat: SeatSpec) -> Response {
     if seat.member.is_empty() {
         seat.member = "agent".into();
     }
-    let root = seat.cwd.clone().unwrap_or_else(|| {
-        std::env::var_os("HOME")
-            .map(Into::into)
-            .unwrap_or_else(|| "/".into())
-    });
+    let root = seat.cwd.clone().unwrap_or_else(|| lock(d).default_cwd());
     let resolved = match ainet_spec::seat_from_spec(rig, &root, &seat) {
         Ok(s) => s,
         Err(e) => return err(format!("{e:#}")),
@@ -592,16 +702,18 @@ pub(crate) fn create(d: &Shared, rig: &str, mut seat: SeatSpec) -> Response {
         root,
         spec_path: None,
         edges: vec![],
-        seats: vec![SeatPlan::from(&resolved)],
+        seats: vec![SeatPlan::added(&resolved, &seat)],
         warnings: vec![],
     };
-    if !on_path(&program(plan.seats[0].runtime)) {
-        return err(format!("{} is not installed", program(plan.seats[0].runtime)));
+    let program = program(&lock(d).settings().runtimes, plan.seats[0].runtime);
+    if !on_path(&program) {
+        return err(format!("{program} is not installed"));
     }
     let address = plan.seats[0].address.clone();
     {
         let mut g = lock(d);
-        g.rigs.insert(rig.to_string(), RigState::new(plan));
+        let state = RigState::new(plan, g.typing_guard());
+        g.rigs.insert(rig.to_string(), state);
         g.save_rig(rig);
     }
     launch_seats(d, rig, vec![address], vec![]);
@@ -628,7 +740,7 @@ pub(crate) fn import(d: &Shared, path: &Path) -> Response {
     if g.rigs.contains_key(&name) {
         return err(format!("rig {name} exists"));
     }
-    let mut state = RigState::new(plan);
+    let mut state = RigState::new(plan, g.typing_guard());
     for s in &mut state.rig.seats {
         s.status = SeatStatus::Stopped;
     }

@@ -126,6 +126,11 @@ pub fn human(resp: &Response) -> String {
         Response::Watchdogs { watchdogs } => watchdogs_table(watchdogs, now),
         // The console never asks for entries; said plainly all the same.
         Response::Conversation { conversation } => conversation_text(conversation),
+        Response::AlwaysRules { rules } => ainet_model::popup::always_text(rules),
+        Response::Settings { settings } => ainet_model::popup::settings_text(settings),
+        Response::Hooks { hooks } => ainet_model::popup::hooks_text(hooks),
+        Response::Paths { paths } => ainet_model::popup::paths_text(paths),
+        Response::Log { log } => ainet_model::popup::log_text(log),
     }
 }
 

@@ -8,6 +8,7 @@
 //! and how daemon replies read as text.
 
 pub mod command;
+pub mod config;
 pub mod daemon;
 pub mod demo;
 pub mod describe;
@@ -22,6 +23,7 @@ pub mod terminal;
 pub mod topology;
 
 pub use command::{AgentCommand, Command, Context, QueueCommand};
+pub use config::ConfigReply;
 pub use demo::Demo;
 pub use link::{Backend, Link, Listing, Msg, Sink};
 pub use palette::Palette;

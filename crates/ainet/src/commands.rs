@@ -119,9 +119,12 @@ pub fn run(cli: Cli, socket: PathBuf) -> Result<ExitCode> {
         Cmd::Gui { demo } => return gui(*demo),
         Cmd::Hook => return crate::hook::run(&conn.socket).map(|_| ExitCode::SUCCESS),
         Cmd::Mcp => return crate::mcp::run(conn).map(|_| ExitCode::SUCCESS),
-        Cmd::InstallHooks => {
-            crate::hook::print_hooks();
-            return Ok(ExitCode::SUCCESS);
+        Cmd::InstallHooks {
+            write,
+            remove,
+            status,
+        } => {
+            return crate::hook::install_hooks(out.json, *write, *remove, *status);
         }
         Cmd::Critter { ids, octant } => {
             critter(ids, *octant);
@@ -134,14 +137,21 @@ pub fn run(cli: Cli, socket: PathBuf) -> Result<ExitCode> {
         Cmd::Terminal(TerminalCmd::Status) => return terminal_status(&conn, &out),
         _ => {}
     }
+    let cmd = match cmd {
+        Cmd::Config(c) => return crate::admin::config(&conn, out.json, c),
+        Cmd::Hooks(h) => return crate::admin::hooks(out.json, h).map(|_| ExitCode::SUCCESS),
+        other => other,
+    };
     conn.ensure_daemon()?;
     match cmd {
         Cmd::Daemon
         | Cmd::Gui { .. }
         | Cmd::Hook
         | Cmd::Mcp
-        | Cmd::InstallHooks
+        | Cmd::InstallHooks { .. }
         | Cmd::Critter { .. }
+        | Cmd::Config(_)
+        | Cmd::Hooks(_)
         | Cmd::Shutdown => {
             unreachable!("handled above")
         }
@@ -179,7 +189,7 @@ pub fn run(cli: Cli, socket: PathBuf) -> Result<ExitCode> {
         } => {
             let req = Request::Down {
                 rig: rig.clone(),
-                snapshot: !no_snapshot,
+                snapshot: crate::settings::snapshot_on_down(crate::settings::get(), no_snapshot),
                 delete,
             };
             out.done(&conn.ok_for(&req, RIG_TIMEOUT)?, &format!("{rig} is down"));
@@ -283,7 +293,7 @@ pub fn run(cli: Cli, socket: PathBuf) -> Result<ExitCode> {
         } => {
             let cwd = match cwd {
                 Some(p) => absolute(&p)?,
-                None => std::env::current_dir()?,
+                None => crate::settings::default_cwd(crate::settings::get())?,
             };
             let req = Request::Create {
                 rig,
@@ -463,6 +473,7 @@ pub fn run(cli: Cli, socket: PathBuf) -> Result<ExitCode> {
             &format!("nudged {seat}"),
         ),
         Cmd::Watchdog(w) => watchdog(&conn, &out, w)?,
+        Cmd::Always(a) => crate::admin::always(&conn, out.json, a)?,
 
         // ---- agents ------------------------------------------------------
         Cmd::Spawn {
@@ -474,15 +485,13 @@ pub fn run(cli: Cli, socket: PathBuf) -> Result<ExitCode> {
         } => {
             let cwd = match cwd {
                 Some(p) => absolute(&p)?,
-                None => std::env::current_dir()?,
+                None => crate::settings::default_cwd(crate::settings::get())?,
             };
             let req = Request::Spawn(SpawnSpec {
-                runtime: runtime.into(),
-                cwd,
                 role,
                 task,
-                parent: None,
                 args,
+                ..SpawnSpec::new(runtime.into(), cwd)
             });
             out.show(&conn.ok(&req)?);
         }
@@ -563,10 +572,9 @@ fn gui_binary() -> Option<PathBuf> {
 }
 
 fn daemon() -> Result<()> {
+    let filter = crate::settings::log_filter(crate::settings::get(), std::env::var("AINET_LOG").ok());
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_env("AINET_LOG").unwrap_or_else(|_| "info".into()),
-        )
+        .with_env_filter(tracing_subscriber::EnvFilter::try_new(&filter).unwrap_or_else(|_| "info".into()))
         .with_writer(std::io::stderr)
         .init();
     let rt = tokio::runtime::Runtime::new()?;
@@ -939,7 +947,8 @@ fn queue(conn: &Conn, out: &Out, cmd: QueueCmd) -> Result<()> {
                 priority,
                 tags,
                 reply_to,
-                nudge: !no_nudge,
+                // Without --no-nudge, the daemon's default (`queue.nudge`).
+                nudge: no_nudge.then_some(false),
             }))?
         }
         QueueCmd::List {

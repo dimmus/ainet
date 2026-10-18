@@ -141,6 +141,7 @@ dependencies = [
 name = "ainet-core"
 version = "0.1.0"
 dependencies = [
+ "schemars",
  "serde",
  "serde_json",
 ]
@@ -188,6 +189,7 @@ dependencies = [
  "ainet-core",
  "ainet-critter",
  "anyhow",
+ "serde_json",
  "vt100",
 ]
 

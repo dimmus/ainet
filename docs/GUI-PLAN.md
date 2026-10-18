@@ -698,6 +698,239 @@ columns; a mention's reply hint is a real command (`ainet chat send
 --rig docs --topic general "…"`); the Topology table's line between
 pods is a child, so the selection's left border keeps its colour.
 
+### Phase 10 — Settings for all of ainet (asked for 2026-10-16)
+
+"Sophisticated Settings to set up all aspects of ainet's workflow and
+infrastructure." Today only the GUI's look is configurable
+(`settings.json`, `keymap.json`); everything else is environment
+variables, CLI flags, spec YAML or compile-time constants, and
+`paths::config_file()` (`config.toml`) is never read. An inventory of
+what exists and what is hard-coded was taken on 2026-10-16; the plan:
+
+1. **One settings file for everything.** `~/.config/ainet/settings.json`
+   (JSON with comments, as Zed's and the GUI's today) gains sections the
+   daemon and the console read: `daemon`, `runtimes`, `permissions`,
+   `messaging`, `queue`, `rigs`, `discovery`, `hooks`, `retention`,
+   `cost`. The types live in ainet-core (MIT) with a JSON schema; the
+   GUI's own sections stay in the GUI. Unknown keys are kept, bad values
+   reported and the last good settings kept, as the GUI does now.
+2. **Wire the daemon to it**, replacing constants:
+   - *daemon*: autostart on/off, log level and file (appended, rotated),
+     socket, restore rigs on start.
+   - *runtimes* (Claude Code, Codex, shell): binary path, default model,
+     effort (passed at last: it is parsed and dropped today), permission
+     mode, extra args, environment, allowed/disallowed tools, extra MCP
+     servers, `--strict-mcp-config`, readiness timeouts; skills installed.
+   - *permissions*: how long a request is held, `/always` rules persisted
+     with list/revoke, the sensitive path lists, spec `permission_policy`
+     honoured (`locked` … `yolo`) where Claude Code allows it.
+   - *messaging*: paste settle and flush delays, delivery header, typing
+     guard default per seat, hold while interacting.
+   - *queue and watchdogs*: default interval and message, nudge default.
+   - *rigs and specs*: user spec directories, default cwd, restore policy,
+     snapshot on down, snapshot retention.
+   - *discovery*: auto-track Claude sessions on/off, tmux scanning on/off.
+   - *hooks*: install/uninstall/repair ainet's hooks in Claude Code's
+     settings (the existing unused installer), status shown.
+   - *retention*: in-memory caps, event log and snapshot pruning, inbox
+     expiry.
+   - *cost*: price table overrides, context window guesses.
+   Applied live where possible (a daemon reload on change), otherwise
+   marked "takes effect for new seats" or "after a daemon restart".
+3. **Protocol**: additive requests to read the effective settings and
+   their sources, to set values, to list and revoke `/always` rules, to
+   see hook status and install hooks, and to list the paths in use.
+4. **GUI Settings view** (`workspace::OpenSettings` opens it; the file
+   stays available): Zed-style, a searchable category list on the left
+   (Appearance, Terminal, Keymap, Workspace, Daemon, Runtimes,
+   Permissions, Messaging, Queue, Rigs & Specs, Discovery, Hooks,
+   Retention, Cost, Diagnostics) and fields on the right: toggles,
+   dropdowns, numbers with units, paths with Browse, list and key-value
+   editors; each with its description, default, a modified dot, reset to
+   default, and when it applies. Edits write the file keeping comments.
+   Diagnostics shows paths, versions, daemon pid and log tail. A keymap
+   editor lists bindings by context and records new ones.
+5. **Console parity**: `ainet config get|set|unset|list|path|edit` and
+   the TUI's `/set`.
+6. **Tests**: parsing and defaults, every wired value changing
+   behaviour (daemon tests), protocol round trips and old-daemon
+   fallback, GUI headless tests per category, comments preserved.
+
+**Done: items 1 and 2, part one.** `ainet_core::settings` (MIT) has the
+whole shape of the ten sections with serde defaults equal to the old
+constants (a test pins each), a JSON schema (`schemars`, composed into
+the GUI's published one), checks of ranges and closed lists, unknown keys
+reported, `Follower` (keep the last good file) and `effective` (each
+value with its default and source: default, file or an environment
+variable, which wins). `ainet_core::jsonc` reads JSON with comments and
+sets or removes one key in the text (the GUI's `json_edit`, moved).
+`paths::settings_file()`; `config_file()` (`config.toml`) is gone.
+ainetd loads the file at start, polls it every second on a blocking
+thread and puts a change in force at once; its log says what is set and
+from where. Wired: `daemon` (autostart in `ainet_model::daemon`, log
+level, file, append and size rotation for the autostarted daemon, socket,
+`restore_rigs`), `messaging` (all), `queue` (all; `QSpec.nudge` and a
+watchdog's interval may now be left to the daemon), `rigs` (all;
+`ainet down` reads `snapshot_on_down`), `discovery` (all), `retention`
+(all), `cost` (context windows in the Fleet; prices build an
+`ainet_claude::cost::Table`, which no view shows yet), and of `runtimes`
+only `binary` and `readiness`. Left for part two: the rest of
+`runtimes`, `permissions`, `hooks`. A shutdown no longer saves the
+seats it kills as stopped (their exits came after the save), so
+`restore_rigs` sees what was running.
+
+**Done: item 2, part two** (`runtimes`, `permissions`, `hooks`). Seats'
+command lines are built in one pure place (`ainet_daemon::runtimes`, on
+`ainet_claude::launch::LaunchOptions`, which gained
+`--disallowedTools`); a test keeps the old builder word for word and
+checks that with nothing set every runtime gets exactly its old
+arguments. Wired: per runtime the model, effort (`--effort`; Codex
+`model_reasoning_effort`), Claude Code's permission mode, more arguments
+and environment (ainet's own variables refused), allowed tools
+(`mcp__ainet` always first) and disallowed tools, more MCP servers merged
+into `--mcp-config` (Codex: `-c mcp_servers.<name>.<key>=…`) with
+`--strict-mcp-config`, and the shell's arguments and environment. Codex
+has no permission modes or tool lists, so setting them for Codex is an
+error. A spec's `effort` is still dropped unless `runtimes.<rt>.spec_effort`
+is on: `--effort` is not confirmed for Claude Code 2.1.289 and an unknown
+flag would stop the seat; an effort set in settings.json or asked for in a
+request is passed. `SeatSpec` and `SpawnSpec` gained `effort`,
+`permission_mode`, `env` (and `SeatSpec` `args`), skipped on the wire when
+unset; OpenRig defines none of them on members, so only
+`permission_policy` maps from a spec. `permissions.hold_secs` sets the hold,
+the seats' `PermissionRequest` hook timeout (hold + 20, 600 by default) and
+`ainet hook`'s wait (hold + 10). `/always` rules are kept per agent in the
+database with `persist_always` (turning it off forgets them), listed and
+revoked with the additive `Request::AlwaysList` / `AlwaysRevoke`
+(`Response::AlwaysRules`; an old daemon answers "bad request"), and
+`global_rules` (the same four kinds, checked strictly) cover every agent.
+`sensitive_paths` add names or paths `/always` and global rules never
+cover; the built-in lists always apply. With `spec_policies`,
+`builtin:locked` is `plan`, `builtin:default` and `builtin:standard`
+Claude Code's default, `builtin:yolo` `bypassPermissions`; others are
+reported and ignored, and `up --plan` shows each seat's mode. `ainet
+install-hooks` prints the block made from the installer's `SPECS` (it
+used to differ: no `AskUserQuestion` matcher, other timeouts), and
+`--write`, `--status`, `--remove` install, check and remove it in Claude
+Code's settings (`hooks.claude_settings`), keeping a backup of each
+change. Not done: installing a spec's skills. Claude Code reads skills
+only from `~/.claude/skills`, a project's `.claude/skills` or a plugin;
+`--plugin-dir` with a generated plugin would avoid your files but is not
+confirmed for 2.1.289, so skills stay resolved and unused. Left for the
+protocol step: reading and setting values, paths, and hook status and
+install over the socket (the console's `install-hooks` already does the
+last two locally).
+
+**Done: items 3 and 5** (protocol and console parity). Additive requests,
+each answered "bad request" by an older daemon and handled by clients
+falling back: `SettingsGet { key? }` (`Response::Settings`: every setting
+with value, default, source, description and when it applies, `live`,
+`new_seats` or `restart`; the file's error and unknown keys),
+`SettingsSet { key, value }` and `SettingsUnset { key }` (ainetd edits the
+file through `ainet_core::settings::set_in_file`, keeping comments, refuses
+unknown keys, groups and values that would not read, and puts the file in
+force at once), `SettingsReload`, `HookStatus` / `HookInstall` /
+`HookUninstall` (`Response::Hooks`, with the backup made), and `Paths`
+(`Response::Paths`: socket, state directory, database, log, settings
+file, spec directories, Claude Code's config directory, the `ainet`
+binary, version, protocol and pid). `AlwaysList` / `AlwaysRevoke` came
+with part two. The console: `ainet config get|set|unset|list
+[--changed]|path [--all]|edit` (through a running ainetd, else on the file
+directly; an older daemon is said to be older and the file is used),
+`ainet always list|revoke` (revoking all needs `--all`) and `ainet hooks
+status|install|uninstall`; `--json` everywhere. The TUI and the GUI's
+command line: `/config [key]` (a popup of the settings in force), `/set
+<key> <value>`, `/unset <key>`, in `ainet_model::command`. `ainet-model`
+gives the GUI `Link::config` (`Msg::Config`, `ConfigReply`), the fallback
+to the file for an older daemon, and `Demo::full` answering all of it
+from a pretend file. Values typed as words become the JSON a setting
+takes (text unquoted; the schema decides), and a value that loosens
+safety is said to be less safe as it is set. Left: item 4, the GUI
+Settings view, and item 6's GUI tests.
+
+**Done: item 4, part one** (the view and the app's own categories).
+`workspace::OpenSettings` (`ctrl-,`, a gear in the title bar, the
+palette) opens a Settings tab (`crates/gui/src/settings_view/`): a search
+box and the categories on the left, fields on the right, as Zed's settings
+window. `OpenKeymap` (`ctrl-alt-,`) opens it on the Keymap; the files are
+`OpenSettingsFile` and `OpenKeymapFile`. Field kinds: toggle, dropdown
+(closed lists), number with unit, range and − / +, text, path with
+Browse…, list and name = value editors, and the theme (the theme
+selector, which previews). Each field has its description, default, a
+dot when it differs, a reset, when a change applies (ainet's from
+`ainet_core::settings::applies`), a "less safe" note where
+`less_safe` says so, and an environment variable that wins; errors show
+under it. The app's keys are written with `settings::save_value` (only
+that value changes in the text) and apply at once; ainet's go through
+ainetd (`FleetModel::config`, `SettingsSet` / `SettingsUnset`) when
+connected, else into the file with `set_in_file`. A value equal to its
+default is unset. Search matches label, description and key across every
+category, and the key bindings. Built: Appearance (theme, UI font and
+size, density, critter size), Terminal (font, size following the UI when
+unset, line height with a custom ratio, cursor, blinking), Workspace
+(command line, confirm quit, Fleet panel side and width) and Keymap: every
+binding by context with its source, filtered, keys changed or added by
+pressing them (caught before the keymap), removed (a default with
+`null`) and reset, written to keymap.json with comments kept
+(`keymap_edit.rs`). Headless tests cover each field kind, search, reset,
+writes keeping comments, ainetd and file paths, and recording. Left for
+part two: ainet's ten categories and Diagnostics (placeholders now; the
+framework takes `Field::daemon(key, label, kind)` entries in
+`pages::fields`).
+
+**Done: item 4, part two** (ainet's categories and Diagnostics). Every
+setting of the ten sections has a field (Codex's permission mode and
+tool lists excepted: setting them is an error), with sub-sections
+(`Field::group`: Claude Code, Codex, Shell, Readiness; the log;
+watchdogs; snapshots; kept and pruned), lists of folders with Browse…,
+of JSON (global rules) and of text, maps of text, numbers or JSON (MCP
+servers), and a price table for `cost.prices`. Panels that are not
+settings (`settings_view/panels.rs`): the `/always` rules in force with
+Revoke (`AlwaysList` / `AlwaysRevoke`), the hooks per event with Install,
+Repair, Uninstall (`HookStatus` / `HookInstall` / `HookUninstall`), the
+spec library with where each spec comes from (`Request::Specs`), and
+Diagnostics (connection, versions, ainetd's pid and uptime, paths, the
+end of its log, Copy Diagnostics without secret values). Additive
+protocol for it: `Request::LogTail { lines }` → `Response::Log`
+(`protocol::LogTail`), `PathsReport.started`, `HookReport.events`; the
+model's `ConfigReply::Log`, `popup::{uptime, log_text}`, and `Demo::full`
+answering them. Safety: fields that can loosen carry a warning callout,
+and a loosening change (`field::loosens`) is confirmed before it is
+written; hook changes are confirmed naming the file and the backup.
+Without ainetd the settings go to the file and the panels that need it
+say so; an older ainetd's "bad request" falls back to the file (settings)
+or this app's own paths and log (Diagnostics). Headless tests against
+`Demo::full` cover each category, writes and the effective value, the
+price table, revoke, hooks' confirmation, Diagnostics' copy, the safety
+confirmation, and a daemon that cannot answer.
+
+**Done: review fixes.** Where ainetd's socket is and whether it is
+autostarted come from the `daemon` section alone
+(`settings::load_section`), so a typo in another section no longer sends
+clients to the default socket or autostarts a daemon turned off. One
+ainetd per database: it holds `ainet.sqlite.lock` (with its socket in
+it) for its life, a second one refuses to start and says where the first
+listens, `ensure_daemon` says so instead of starting one, and changing
+`daemon.socket` under a running ainetd is refused (`ainet shutdown`
+first). `cost.prices` is said to be unused (no view shows cost). With no
+file, timings are as before: discovery and the watchdog ticker work at
+once and then sleep, transcripts on every other pass. `/config` and
+`/unset` complete with Tab only when no older command fits (`/u` is
+`/up`, `/con` `/continue`). `/down`, the app's Down and `/spawn` follow
+`rigs.snapshot_on_down` and `rigs.default_cwd`. Turning
+`permissions.persist_always` off forgets ended sessions' rules in memory
+too. A hold never outlasts its hook: a seat's timeout is the one it was
+started with, a hook of yours is read from Claude Code's settings
+(`hooks::permission_timeout`), else 580 s. With
+`discovery.claude_sessions` off, sessions already tracked are still seen
+to end. Upper bounds for `inbox_expiry_mins`, the default watchdog
+interval and event pruning, with saturating arithmetic. `less_safe`
+scans arguments for `--permission-mode` with a loosening mode,
+`--allowedTools`, Codex's `--full-auto`, `danger-full-access` and
+`-a never`. `ainet config get` says when the file is not in force.
+Spec listings are read off the daemon's lock. The keymap editor stops
+recording when it loses focus and records only its own window's keys.
+
 ## 6. Risks
 
 | Risk | Mitigation |

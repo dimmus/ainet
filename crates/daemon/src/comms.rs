@@ -8,7 +8,9 @@
 //!
 //! Delivery never lands under what you are typing: while you are at an
 //! agent's terminal (the TUI says so with `Interact`), or its seat has a
-//! typing guard, messages are held and delivered when that ends.
+//! typing guard, messages are held and delivered when that ends. The
+//! pauses, the note that ends a message and whether being at a terminal
+//! holds messages are `messaging` in settings.json.
 
 use std::time::Duration;
 
@@ -16,7 +18,7 @@ use ainet_core::{ChatMessage, Event, InboxItem, InboxKind, Message, Response, no
 use tokio::sync::broadcast;
 
 use crate::store::num_key;
-use crate::{Daemon, KEEP_CHAT, KEEP_MESSAGES, Shared, err, lock};
+use crate::{Daemon, Shared, err, lock};
 
 pub(crate) const OPERATOR: &str = "operator";
 
@@ -27,9 +29,7 @@ impl Daemon {
             Some(x) => *x = m.clone(),
             None => {
                 self.messages.push(m.clone());
-                if self.messages.len() > KEEP_MESSAGES {
-                    self.messages.remove(0);
-                }
+                self.trim_messages();
             }
         }
         self.emit(Event::Message { message: m.clone() });
@@ -49,10 +49,27 @@ impl Daemon {
         }
     }
 
-    /// Whether messages for this agent must wait: you are at its terminal,
-    /// or its seat has a typing guard.
+    /// Keeps as many messages in memory as `retention.messages_in_memory`
+    /// says (all stay on disk).
+    pub(crate) fn trim_messages(&mut self) {
+        let keep = self.settings().retention.messages_in_memory;
+        let excess = self.messages.len().saturating_sub(keep);
+        self.messages.drain(..excess);
+    }
+
+    /// Keeps as many chat posts in memory as `retention.chat_in_memory`
+    /// says.
+    pub(crate) fn trim_chat(&mut self) {
+        let keep = self.settings().retention.chat_in_memory;
+        let excess = self.chat.len().saturating_sub(keep);
+        self.chat.drain(..excess);
+    }
+
+    /// Whether messages for this agent must wait: you are at its terminal
+    /// (unless `messaging.hold_while_interacting` is off), or its seat has a
+    /// typing guard.
     fn holding(&self, id: &str) -> bool {
-        if self.interactive.contains(id) {
+        if self.interactive.contains(id) && self.settings().messaging.hold_while_interacting {
             return true;
         }
         let seat = self.agents.get(id).and_then(|a| a.seat.clone());
@@ -125,7 +142,8 @@ impl Daemon {
             return m.body.trim().to_string();
         }
         // Made where it is read back, so conversations know it again.
-        ainet_core::conversation::delivery(m.id, m.reply_to, &m.from_label, &m.body)
+        let note = &self.settings().messaging.message_note;
+        ainet_core::conversation::delivery_with(note, m.id, m.reply_to, &m.from_label, &m.body)
     }
 }
 
@@ -147,9 +165,10 @@ pub(crate) async fn deliver_text(d: &Shared, id: &str, text: &str) -> anyhow::Re
         Tmux(String),
         Peer,
     }
-    let via = {
+    let (via, settle) = {
         let mut g = lock(d);
-        if let Some(p) = g.panes.get_mut(id) {
+        let settle = Duration::from_millis(g.settings().messaging.paste_settle_ms);
+        let via = if let Some(p) = g.panes.get_mut(id) {
             p.paste(text)?;
             Via::Pane
         } else if let Some(t) = g.tmux.get(id) {
@@ -162,11 +181,12 @@ pub(crate) async fn deliver_text(d: &Shared, id: &str, text: &str) -> anyhow::Re
             Via::Peer
         } else {
             anyhow::bail!("{} has no terminal ainet can type into", g.label(id));
-        }
+        };
+        (via, settle)
     };
     match via {
         Via::Pane => {
-            tokio::time::sleep(ainet_pty::PASTE_SETTLE).await;
+            tokio::time::sleep(settle).await;
             let mut g = lock(d);
             match g.panes.get_mut(id) {
                 Some(p) => p.enter(),
@@ -175,7 +195,7 @@ pub(crate) async fn deliver_text(d: &Shared, id: &str, text: &str) -> anyhow::Re
         }
         Via::Tmux(target) => {
             crate::discover::tmux_paste(&target, text)?;
-            tokio::time::sleep(ainet_pty::PASTE_SETTLE).await;
+            tokio::time::sleep(settle).await;
             crate::discover::tmux_keys(&target, "\r")
         }
         Via::Peer => crate::discover::peer_send(id, text),
@@ -224,7 +244,8 @@ pub(crate) async fn flush_held(d: &Shared, agent: &str) {
         .collect();
     for id in ids {
         deliver(d, id, false).await;
-        tokio::time::sleep(Duration::from_millis(400)).await;
+        let gap = lock(d).settings().messaging.flush_gap_ms;
+        tokio::time::sleep(Duration::from_millis(gap)).await;
     }
 }
 
@@ -505,9 +526,7 @@ pub(crate) async fn chat_send(
         };
         g.store.put("chat", &num_key(msg.id), &msg);
         g.chat.push(msg.clone());
-        if g.chat.len() > KEEP_CHAT {
-            g.chat.remove(0);
-        }
+        g.trim_chat();
         g.emit(Event::Chat { message: msg.clone() });
         // @mentions reach the mentioned agent's terminal.
         let mentions: Vec<String> = msg
@@ -520,8 +539,16 @@ pub(crate) async fn chat_send(
             .collect();
         (msg, mentions, sender_id)
     };
+    let note = lock(d).settings().messaging.mention_note.clone();
     for agent in mentions {
-        let text = ainet_core::conversation::mention(&msg.sender, &msg.rig, msg.id, &msg.topic, &msg.body);
+        let text = ainet_core::conversation::mention_with(
+            &note,
+            &msg.sender,
+            &msg.rig,
+            msg.id,
+            &msg.topic,
+            &msg.body,
+        );
         let holding = lock(d).holding(&agent);
         if holding {
             let mut g = lock(d);

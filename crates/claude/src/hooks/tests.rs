@@ -444,3 +444,93 @@ fn ours_is_by_program() {
     assert!(!is_ours("bash other.sh", "/usr/bin/ainet hook"));
     assert!(!is_ours("/usr/bin/ainetx hook", "/usr/bin/ainet hook"));
 }
+
+#[test]
+fn the_block_to_merge_is_what_install_writes() {
+    let tmp = TempDir::new();
+    let path = settings_path_in(tmp.path());
+    let cmd = hook_command(Path::new("/opt/my apps/ainet"));
+    install(&path, &cmd).unwrap();
+    // What a hand merge of the printed block gives equals what install
+    // writes into an empty file: one entry per SPECS event, the same
+    // matchers and timeouts.
+    assert_eq!(read_json(&path), hooks_block(&cmd, PERMISSION_TIMEOUT_SECS));
+    let block = hooks_block(&cmd, PERMISSION_TIMEOUT_SECS);
+    let hooks = block["hooks"].as_object().unwrap();
+    assert_eq!(hooks.len(), SPECS.len());
+    for sp in SPECS {
+        let e = &hooks[sp.event][0];
+        assert_eq!(e["hooks"][0]["timeout"], sp.timeout, "{}", sp.event);
+        assert_eq!(e["hooks"][0]["command"], cmd.as_str());
+        assert_eq!(
+            e.get("matcher").and_then(|m| m.as_str()).unwrap_or(""),
+            sp.matcher
+        );
+    }
+    assert_eq!(hooks["PreToolUse"][0]["matcher"], "AskUserQuestion");
+    assert_eq!(hooks["SessionEnd"][0]["hooks"][0]["timeout"], 5);
+}
+
+#[test]
+fn status_says_what_is_there_and_install_repairs_it() {
+    let tmp = TempDir::new();
+    let path = settings_path_in(tmp.path());
+    let cmd = hook_command(Path::new("/usr/bin/ainet"));
+    let st = status(&path, &cmd, 600);
+    assert!(!st.exists && st.ours == 0 && !st.current());
+    assert_eq!(st.missing.len(), SPECS.len());
+    assert!(st.summary().starts_with("not installed in"));
+
+    install(&path, &cmd).unwrap();
+    let st = status(&path, &cmd, 600);
+    assert!(st.current(), "{st:?}");
+    assert_eq!(st.ours, SPECS.len());
+    assert!(st.summary().starts_with("installed in"));
+
+    // A longer hold needs a longer PermissionRequest timeout: outdated.
+    let st = status(&path, &cmd, 1220);
+    assert!(!st.current());
+    assert_eq!((st.stale, st.missing.clone()), (1, vec!["PermissionRequest"]));
+    assert!(st.summary().contains("needs repair"), "{}", st.summary());
+    let r = install_with(&path, &cmd, 1220).unwrap();
+    assert!(r.backup.is_some());
+    assert_eq!(r.replaced, SPECS.len());
+    assert!(status(&path, &cmd, 1220).current());
+    assert_eq!(
+        read_json(&path)["hooks"]["PermissionRequest"][0]["hooks"][0]["timeout"],
+        1220
+    );
+
+    // An ainet at another path counts as ours, and outdated.
+    let moved = hook_command(Path::new("/home/u/.cargo/bin/ainet"));
+    let st = status(&path, &moved, 1220);
+    assert_eq!((st.ours, st.stale), (SPECS.len(), SPECS.len()));
+
+    // Status only reads; a file that does not parse is said so.
+    std::fs::write(&path, "{ not json").unwrap();
+    let st = status(&path, &cmd, 600);
+    assert!(st.error.is_some() && !st.current());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ not json");
+    assert_eq!(permission_timeout(&path, &cmd), None);
+}
+
+/// How long Claude Code lets ainet's installed hook hold a request.
+#[test]
+fn the_installed_permission_timeout_is_read() {
+    let dir = std::env::temp_dir().join(format!("ainet-perm-timeout-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("settings.json");
+    let cmd = hook_command(Path::new("/usr/bin/ainet"));
+    assert_eq!(permission_timeout(&path, &cmd), None, "no file");
+    install_with(&path, &cmd, 1220).unwrap();
+    assert_eq!(permission_timeout(&path, &cmd), Some(1220));
+    // Another program's hook does not count.
+    std::fs::write(
+        &path,
+        r#"{"hooks":{"PermissionRequest":[{"hooks":[{"type":"command","command":"other","timeout":5}]}]}}"#,
+    )
+    .unwrap();
+    assert_eq!(permission_timeout(&path, &cmd), None);
+    let _ = std::fs::remove_dir_all(&dir);
+}
