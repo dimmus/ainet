@@ -267,3 +267,67 @@ fn the_log_tail_is_the_end_of_the_configured_file() {
     assert!(some.exists);
     assert_eq!(some.lines, ["two", "three"]);
 }
+
+/// `daemon.socket` is not changed under a running ainetd: clients would
+/// look for it on the new socket (and start a second one) before it
+/// restarts. One already its socket is fine.
+#[test]
+fn the_socket_is_not_moved_under_a_running_daemon() {
+    let d = Daemon::start("admin-socket", Some(QUIET));
+    let elsewhere = d.dir.join("elsewhere.sock");
+    let why = error(
+        &d,
+        &Request::SettingsSet {
+            key: "daemon.socket".into(),
+            value: json!(elsewhere),
+        },
+    );
+    assert!(why.contains("ainet shutdown"), "{why}");
+    assert_eq!(
+        std::fs::read_to_string(d.dir.join("settings.json")).unwrap(),
+        QUIET
+    );
+    // Its own socket, and the rest of the section, still change.
+    settings(
+        &d,
+        &Request::SettingsSet {
+            key: "daemon.socket".into(),
+            value: json!(d.socket),
+        },
+    );
+    settings(
+        &d,
+        &Request::SettingsSet {
+            key: "daemon.autostart".into(),
+            value: json!(false),
+        },
+    );
+    // Unset, whole or alone, it would be the default socket: refused too.
+    for key in ["daemon", "daemon.socket"] {
+        let why = error(&d, &Request::SettingsUnset { key: key.into() });
+        assert!(why.contains("ainet shutdown"), "{key}: {why}");
+    }
+}
+
+/// One ainetd per database: a second one, on another socket, refuses to
+/// start and says where the first one listens.
+#[test]
+fn a_second_daemon_on_the_same_database_refuses() {
+    let d = Daemon::start("admin-lock", Some(QUIET));
+    let opts = ainet_daemon::Options {
+        socket: d.dir.join("second.sock"),
+        database: d.dir.join("state.db"),
+        exe: "ainet".into(),
+        settings: Some(d.dir.join("settings.json")),
+        claude_sessions: d.dir.join("claude-sessions"),
+    };
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let e = runtime.block_on(ainet_daemon::run(opts)).unwrap_err().to_string();
+    assert!(
+        e.contains("another ainetd") && e.contains(&d.socket.display().to_string()),
+        "{e}"
+    );
+    assert!(!d.dir.join("second.sock").exists());
+    // The first one is untouched.
+    settings(&d, &Request::SettingsGet { key: None });
+}

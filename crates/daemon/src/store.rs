@@ -70,7 +70,7 @@ impl Store {
         if let Some(keep) = keep {
             let res = self.db.execute(
                 "DELETE FROM events WHERE id NOT IN (SELECT id FROM events ORDER BY id DESC LIMIT ?1)",
-                params![keep as i64],
+                params![i64::try_from(keep).unwrap_or(i64::MAX)],
             );
             match res {
                 Ok(n) => gone += n,

@@ -101,8 +101,10 @@ impl Daemon {
     }
 
     /// Settings changed: keeping turned on saves the rules of sessions
-    /// running now; turned off, the database forgets them (they still
-    /// last for their sessions).
+    /// running now; turned off, the database forgets them, and so does
+    /// memory for sessions that ended (kept only because keeping was on:
+    /// a seat resumed later would still be allowed). Sessions running
+    /// now keep theirs until they end.
     pub(crate) fn always_settings_changed(&mut self) {
         if self.settings().permissions.persist_always {
             let agents: Vec<String> = self.always.keys().cloned().collect();
@@ -111,6 +113,9 @@ impl Daemon {
             }
         } else {
             self.always_forget_kept();
+            let agents = &self.agents;
+            self.always
+                .retain(|id, _| agents.get(id).is_some_and(|a| a.state.is_live()));
         }
     }
 

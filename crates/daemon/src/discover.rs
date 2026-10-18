@@ -235,7 +235,11 @@ impl Daemon {
                 self.publish(&id);
             }
         }
-        // Sessions we only knew from the file, now gone.
+        self.sweep_gone_sessions(live);
+    }
+
+    /// Sessions we only knew from the file, now gone.
+    fn sweep_gone_sessions(&mut self, live: &[LiveSession]) {
         let gone: Vec<String> = self
             .agents
             .values()
@@ -282,11 +286,14 @@ impl Daemon {
 }
 
 /// Keeps the fleet in step with the machine: Claude Code's sessions every
-/// `discovery.interval_ms` (unless `discovery.claude_sessions` is off),
-/// transcripts every `discovery.transcripts_ms`.
+/// `discovery.interval_ms`, from the start (with
+/// `discovery.claude_sessions` off, only those already tracked are seen
+/// to end), transcripts every `discovery.transcripts_ms`, first on the
+/// second pass (by default every other pass, as before).
 pub(crate) async fn ticker(d: Shared) {
     let sessions_dir = lock(&d).claude_sessions.clone();
-    let mut last_transcripts = std::time::Instant::now();
+    let first_every = Duration::from_millis(lock(&d).settings().discovery.interval_ms);
+    let mut next_transcripts = std::time::Instant::now() + first_every;
     loop {
         let (every, sessions_on, transcripts) = {
             let g = lock(&d);
@@ -297,18 +304,24 @@ pub(crate) async fn ticker(d: Shared) {
                 Duration::from_millis(s.transcripts_ms),
             )
         };
-        tokio::time::sleep(every).await;
-        if sessions_on {
-            let dir = sessions_dir.clone();
-            let live = tokio::task::spawn_blocking(move || sessions::live_sessions_in(&dir))
-                .await
-                .unwrap_or_default();
-            lock(&d).sync_sessions(&live);
+        let dir = sessions_dir.clone();
+        let live = tokio::task::spawn_blocking(move || sessions::live_sessions_in(&dir))
+            .await
+            .unwrap_or_default();
+        {
+            let mut g = lock(&d);
+            if sessions_on {
+                g.sync_sessions(&live);
+            } else {
+                g.sweep_gone_sessions(&live);
+            }
         }
-        if last_transcripts.elapsed() >= transcripts {
-            last_transcripts = std::time::Instant::now();
+        let now = std::time::Instant::now();
+        if now >= next_transcripts {
+            next_transcripts = now + transcripts;
             lock(&d).refresh_transcripts();
         }
+        tokio::time::sleep(every).await;
     }
 }
 

@@ -396,6 +396,26 @@ pub fn status(settings_path: &Path, command: &str, permission_timeout: u64) -> H
     st
 }
 
+/// The timeout of ainet's `PermissionRequest` hook running `command` in
+/// a settings file: how long Claude Code lets it hold a request before
+/// ending it. `None` when the hook is not there or gives none.
+pub fn permission_timeout(settings_path: &Path, command: &str) -> Option<u64> {
+    let (settings, _) = load(settings_path).ok()?;
+    settings
+        .get("hooks")?
+        .get("PermissionRequest")?
+        .as_array()?
+        .iter()
+        .flat_map(|e| e.get("hooks").and_then(Value::as_array).into_iter().flatten())
+        .filter(|h| {
+            h.get("command")
+                .and_then(Value::as_str)
+                .is_some_and(|c| is_ours(c, command))
+        })
+        .filter_map(|h| h.get("timeout").and_then(Value::as_u64))
+        .min()
+}
+
 /// The settings as an object, and the file's bytes when it existed.
 type Loaded = (Map<String, Value>, Option<Vec<u8>>);
 

@@ -179,6 +179,23 @@ fn bad_values_are_errors_that_name_them() {
             "default_interval_secs",
         ),
         (r#"{ "rigs": { "keep_snapshots": 0 } }"#, "rigs.keep_snapshots"),
+        // Huge values are typos, and would overflow the time arithmetic.
+        (
+            r#"{ "retention": { "inbox_expiry_mins": 18446744073709551615 } }"#,
+            "retention.inbox_expiry_mins",
+        ),
+        (
+            r#"{ "queue": { "watchdog": { "default_interval_secs": 18446744073709551615 } } }"#,
+            "default_interval_secs",
+        ),
+        (
+            r#"{ "retention": { "events_max_age_days": 4000000000 } }"#,
+            "retention.events_max_age_days",
+        ),
+        (
+            r#"{ "retention": { "events_max_count": 18446744073709551615 } }"#,
+            "retention.events_max_count",
+        ),
         (
             r#"{ "retention": { "inbox_items": 1 } }"#,
             "retention.inbox_items",
@@ -562,6 +579,27 @@ fn less_safe_values_are_told_apart() {
         "runtimes.claude.args",
         &json!(["--dangerously-skip-permissions"])
     ));
+    for args in [
+        json!(["--permission-mode", "bypassPermissions"]),
+        json!(["--permission-mode=acceptEdits"]),
+        json!(["--allowedTools", "Bash"]),
+        json!(["--allowed-tools=Bash"]),
+        json!(["--yolo"]),
+        json!(["--full-auto"]),
+        json!(["--sandbox", "danger-full-access"]),
+        json!(["-a", "never"]),
+    ] {
+        assert!(less_safe("runtimes.codex.args", &args), "{args}");
+    }
+    for args in [
+        json!(["--permission-mode", "plan"]),
+        json!(["--permission-mode=default"]),
+        json!(["--verbose", "--model", "opus"]),
+        json!(["-a", "on-request"]),
+        json!([]),
+    ] {
+        assert!(!less_safe("runtimes.claude.args", &args), "{args}");
+    }
     assert!(less_safe("permissions.persist_always", &json!(true)));
     assert!(less_safe(
         "permissions.global_rules",
@@ -586,4 +624,37 @@ fn reports_narrow_to_a_key() {
         report.clone().only("").unwrap().entries.len(),
         report.entries.len()
     );
+}
+
+/// One section read on its own: a mistake in another section does not
+/// change it, one in itself means its defaults.
+#[test]
+fn a_section_reads_without_the_others() {
+    let text = r#"{
+        // The socket, and a typo elsewhere.
+        "daemon": { "socket": "/tmp/x.sock", "autostart": false, },
+        "queue": { "nudge": "yes" },
+    }"#;
+    assert!(parse(text).is_err(), "the whole file does not read");
+    let s = parse_section(text, "daemon");
+    assert_eq!(
+        s.daemon.socket.as_deref(),
+        Some(std::path::Path::new("/tmp/x.sock"))
+    );
+    assert!(!s.daemon.autostart);
+    assert_eq!(s.queue, QueueSettings::default());
+    // The broken section itself: its defaults.
+    assert_eq!(parse_section(text, "queue"), Settings::default());
+    let bad = r#"{ "daemon": { "socket": "/tmp/x.sock", "log": { "keep": 0 } } }"#;
+    assert_eq!(parse_section(bad, "daemon"), Settings::default());
+    assert_eq!(parse_section(r#"{ "daemon": 3 }"#, "daemon"), Settings::default());
+    // No section, no file, no JSON: the defaults.
+    assert_eq!(
+        parse_section(r#"{ "theme": "One Dark" }"#, "daemon"),
+        Settings::default()
+    );
+    assert_eq!(parse_section("", "daemon"), Settings::default());
+    assert_eq!(parse_section("{", "daemon"), Settings::default());
+    let missing = std::env::temp_dir().join("ainet-no-such-settings.json");
+    assert_eq!(load_section(&missing, "daemon"), Settings::default());
 }

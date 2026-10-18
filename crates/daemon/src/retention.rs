@@ -27,9 +27,11 @@ impl Daemon {
     fn prune(&mut self) {
         let k = self.settings().retention.clone();
         let now = now_ms();
+        // Saturating: settings.json refuses values this large, but a
+        // bad one must never panic or wrap here.
         let before = k
             .events_max_age_days
-            .map(|days| now - i64::from(days) * 86_400_000);
+            .map(|days| now.saturating_sub(i64::from(days).saturating_mul(86_400_000)));
         if before.is_some() || k.events_max_count.is_some() {
             let gone = self.store.prune_events(before, k.events_max_count);
             if gone > 0 {
@@ -37,7 +39,8 @@ impl Daemon {
             }
         }
         if let Some(mins) = k.inbox_expiry_mins {
-            expire(&mut self.inbox, now - (mins as i64) * 60_000);
+            let age = i64::try_from(mins).unwrap_or(i64::MAX).saturating_mul(60_000);
+            expire(&mut self.inbox, now.saturating_sub(age));
         }
     }
 }

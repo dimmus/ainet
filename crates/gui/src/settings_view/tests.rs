@@ -592,6 +592,16 @@ async fn the_keymap_records_removes_and_resets_bindings(cx: &mut TestAppContext)
     assert!(!editor.read_with(cx, |e, _| e.is_recording()));
     assert_eq!(text(&keys), "// My keys.\n[\n]\n");
 
+    // Focus moved away (the filter clicked): recording stops, and keys
+    // go where they are typed.
+    click(&format!("KEYMAP-RECORD-{ix}"), cx);
+    assert!(editor.read_with(cx, |e, _| e.is_recording()));
+    cx.update(|window, cx| editor.update(cx, |e, cx| e.set_filter("open ma", window, cx)));
+    cx.run_until_parked();
+    assert!(!editor.read_with(cx, |e, _| e.is_recording()));
+    cx.simulate_input("p");
+    assert_eq!(editor.read_with(cx, |e, cx| e.filter_text(cx)), "open map");
+
     // Keys bound elsewhere are recorded, not acted on; enter saves.
     click(&format!("KEYMAP-RECORD-{ix}"), cx);
     cx.simulate_keystrokes("ctrl-b ctrl-alt-m");

@@ -904,6 +904,33 @@ or this app's own paths and log (Diagnostics). Headless tests against
 price table, revoke, hooks' confirmation, Diagnostics' copy, the safety
 confirmation, and a daemon that cannot answer.
 
+**Done: review fixes.** Where ainetd's socket is and whether it is
+autostarted come from the `daemon` section alone
+(`settings::load_section`), so a typo in another section no longer sends
+clients to the default socket or autostarts a daemon turned off. One
+ainetd per database: it holds `ainet.sqlite.lock` (with its socket in
+it) for its life, a second one refuses to start and says where the first
+listens, `ensure_daemon` says so instead of starting one, and changing
+`daemon.socket` under a running ainetd is refused (`ainet shutdown`
+first). `cost.prices` is said to be unused (no view shows cost). With no
+file, timings are as before: discovery and the watchdog ticker work at
+once and then sleep, transcripts on every other pass. `/config` and
+`/unset` complete with Tab only when no older command fits (`/u` is
+`/up`, `/con` `/continue`). `/down`, the app's Down and `/spawn` follow
+`rigs.snapshot_on_down` and `rigs.default_cwd`. Turning
+`permissions.persist_always` off forgets ended sessions' rules in memory
+too. A hold never outlasts its hook: a seat's timeout is the one it was
+started with, a hook of yours is read from Claude Code's settings
+(`hooks::permission_timeout`), else 580 s. With
+`discovery.claude_sessions` off, sessions already tracked are still seen
+to end. Upper bounds for `inbox_expiry_mins`, the default watchdog
+interval and event pruning, with saturating arithmetic. `less_safe`
+scans arguments for `--permission-mode` with a loosening mode,
+`--allowedTools`, Codex's `--full-auto`, `danger-full-access` and
+`-a never`. `ainet config get` says when the file is not in force.
+Spec listings are read off the daemon's lock. The keymap editor stops
+recording when it loses focus and records only its own window's keys.
+
 ## 6. Risks
 
 | Risk | Mitigation |

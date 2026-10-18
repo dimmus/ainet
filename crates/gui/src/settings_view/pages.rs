@@ -735,7 +735,7 @@ fn retention() -> Vec<Field> {
         Field::daemon(
             "retention.inbox_expiry_mins",
             "Drop Answered Inbox Items After",
-            whole("min", 1., 1e9, 10.),
+            whole("min", 1., 5_256_000., 10.),
         )
         .group("Pruned"),
     ]
@@ -744,7 +744,7 @@ fn retention() -> Vec<Field> {
 fn cost() -> Vec<Field> {
     vec![
         Field::daemon("cost.prices", "Prices", Kind::Prices).describe(
-            "Dollars per million tokens by model-id prefix (claude-opus-5), over the built-in table; the longest matching prefix wins. Cache writes default to 1.25 times input, cache reads to 0.1 times.",
+            "Not used yet: no view shows cost. Dollars per million tokens by model-id prefix (claude-opus-5), over the built-in table; the longest matching prefix wins. Cache writes default to 1.25 times input, cache reads to 0.1 times.",
         ),
         Field::daemon(
             "cost.context_windows",

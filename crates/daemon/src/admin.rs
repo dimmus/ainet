@@ -33,14 +33,21 @@ pub(crate) fn settings_get(d: &Shared, key: Option<&str>) -> Response {
 /// Sets `key` to `value` in settings.json (`None`: removes it), then puts
 /// the file in force at once.
 pub(crate) async fn settings_set(d: &Shared, key: String, value: Option<Value>) -> Response {
-    let Some(file) = lock(d).config.file.clone() else {
+    let (file, socket) = {
+        let g = lock(d);
+        (g.config.file.clone(), g.socket.clone())
+    };
+    let Some(file) = file else {
         return err("this ainetd follows no settings file");
     };
     let edit = {
         let (file, key) = (file.clone(), key.clone());
-        tokio::task::spawn_blocking(move || match &value {
-            Some(v) => settings::set_in_file(&file, &key, v),
-            None => settings::unset_in_file(&file, &key),
+        tokio::task::spawn_blocking(move || {
+            moves_socket(&file, &key, value.as_ref(), &socket)?;
+            match &value {
+                Some(v) => settings::set_in_file(&file, &key, v),
+                None => settings::unset_in_file(&file, &key),
+            }
         })
         .await
     };
@@ -49,6 +56,38 @@ pub(crate) async fn settings_set(d: &Shared, key: String, value: Option<Value>) 
         Ok(Err(e)) => err(e),
         Err(e) => err(format!("settings: {e}")),
     }
+}
+
+/// Refuses a change of `daemon.socket` that would move clients away from
+/// the socket this ainetd listens on: it takes effect only when ainetd
+/// restarts, and until then every `ainet` command would look for it in
+/// the wrong place (and start another).
+fn moves_socket(file: &Path, key: &str, value: Option<&Value>, socket: &Path) -> Result<(), String> {
+    // `daemon.socket` itself, or `daemon` as a whole.
+    let touches = key == "daemon.socket" || key == "daemon";
+    if !touches {
+        return Ok(());
+    }
+    let text = match std::fs::read_to_string(file) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(format!("cannot read {}: {e}", file.display())),
+    };
+    let edited = match value {
+        Some(v) => settings::set(&text, key, v)?,
+        None => settings::unset(&text, key)?,
+    };
+    let socket_in = |text: &str| settings::parse_section(text, "daemon").daemon.socket;
+    let (before, after) = (socket_in(&text), socket_in(&edited));
+    let to = ainet_core::paths::socket_for(after.as_deref());
+    if before == after || to == socket {
+        return Ok(());
+    }
+    Err(format!(
+        "ainetd is running on {}: a new daemon.socket ({}) takes effect only when it restarts, and until then ainet would look for it there. Stop it first (`ainet shutdown`), then set daemon.socket",
+        socket.display(),
+        to.display()
+    ))
 }
 
 /// Reads settings.json now and puts it in force (a file that does not

@@ -511,4 +511,26 @@ fn status_says_what_is_there_and_install_repairs_it() {
     let st = status(&path, &cmd, 600);
     assert!(st.error.is_some() && !st.current());
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ not json");
+    assert_eq!(permission_timeout(&path, &cmd), None);
+}
+
+/// How long Claude Code lets ainet's installed hook hold a request.
+#[test]
+fn the_installed_permission_timeout_is_read() {
+    let dir = std::env::temp_dir().join(format!("ainet-perm-timeout-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("settings.json");
+    let cmd = hook_command(Path::new("/usr/bin/ainet"));
+    assert_eq!(permission_timeout(&path, &cmd), None, "no file");
+    install_with(&path, &cmd, 1220).unwrap();
+    assert_eq!(permission_timeout(&path, &cmd), Some(1220));
+    // Another program's hook does not count.
+    std::fs::write(
+        &path,
+        r#"{"hooks":{"PermissionRequest":[{"hooks":[{"type":"command","command":"other","timeout":5}]}]}}"#,
+    )
+    .unwrap();
+    assert_eq!(permission_timeout(&path, &cmd), None);
+    let _ = std::fs::remove_dir_all(&dir);
 }

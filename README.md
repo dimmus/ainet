@@ -164,7 +164,11 @@ ignores the other's sections and keeps them when it writes. ainetd follows
 the file while it runs (checked every second) and applies a change at
 once where it can; a file that does not read, or says something out of
 range, is reported in ainetd's log and the last good settings stay.
-Unknown keys in ainet's sections are reported and ignored. The schema
+Unknown keys in ainet's sections are reported and ignored. Where
+ainetd's socket is and whether it is started are read from the `daemon`
+section alone, so a mistake elsewhere in the file cannot send the console
+to another socket or start a daemon you turned off; and one ainetd holds
+its database (`ainet.sqlite.lock`), so a second one refuses to start. The schema
 (`crates/gui/assets/settings-schema.json`) describes every key with its
 default.
 
@@ -208,15 +212,15 @@ default.
 
 | Section | What it sets | When it applies |
 |---|---|---|
-| `daemon` | `autostart` (console and app), `socket`, `restore_rigs`, `log` (`level`, `file`, `append`, `max_size_mb` rotation, `keep`) | autostart at once; the rest when ainetd next starts |
+| `daemon` | `autostart` (console and app), `socket`, `restore_rigs`, `log` (`level`, `file`, `append`, `max_size_mb` rotation, `keep`) | autostart at once; the rest when ainetd next starts (`socket` is refused while ainetd runs: `ainet shutdown` first) |
 | `messaging` | pause between paste and Enter, between held messages; holding while you type; typing guard of new seats; the note that ends a delivered message or mention | at once (typing guard: new seats) |
 | `queue` | `nudge` default; watchdogs' `default_interval_secs`, `min_interval_secs`, `message`, `tick_secs` | at once |
-| `rigs` | more spec directories, `default_cwd` for `create`/`spawn`, `snapshot_on_down` for `ainet down`, `keep_snapshots` (pruning, opt-in) | at once |
+| `rigs` | more spec directories, `default_cwd` for `create`/`spawn` (and `/spawn` in the TUI and the app), `snapshot_on_down` for `ainet down` (and `/down`, the app's Down), `keep_snapshots` (pruning, opt-in) | at once |
 | `discovery` | track every Claude Code session (`claude_sessions`), scan tmux, how often | at once |
 | `retention` | in-memory caps for messages, chat, inbox and scrollback; logged events pruned by age or count and answered inbox items expired (opt-in) | at once (scrollback: new terminals) |
-| `cost` | context windows and prices by model-id prefix | at once |
+| `cost` | context windows by model-id prefix; prices (not used yet: no view shows cost) | at once |
 | `runtimes` | per runtime (`claude`, `codex`, `shell`): the program, default model and effort, Claude Code's permission mode, more arguments and environment, tools allowed without asking (`mcp__ainet` always is) and refused, more MCP servers (merged with ainet's), `--strict-mcp-config`; `readiness` timings. A spec's `effort` is passed with `spec_effort` | new seats |
-| `permissions` | how long a request is held (`hold_secs`; seats' hook timeout follows), `/always` rules kept across sessions and restarts (`persist_always`), more `sensitive_paths` `/always` never covers, a spec's `permission_policy` applied (`spec_policies`), `global_rules` that allow without asking | at once (hold: new seats' hook timeout) |
+| `permissions` | how long a request is held (`hold_secs`; seats' hook timeout follows, and a hold never outlasts the hook it came through), `/always` rules kept across sessions and restarts (`persist_always`), more `sensitive_paths` `/always` never covers, a spec's `permission_policy` applied (`spec_policies`), `global_rules` that allow without asking | at once (hold: new seats' hook timeout) |
 | `hooks` | which Claude Code settings file `ainet install-hooks --write` edits | at once |
 
 Settings that loosen safety (permission modes such as `bypassPermissions`,

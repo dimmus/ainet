@@ -166,7 +166,11 @@ struct Recording {
     /// Keep the row's keys and add these (else they replace them).
     add: bool,
     keys: Vec<Keystroke>,
+    /// Keys are caught app-wide; only the editor's window's are recorded.
     _intercept: Subscription,
+    /// Recording stops once the editor loses focus: clicked away, the
+    /// keys typed elsewhere must reach where they are typed.
+    _blur: Subscription,
 }
 
 pub struct KeymapEditor {
@@ -252,6 +256,11 @@ impl KeymapEditor {
     }
 
     /// Filters by `text`, and gives the filter the keyboard.
+    #[cfg(test)]
+    pub fn filter_text(&self, cx: &App) -> String {
+        self.filter.read(cx).text().to_string()
+    }
+
     pub fn set_filter(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.filter.update(cx, |f, cx| {
             f.set_text(text, cx);
@@ -308,19 +317,28 @@ impl KeymapEditor {
     /// `add`, they are bound besides its own.
     pub fn record(&mut self, row: usize, add: bool, window: &mut Window, cx: &mut Context<Self>) {
         let this = cx.weak_entity();
+        let ours = window.window_handle();
         // Before the keymap sees them: while recording, keys bound to
         // something are keys like any other.
         let intercept = cx.intercept_keystrokes(move |event: &KeystrokeEvent, window, cx| {
-            let _ = this.update(cx, |this, cx| this.pressed(&event.keystroke, window, cx));
+            if window.window_handle() == ours {
+                let _ = this.update(cx, |this, cx| this.pressed(&event.keystroke, window, cx));
+            }
+        });
+        // Away from any text field, so typed letters go nowhere else.
+        window.focus(&self.focus, cx);
+        let blur = cx.on_blur(&self.focus, window, |this, _, cx| {
+            if this.recording.take().is_some() {
+                cx.notify();
+            }
         });
         self.recording = Some(Recording {
             row,
             add,
             keys: Vec::new(),
             _intercept: intercept,
+            _blur: blur,
         });
-        // Away from any text field, so typed letters go nowhere else.
-        window.focus(&self.focus, cx);
         cx.notify();
     }
 

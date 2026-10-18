@@ -30,8 +30,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub use edit::{check_key, set, set_in_file, unset, unset_in_file, value_from_text, write_whole};
-pub use effective::{Applies, Effective, Source, applies, effective, env_overrides, less_safe, unknown_keys};
-pub use load::{Follower, Loaded, load, parse, schema};
+pub use effective::{
+    Applies, Effective, Source, applies, args_loosen, effective, env_overrides, less_safe, unknown_keys,
+};
+pub use load::{Follower, Loaded, load, load_section, parse, parse_section, schema};
 pub use policy::{GlobalRule, SPEC_POLICIES, spec_policy};
 pub use report::SettingsReport;
 pub use schema_walk::{description, takes_text};
@@ -504,7 +506,7 @@ impl Default for QueueSettings {
 #[serde(default)]
 pub struct WatchdogSettings {
     /// The interval of a watchdog registered without one, in seconds.
-    #[schemars(range(min = 1))]
+    #[schemars(range(min = 1, max = 2_592_000))]
     pub default_interval_secs: u64,
     /// The shortest interval allowed, in seconds.
     #[schemars(range(min = 1, max = 86_400))]
@@ -516,6 +518,9 @@ pub struct WatchdogSettings {
     #[schemars(range(min = 1, max = 60))]
     pub tick_secs: u64,
 }
+
+/// The longest default watchdog interval: 30 days.
+pub const MAX_WATCHDOG_INTERVAL_SECS: u64 = 2_592_000;
 
 /// What a watchdog types when it was given no message.
 pub const WATCHDOG_MESSAGE: &str = "[ainet] watchdog wake: check your queue (queue_list mine=true / ainet queue list --mine) and carry on with what you own.";
@@ -623,14 +628,14 @@ pub struct RetentionSettings {
     #[schemars(range(max = 1_000_000))]
     pub scrollback_lines: usize,
     /// Delete logged events older than this many days. Unset, kept.
-    #[schemars(range(min = 1))]
+    #[schemars(range(min = 1, max = 36_500))]
     pub events_max_age_days: Option<u32>,
     /// Keep at most this many logged events, the newest. Unset, all.
-    #[schemars(range(min = 1000))]
+    #[schemars(range(min = 1000, max = 1_000_000_000_000_u64))]
     pub events_max_count: Option<u64>,
     /// Drop answered inbox items this many minutes old. Unset, they
     /// stay until the inbox is full.
-    #[schemars(range(min = 1))]
+    #[schemars(range(min = 1, max = 5_256_000))]
     pub inbox_expiry_mins: Option<u64>,
 }
 
@@ -654,7 +659,8 @@ impl Default for RetentionSettings {
 #[serde(default)]
 pub struct CostSettings {
     /// Prices by model-id prefix (`claude-opus-5`), over the built-in
-    /// table; the longest matching prefix wins.
+    /// table; the longest matching prefix wins. Not used yet: no view
+    /// shows cost.
     pub prices: BTreeMap<String, Price>,
     /// Context windows in tokens by model-id prefix, over ainet's guess
     /// (1M for a `[1m]` model, else 200k).
@@ -729,7 +735,7 @@ impl Settings {
             "queue.watchdog.default_interval_secs",
             w.default_interval_secs,
             w.min_interval_secs,
-            u64::MAX,
+            MAX_WATCHDOG_INTERVAL_SECS,
         );
         range("queue.watchdog.tick_secs", w.tick_secs, 1, 60);
         if let Some(n) = self.rigs.keep_snapshots {
@@ -759,13 +765,15 @@ impl Settings {
             1_000_000,
         );
         if let Some(n) = k.events_max_age_days {
-            range("retention.events_max_age_days", n.into(), 1, u64::MAX);
+            range("retention.events_max_age_days", n.into(), 1, 36_500);
         }
         if let Some(n) = k.events_max_count {
-            range("retention.events_max_count", n, 1000, u64::MAX);
+            range("retention.events_max_count", n, 1000, 1_000_000_000_000);
         }
         if let Some(n) = k.inbox_expiry_mins {
-            range("retention.inbox_expiry_mins", n, 1, u64::MAX);
+            // Ten years: anything more is a typo, and would overflow the
+            // time arithmetic.
+            range("retention.inbox_expiry_mins", n, 1, 5_256_000);
         }
         if !valid_log_filter(&log.level) {
             out.push(format!(

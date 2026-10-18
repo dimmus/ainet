@@ -485,73 +485,83 @@ pub(crate) fn watchdog_stop(d: &Shared, id: &str, reason: Option<String>) -> Res
 /// `queue.watchdog.tick_secs`.
 pub(crate) async fn ticker(d: Shared) {
     loop {
-        let tick = lock(&d).settings().queue.watchdog.tick_secs;
-        tokio::time::sleep(Duration::from_secs(tick)).await;
-        let now = now_ms();
-        let (dogs, wakes) = {
-            let mut g = lock(&d);
-            let due: Vec<Watchdog> = g
-                .watchdogs
-                .values()
-                .filter(|w| {
-                    w.active && now - w.last_fired.unwrap_or(w.created) >= w.interval_secs as i64 * 1000
-                })
-                .cloned()
-                .collect();
-            for w in &due {
-                let mut w2 = w.clone();
-                w2.last_fired = Some(now);
-                g.store.put("watchdog", &w2.id, &w2);
-                g.watchdogs.insert(w2.id.clone(), w2);
+        // First at once: what fell due while ainetd was not running.
+        tick(&d).await;
+        let every = lock(&d).settings().queue.watchdog.tick_secs;
+        tokio::time::sleep(Duration::from_secs(every)).await;
+    }
+}
+
+/// One look at the watchdogs and blocked items.
+async fn tick(d: &Shared) {
+    let now = now_ms();
+    let (dogs, wakes) = {
+        let mut g = lock(d);
+        let due: Vec<Watchdog> = g
+            .watchdogs
+            .values()
+            .filter(|w| {
+                w.active
+                    && now.saturating_sub(w.last_fired.unwrap_or(w.created))
+                        >= i64::try_from(w.interval_secs)
+                            .unwrap_or(i64::MAX)
+                            .saturating_mul(1000)
+            })
+            .cloned()
+            .collect();
+        for w in &due {
+            let mut w2 = w.clone();
+            w2.last_fired = Some(now);
+            g.store.put("watchdog", &w2.id, &w2);
+            g.watchdogs.insert(w2.id.clone(), w2);
+        }
+        let wakes: Vec<QItem> = g
+            .queue
+            .values()
+            .filter(|q| {
+                q.state == QState::Blocked
+                    && q.block.as_ref().and_then(|b| b.wake_at).is_some_and(|t| t <= now)
+            })
+            .cloned()
+            .collect();
+        for q in &wakes {
+            let mut q2 = q.clone();
+            if let Some(b) = q2.block.as_mut() {
+                b.wake_at = None;
             }
-            let wakes: Vec<QItem> = g
-                .queue
-                .values()
-                .filter(|q| {
-                    q.state == QState::Blocked
-                        && q.block.as_ref().and_then(|b| b.wake_at).is_some_and(|t| t <= now)
-                })
-                .cloned()
-                .collect();
-            for q in &wakes {
-                let mut q2 = q.clone();
-                if let Some(b) = q2.block.as_mut() {
-                    b.wake_at = None;
-                }
-                g.save_qitem(&q2);
-            }
-            (due, wakes)
-        };
-        for w in dogs {
-            let agent = lock(&d).agent_for(&w.target);
-            if let Some(a) = agent {
-                let busy = lock(&d)
-                    .agents
-                    .get(&a)
-                    .is_some_and(|x| x.state == ainet_core::AgentState::Working);
-                // A wake is for idle agents; a busy one will get the next.
-                if !busy && let Err(e) = crate::comms::deliver_text(&d, &a, &w.message).await {
-                    tracing::info!("watchdog {} not delivered: {e:#}", w.id);
-                }
+            g.save_qitem(&q2);
+        }
+        (due, wakes)
+    };
+    for w in dogs {
+        let agent = lock(d).agent_for(&w.target);
+        if let Some(a) = agent {
+            let busy = lock(d)
+                .agents
+                .get(&a)
+                .is_some_and(|x| x.state == ainet_core::AgentState::Working);
+            // A wake is for idle agents; a busy one will get the next.
+            if !busy && let Err(e) = crate::comms::deliver_text(d, &a, &w.message).await {
+                tracing::info!("watchdog {} not delivered: {e:#}", w.id);
             }
         }
-        for q in wakes {
-            let Some(owner) = q.owner.clone() else { continue };
-            let b = q.block.clone().unwrap_or(QBlock {
-                on: String::new(),
-                continuation: String::new(),
-                wake_at: None,
-            });
-            notify(
-                &d,
-                OPERATOR,
-                &owner,
-                format!(
-                    "Wake for {} (still blocked on {}): {}\nNext: {}",
-                    q.id, b.on, q.summary, b.continuation
-                ),
-            )
-            .await;
-        }
+    }
+    for q in wakes {
+        let Some(owner) = q.owner.clone() else { continue };
+        let b = q.block.clone().unwrap_or(QBlock {
+            on: String::new(),
+            continuation: String::new(),
+            wake_at: None,
+        });
+        notify(
+            d,
+            OPERATOR,
+            &owner,
+            format!(
+                "Wake for {} (still blocked on {}): {}\nNext: {}",
+                q.id, b.on, q.summary, b.continuation
+            ),
+        )
+        .await;
     }
 }

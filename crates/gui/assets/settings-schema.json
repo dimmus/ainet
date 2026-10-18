@@ -958,6 +958,7 @@
           "type": "integer",
           "format": "uint64",
           "minimum": 1,
+          "maximum": 2592000,
           "default": 600
         },
         "min_interval_secs": {
@@ -1106,6 +1107,7 @@
           ],
           "format": "uint32",
           "minimum": 1,
+          "maximum": 36500,
           "default": null
         },
         "events_max_count": {
@@ -1116,6 +1118,7 @@
           ],
           "format": "uint64",
           "minimum": 1000,
+          "maximum": 1000000000000,
           "default": null
         },
         "inbox_expiry_mins": {
@@ -1126,6 +1129,7 @@
           ],
           "format": "uint64",
           "minimum": 1,
+          "maximum": 5256000,
           "default": null
         }
       }
@@ -1134,7 +1138,7 @@
       "type": "object",
       "properties": {
         "prices": {
-          "description": "Prices by model-id prefix (`claude-opus-5`), over the built-in\ntable; the longest matching prefix wins.",
+          "description": "Prices by model-id prefix (`claude-opus-5`), over the built-in\ntable; the longest matching prefix wins. Not used yet: no view\nshows cost.",
           "type": "object",
           "additionalProperties": {
             "$ref": "#/$defs/Price"

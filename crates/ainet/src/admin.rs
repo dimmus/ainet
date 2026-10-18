@@ -79,17 +79,25 @@ pub fn config(conn: &Conn, json: bool, cmd: ConfigCmd) -> Result<ExitCode> {
                 key: Some(key.clone()),
             };
             let report = settings_request(conn, &req, |f| SettingsReport::read(f).only(&key))?;
+            // The value printed is the one in force; say when the file's
+            // is not, as `config list` does.
+            if let Some(e) = &report.error {
+                eprintln!("ainet: settings.json not in force: {e}");
+            }
             match report.get(&key).filter(|_| report.entries.len() == 1) {
-                Some(e) if json => println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
+                Some(e) if json => {
+                    let mut out = serde_json::json!({
                         "key": key,
                         "value": value_at(e, &key),
                         "default": e.default,
                         "source": e.source,
                         "applies": e.applies,
-                    }))?
-                ),
+                    });
+                    if let Some(err) = &report.error {
+                        out["error"] = err.clone().into();
+                    }
+                    println!("{}", serde_json::to_string_pretty(&out)?)
+                }
                 Some(e) => println!("{}", plain(&value_at(e, &key))),
                 // A group: each of its settings.
                 None if json => println!("{}", serde_json::to_string_pretty(&report.entries)?),

@@ -47,7 +47,8 @@ mod output;
 
 pub use install::{
     HookSpec, HookStatus, InstallReport, PROGRAM, SPECS, UninstallReport, hook_command, hooks_block, install,
-    install_with, installed, is_ours, quote, settings_path, settings_path_in, status, uninstall,
+    install_with, installed, is_ours, permission_timeout, quote, settings_path, settings_path_in, status,
+    uninstall,
 };
 pub use output::{
     ALWAYS_MESSAGE, DEN_DENY_MESSAGE, DENY_MESSAGE, Decision, PLAN_TOOL, permission_output,

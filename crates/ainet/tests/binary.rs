@@ -387,3 +387,56 @@ fn config_goes_through_a_running_daemon() {
     let _ = child.wait();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A mistake in one section of settings.json does not move the socket
+/// or turn autostart back on (each read from `daemon` alone), and
+/// `config get` says the file is not in force.
+#[test]
+fn a_typo_elsewhere_keeps_the_daemon_section() {
+    let dir = std::env::temp_dir().join(format!("ainet-test-{}-section", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let config = dir.join("config");
+    std::fs::create_dir_all(config.join("ainet")).unwrap();
+    let socket = dir.join("mine.sock");
+    std::fs::write(
+        config.join("ainet/settings.json"),
+        format!(
+            r#"{{ "daemon": {{ "socket": {:?}, "autostart": false }}, "queue": {{ "nudge": "yes" }} }}"#,
+            socket.display().to_string()
+        ),
+    )
+    .unwrap();
+    let run = |args: &[&str]| {
+        Command::new(exe())
+            .args(args)
+            .env_remove("AINET_SOCKET")
+            .env("XDG_CONFIG_HOME", &config)
+            .env("XDG_STATE_HOME", dir.join("state"))
+            .env("XDG_RUNTIME_DIR", dir.join("run"))
+            .env_remove("AINET_AGENT_ID")
+            .output()
+            .unwrap()
+    };
+    let out = run(&["config", "path", "--all"]);
+    let paths = String::from_utf8_lossy(&out.stdout);
+    assert!(paths.contains(&socket.display().to_string()), "{paths}");
+    // Not started: autostart is off.
+    let out = run(&["ps"]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("daemon.autostart is off"), "{err}");
+    assert!(!socket.exists() && !dir.join("run/ainet.sock").exists());
+    // The default is printed, and why the file's value is not in force.
+    let out = run(&["config", "get", "queue.nudge"]);
+    assert!(out.status.success());
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "true");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("not in force") && err.contains("queue"), "{err}");
+    let out = run(&["--json", "config", "get", "queue.nudge"]);
+    let got: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(
+        got["error"].as_str().is_some_and(|e| e.contains("queue")),
+        "{got}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

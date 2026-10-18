@@ -96,17 +96,41 @@ pub fn less_safe(key: &str, value: &Value) -> bool {
             .and_then(|m| m.parse::<super::PermissionMode>().ok())
             .is_some_and(super::PermissionMode::loosens),
         "allowed_tools" if in_runtime => value.as_array().is_some_and(|a| !a.is_empty()),
-        "args" if in_runtime => value.as_array().is_some_and(|a| {
-            a.iter()
-                .filter_map(Value::as_str)
-                .any(|s| s.contains("dangerously") || s == "--yolo")
-        }),
+        "args" if in_runtime => value
+            .as_array()
+            .is_some_and(|a| args_loosen(&a.iter().filter_map(Value::as_str).collect::<Vec<_>>())),
         _ => match key {
             "permissions.persist_always" | "permissions.spec_policies" => value == &Value::Bool(true),
             "permissions.global_rules" => value.as_array().is_some_and(|a| !a.is_empty()),
             _ => false,
         },
     }
+}
+
+/// Whether command-line arguments for an agent skip its checks or allow
+/// more without asking: `--dangerously-*`, `--yolo`, a permission mode
+/// that loosens (`--permission-mode bypassPermissions`, or with `=`),
+/// tools allowed up front (`--allowedTools`), and Codex's `--full-auto`
+/// and `danger-full-access` sandbox. They come after ainet's own flags,
+/// so they win.
+pub fn args_loosen(args: &[&str]) -> bool {
+    let loosening_mode = |m: &str| {
+        m.parse::<super::PermissionMode>()
+            .is_ok_and(super::PermissionMode::loosens)
+    };
+    args.iter().enumerate().any(|(i, arg)| {
+        let (flag, inline) = match arg.split_once('=') {
+            Some((f, v)) => (f, Some(v)),
+            None => (*arg, None),
+        };
+        let value = || inline.or_else(|| args.get(i + 1).copied()).unwrap_or_default();
+        arg.contains("dangerously")
+            || arg.contains("danger-full-access")
+            || matches!(flag, "--yolo" | "--full-auto")
+            || matches!(flag, "--allowedTools" | "--allowed-tools")
+            || (flag == "--permission-mode" && loosening_mode(value()))
+            || (matches!(flag, "--ask-for-approval" | "-a") && value() == "never")
+    })
 }
 
 /// The environment variables that set a setting, and the setting: they

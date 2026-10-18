@@ -400,3 +400,47 @@ fn claude_sessions_join_the_fleet_unless_told_not_to() {
         "off"
     ));
 }
+
+/// Claude Code's sessions join as soon as ainetd starts, as before
+/// settings (not one interval later); with `discovery.claude_sessions`
+/// turned off, those already tracked are still seen to end.
+#[test]
+fn sessions_join_at_start_and_are_seen_to_end_when_off() {
+    let d = Daemon::start("sessions-start", None);
+    let dir = d.stop();
+    let sessions = dir.join("claude-sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let pid = std::process::id();
+    let file = sessions.join(format!("{pid}.json"));
+    std::fs::write(
+        &file,
+        format!(r#"{{ "pid": {pid}, "sessionId": "sess-at-start", "cwd": "/", "startedAt": 1, "status": "idle" }}"#),
+    )
+    .unwrap();
+    let state = |d: &Daemon| match d.call(&Request::Snapshot) {
+        Response::Snapshot { agents, .. } => agents
+            .into_iter()
+            .find(|a| a.id == "sess-at-start")
+            .map(|a| a.state),
+        other => panic!("{other:?}"),
+    };
+    let d = Daemon::on(dir);
+    let start = Instant::now();
+    while state(&d).is_none() {
+        // The default interval is 3 s: well before it.
+        assert!(
+            start.elapsed() < Duration::from_millis(1500),
+            "not tracked at start"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    d.write_settings(r#"{ "discovery": { "claude_sessions": false, "interval_ms": 500 } }"#);
+    d.until("settings read", |d| {
+        matches!(
+            d.call(&Request::SettingsGet { key: Some("discovery.claude_sessions".into()) }),
+            Response::Settings { settings } if settings.entries.first().is_some_and(|e| e.value == false)
+        )
+    });
+    std::fs::remove_file(&file).unwrap();
+    d.until("seen to end", |d| state(d) == Some(ainet_core::AgentState::Gone));
+}

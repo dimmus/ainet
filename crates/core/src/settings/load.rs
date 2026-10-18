@@ -89,6 +89,37 @@ pub fn load(path: &Path) -> Result<Option<Loaded>, String> {
     }
 }
 
+/// One section of settings.json (`daemon`, `rigs`, ...) read on its own,
+/// the others left at their defaults, so a mistake in another section
+/// does not change it. For what must not follow someone else's typo:
+/// where ainetd's socket is, whether it is started. The defaults when
+/// there is no file, or this section does not read or is out of range.
+pub fn load_section(path: &Path, key: &str) -> Settings {
+    std::fs::read_to_string(path)
+        .map(|text| parse_section(&text, key))
+        .unwrap_or_default()
+}
+
+/// [`load_section`] on a file's text.
+pub fn parse_section(text: &str, key: &str) -> Settings {
+    let section = || -> Option<Settings> {
+        let raw = crate::jsonc::to_value(text).ok()?;
+        let Some(section) = raw.get(key) else {
+            return Some(Settings::default());
+        };
+        if !section.is_object() {
+            return None;
+        }
+        let mut one = serde_json::Map::new();
+        one.insert(key.to_string(), section.clone());
+        let settings: Settings = serde_json::from_value(Value::Object(one)).ok()?;
+        // The other sections are defaults, which have no problems: any
+        // problem is this section's.
+        settings.problems().is_empty().then_some(settings)
+    };
+    section().unwrap_or_default()
+}
+
 /// The JSON schema of ainet's sections, for editors and the desktop app's
 /// published schema.
 pub fn schema() -> Value {

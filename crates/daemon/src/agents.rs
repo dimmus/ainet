@@ -106,6 +106,10 @@ impl Daemon {
             "spawn",
             &serde_json::json!({ "program": cmd.program, "seat": agent.seat }),
         );
+        // The command was made under this same lock, with this timeout
+        // in its hooks (`Daemon::base`).
+        self.hook_timeouts
+            .insert(agent.id.clone(), self.settings().permissions.hook_timeout_secs());
         self.panes.insert(agent.id.clone(), pane);
         self.agents.insert(agent.id.clone(), agent.clone());
         self.emit(Event::Agent { agent: agent.clone() });

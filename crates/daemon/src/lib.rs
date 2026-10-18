@@ -83,6 +83,9 @@ struct Daemon {
     /// Den's `/always` rules, per agent, for the life of its session or
     /// kept (`permissions.persist_always`).
     always: HashMap<String, Vec<always::Kept>>,
+    /// The `PermissionRequest` hook timeout each pane was started with:
+    /// a hold must end before Claude Code ends the hook.
+    hook_timeouts: HashMap<String, u64>,
     activity: HashMap<String, VecDeque<i64>>,
     last_output: HashMap<String, Instant>,
     /// Agents whose terminal you are typing into right now.
@@ -176,6 +179,8 @@ impl Daemon {
 
 /// Runs the daemon until `Shutdown` or Ctrl+C.
 pub async fn run(opts: Options) -> Result<()> {
+    // Held until this returns: one ainetd per database.
+    let _lock = lock_database(&opts.database, &opts.socket).await?;
     let listener = bind(&opts.socket)?;
     tracing::info!("listening on {}", opts.socket.display());
 
@@ -192,6 +197,7 @@ pub async fn run(opts: Options) -> Result<()> {
         next_item: 0,
         held_req: HashMap::new(),
         always: HashMap::new(),
+        hook_timeouts: HashMap::new(),
         activity: HashMap::new(),
         last_output: HashMap::new(),
         interactive: HashSet::new(),
@@ -255,6 +261,52 @@ pub async fn run(opts: Options) -> Result<()> {
     d.stopping = true;
     d.panes.clear();
     Ok(())
+}
+
+/// Takes the database's lock ([`ainet_core::paths::daemon_lock`]) and
+/// writes our socket in it. Two daemons on one database would split the
+/// fleet between them; that happens when settings.json's `daemon.socket`
+/// changes while one runs, and a client starts another on the new socket.
+/// A daemon just stopping may still hold it for a moment, so it is
+/// tried for two seconds.
+async fn lock_database(database: &Path, socket: &Path) -> Result<std::fs::File> {
+    use std::io::Write;
+    let path = ainet_core::paths::daemon_lock(database);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("open {}", path.display()))?;
+    let start = Instant::now();
+    loop {
+        match file.try_lock() {
+            Ok(()) => break,
+            Err(std::fs::TryLockError::WouldBlock) if start.elapsed() < Duration::from_secs(2) => {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Err(std::fs::TryLockError::WouldBlock) => {
+                let other = std::fs::read_to_string(&path).unwrap_or_default();
+                bail!(
+                    "another ainetd uses {} and listens on {}; stop it first (`AINET_SOCKET={} ainet shutdown`)",
+                    database.display(),
+                    other.trim(),
+                    other.trim()
+                );
+            }
+            Err(std::fs::TryLockError::Error(e)) => {
+                return Err(e).with_context(|| format!("lock {}", path.display()));
+            }
+        }
+    }
+    file.set_len(0)?;
+    file.write_all(socket.as_os_str().as_encoded_bytes())?;
+    file.flush()?;
+    Ok(file)
 }
 
 fn bind(path: &Path) -> Result<UnixListener> {
@@ -422,16 +474,32 @@ async fn handle(req: Request, d: &Shared) -> Response {
         Request::Create { rig, seat } => rigs::create(d, &rig, seat),
         Request::Export { rig } => rigs::export(d, &rig),
         Request::Import { path } => rigs::import(d, &path),
-        Request::Specs => Response::Specs {
-            specs: ainet_spec::library_from(&lock(d).spec_dirs()),
-        },
-        Request::SpecShow { name } => match ainet_spec::spec_yaml_from(&lock(d).spec_dirs(), &name) {
-            Ok(text) => Response::Text { text },
-            Err(e) => err(format!("{e:#}")),
-        },
-        Request::Validate { path } => Response::Text {
-            text: ainet_spec::validate_from(&lock(d).spec_dirs(), &path).to_string(),
-        },
+        // The directories first, then the reading without the daemon's
+        // lock: they may be slow (your own `rigs.spec_dirs`).
+        Request::Specs => {
+            let dirs = lock(d).spec_dirs();
+            match tokio::task::spawn_blocking(move || ainet_spec::library_from(&dirs)).await {
+                Ok(specs) => Response::Specs { specs },
+                Err(e) => err(format!("specs: {e}")),
+            }
+        }
+        Request::SpecShow { name } => {
+            let dirs = lock(d).spec_dirs();
+            match tokio::task::spawn_blocking(move || ainet_spec::spec_yaml_from(&dirs, &name)).await {
+                Ok(Ok(text)) => Response::Text { text },
+                Ok(Err(e)) => err(format!("{e:#}")),
+                Err(e) => err(format!("specs: {e}")),
+            }
+        }
+        Request::Validate { path } => {
+            let dirs = lock(d).spec_dirs();
+            match tokio::task::spawn_blocking(move || ainet_spec::validate_from(&dirs, &path).to_string())
+                .await
+            {
+                Ok(text) => Response::Text { text },
+                Err(e) => err(format!("validate: {e}")),
+            }
+        }
         Request::Discover => discover::discover(d),
         Request::Adopt { id, rig, seat } => discover::adopt(d, &id, &rig, seat),
         Request::Release { seat } => discover::release(d, &seat),

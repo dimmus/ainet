@@ -24,12 +24,17 @@ pub fn socket() -> PathBuf {
     if let Some(p) = std::env::var_os("AINET_SOCKET") {
         return PathBuf::from(p);
     }
-    // A settings file that does not read is reported where it is used; here
-    // it only means the default.
-    if let Ok(Some(loaded)) = crate::settings::load(&settings_file())
-        && let Some(p) = loaded.settings.daemon.socket
-    {
-        return expand(&p);
+    // Only the `daemon` section: a typo in another one must not send
+    // every client to another socket than the one ainetd listens on.
+    let settings = crate::settings::load_section(&settings_file(), "daemon");
+    socket_for(settings.daemon.socket.as_deref())
+}
+
+/// The socket for a `daemon.socket` setting: it, else
+/// `$XDG_RUNTIME_DIR/ainet.sock`, else inside the state directory.
+pub fn socket_for(configured: Option<&Path>) -> PathBuf {
+    if let Some(p) = configured {
+        return expand(p);
     }
     match std::env::var_os("XDG_RUNTIME_DIR") {
         Some(dir) => PathBuf::from(dir).join("ainet.sock"),
@@ -39,6 +44,15 @@ pub fn socket() -> PathBuf {
 
 pub fn database() -> PathBuf {
     state_dir().join("ainet.sqlite")
+}
+
+/// The lock a running ainetd holds on its database (`ainet.sqlite.lock`),
+/// so a second one, started on another socket, refuses to share it. It
+/// says the socket of the one holding it.
+pub fn daemon_lock(database: &Path) -> PathBuf {
+    let mut p = database.as_os_str().to_owned();
+    p.push(".lock");
+    PathBuf::from(p)
 }
 
 /// `$XDG_CONFIG_HOME/ainet`, else `~/.config/ainet`: settings.json, the

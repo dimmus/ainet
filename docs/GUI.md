@@ -1569,8 +1569,10 @@ where each spec comes from, default folder, snapshots), Discovery, Hooks
 (each hook event in place or missing, Install, Repair when an entry is
 out of date, Uninstall, Check Again, and Claude Code's settings file),
 Retention (kept and pruned) and Cost (a price table: a row per model
-prefix with input, output and cache prices, cache ones optional; context
-windows by model). Diagnostics shows the connection, the app's and
+prefix with input, output and cache prices, cache ones optional, not used
+yet as no view shows cost; context windows by model). The Daemon page's
+socket is refused while ainetd runs (`ainet shutdown` first); Rigs &
+Specs' snapshot setting is also the Down dialog's default. Diagnostics shows the connection, the app's and
 ainetd's versions, its pid and uptime, every path, and the last 40 lines
 of its log, with Refresh and Copy Diagnostics (to the clipboard as text,
 values of environment variables and MCP servers left out).
@@ -1599,7 +1601,9 @@ yours (keymap.json), a default you replaced shown once as yours ("yours,
 over a default", or "unbound"), filtered by action, keys, context or
 source. Per row: Change Keys (press the new ones: they are caught
 before the keymap sees them, so bound keys are recorded too; at most a
-chord of two, a third starts again; enter saves, escape gives up), Add
+chord of two, a third starts again; enter saves, escape gives up;
+recording stops once the editor loses focus, and only this window's
+keys are caught), Add
 Keys (keeps the old), Remove (yours goes from the file; a default is
 unbound with `null`) and, on yours, Reset (your line goes, the default
 applies again). Changing a default's keys unbinds the old ones with

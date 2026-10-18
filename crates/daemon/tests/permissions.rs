@@ -202,6 +202,45 @@ fn kept_rules_survive_restarts_until_revoked() {
     assert!(rules(&d).is_empty(), "not brought back by turning it on again");
 }
 
+/// Turning keeping off while ainetd runs forgets the rules of sessions
+/// that ended (kept only because keeping was on); running sessions keep
+/// theirs until they end.
+#[test]
+fn turning_keeping_off_live_forgets_ended_sessions() {
+    let kept = format!(r#"{{ {QUIET}, "permissions": {{ "persist_always": true }} }}"#);
+    let d = Daemon::start("always-off-live", Some(&kept));
+    make_rule(&d, "sess-ended");
+    make_rule(&d, "sess-running");
+    let end = hook(
+        &d,
+        Request::Hook {
+            agent: None,
+            payload: json!({"hook_event_name": "SessionEnd", "session_id": "sess-ended"}),
+            tmux_pane: None,
+        },
+    );
+    end.join().unwrap();
+    assert_eq!(rules(&d).len(), 2, "kept after the session");
+    assert!(matches!(
+        d.call(&Request::SettingsSet {
+            key: "permissions.persist_always".into(),
+            value: json!(false),
+        }),
+        Response::Settings { .. }
+    ));
+    let r = rules(&d);
+    assert_eq!(r.len(), 1, "{r:?}");
+    assert_eq!(r[0].agent.as_deref(), Some("sess-running"));
+    // The ended session, resumed, is asked again.
+    let h = hook(
+        &d,
+        request("sess-ended", "Bash", json!({"command": "cargo test"}), &d.dir),
+    );
+    let item = waiting_item(&d);
+    answer(&d, item, Decision::Deny);
+    assert!(!allowed(&h.join().unwrap().unwrap()));
+}
+
 #[test]
 fn global_rules_allow_without_asking_except_sensitive_files() {
     let d = Daemon::start("always-global", None);

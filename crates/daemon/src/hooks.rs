@@ -270,8 +270,17 @@ pub(crate) async fn handle(
                     },
                 );
                 d.set_state(&id, AgentState::NeedsYou);
-                let hold = Duration::from_secs(d.settings().permissions.hold_secs);
-                held = Some((item_id, rx, tool, input_raw, hold));
+                let hold = d.settings().permissions.hold_secs;
+                // A pane's hook timeout is known; a hook of yours is read
+                // from Claude Code's settings, off the lock.
+                let limit = match d.hook_timeouts.get(&id) {
+                    Some(t) => Limit::Known(*t),
+                    None => Limit::Installed(
+                        crate::admin::claude_settings_file(d.settings()),
+                        ainet_claude::hooks::hook_command(&d.exe),
+                    ),
+                };
+                held = Some((item_id, rx, tool, input_raw, hold, limit));
             }
             "Stop" => {
                 d.release_held(&id);
@@ -319,9 +328,19 @@ pub(crate) async fn handle(
         held
     };
 
-    let Some((item, rx, tool, input_raw, hold)) = held else {
+    let Some((item, rx, tool, input_raw, hold, limit)) = held else {
         return Response::HookReply { output: None };
     };
+    let hook_timeout = match limit {
+        Limit::Known(t) => Some(t),
+        Limit::Installed(path, command) => {
+            tokio::task::spawn_blocking(move || ainet_claude::hooks::permission_timeout(&path, &command))
+                .await
+                .ok()
+                .flatten()
+        }
+    };
+    let hold = capped_hold(hold, hook_timeout);
     // Hold the hook open until you answer (`permissions.hold_secs`); on
     // timeout or release, print nothing and Claude Code's own dialog stays
     // in charge.
@@ -348,6 +367,28 @@ pub(crate) async fn handle(
     Response::HookReply {
         output: ainet_claude::hooks::permission_output_value(&tool, &input_raw, &decision),
     }
+}
+
+/// Where the hook's own timeout comes from.
+enum Limit {
+    /// A pane ainet started, with this timeout in its hooks.
+    Known(u64),
+    /// A hook of yours: the timeout in this Claude Code settings file, for
+    /// the hook running this command.
+    Installed(PathBuf, String),
+}
+
+/// The hold (`permissions.hold_secs`), ended before the hook's own
+/// timeout: Claude Code ends the hook then, and an answer given later
+/// would be lost while the agent shows its dialog. The hold may have been
+/// raised since the hook was set up. A hook whose timeout is not known
+/// holds at most ainet's default (inside the 600 s ainet installs).
+fn capped_hold(hold_secs: u64, hook_timeout: Option<u64>) -> Duration {
+    // `hook_timeout_secs` is the hold and this.
+    const MARGIN: u64 = 20;
+    let default = ainet_core::settings::PermissionSettings::default().hold_secs;
+    let limit = hook_timeout.map_or(default, |t| t.saturating_sub(MARGIN));
+    Duration::from_secs(hold_secs.min(limit).max(1))
 }
 
 /// What the agent reads on a deny: `lead`, then your reason if you gave
@@ -456,6 +497,20 @@ mod tests {
             "another model's"
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The hold never outlasts the hook: by default it is what it always
+    /// was; raised, it waits for a hook set up to match.
+    #[test]
+    fn the_hold_ends_before_the_hook_does() {
+        let secs = |d: Duration| d.as_secs();
+        assert_eq!(secs(capped_hold(580, Some(600))), 580, "the defaults, as before");
+        assert_eq!(secs(capped_hold(580, None)), 580);
+        assert_eq!(secs(capped_hold(1200, Some(600))), 580, "raised after launch");
+        assert_eq!(secs(capped_hold(1200, Some(1220))), 1200);
+        assert_eq!(secs(capped_hold(1200, None)), 580, "a hook of unknown timeout");
+        assert_eq!(secs(capped_hold(500, Some(120))), 100, "lowered at install");
+        assert_eq!(secs(capped_hold(60, Some(5))), 1);
     }
 
     #[test]

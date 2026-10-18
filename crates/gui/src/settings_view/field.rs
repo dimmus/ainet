@@ -374,6 +374,9 @@ pub fn loosens(key: &str, current: &Value, new: &Value) -> bool {
             let kept = new.as_array().map(Vec::as_slice).unwrap_or_default();
             old.iter().any(|v| !kept.contains(v))
         }
+        // Arguments go in pairs (`--permission-mode bypassPermissions`),
+        // so the list is judged whole: looser now and not before.
+        (old, new) if key.ends_with(".args") => less_safe(key, new) && !less_safe(key, old),
         (Value::Array(old), Value::Array(items)) => {
             let added: Vec<Value> = items.iter().filter(|v| !old.contains(v)).cloned().collect();
             !added.is_empty() && less_safe(key, &Value::Array(added))
@@ -575,6 +578,18 @@ mod tests {
             ),
             "only what is added counts"
         );
+        assert!(loosens(
+            args,
+            &json!(["--verbose"]),
+            &json!(["--verbose", "--permission-mode", "bypassPermissions"])
+        ));
+        assert!(loosens(
+            args,
+            &json!(["--permission-mode"]),
+            &json!(["--permission-mode", "acceptEdits"])
+        ));
+        assert!(loosens(args, &json!([]), &json!(["--allowedTools", "Bash"])));
+        assert!(!loosens(args, &json!([]), &json!(["--permission-mode=plan"])));
         assert!(loosens("permissions.persist_always", &json!(false), &json!(true)));
         assert!(!loosens(
             "permissions.persist_always",

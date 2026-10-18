@@ -16,20 +16,44 @@ use anyhow::{Context, Result, bail};
 
 /// Starts ainetd in the background with `ainet daemon` unless it is already
 /// running, and checks it speaks our protocol. settings.json may turn the
-/// starting off (`daemon.autostart`); one that does not read is as none.
+/// starting off (`daemon.autostart`); its `daemon` section is read on its
+/// own, so a mistake elsewhere in the file does not start a daemon you
+/// said not to.
 pub fn ensure_daemon(socket: &Path, ainet: &Path) -> Result<()> {
-    let settings = ainet_core::settings::load(&paths::settings_file())
-        .ok()
-        .flatten()
-        .map(|l| l.settings.daemon)
-        .unwrap_or_default();
+    let settings = ainet_core::settings::load_section(&paths::settings_file(), "daemon").daemon;
     ensure_daemon_with(socket, ainet, &settings)
+}
+
+/// The socket of an ainetd already running on `database`, which holds its
+/// lock: `None` when none does.
+pub fn running_elsewhere(database: &Path) -> Option<PathBuf> {
+    let lock = paths::daemon_lock(database);
+    let file = File::open(&lock).ok()?;
+    match file.try_lock_shared() {
+        // Nobody holds it; ours goes as the file closes.
+        Ok(()) => None,
+        Err(_) => Some(PathBuf::from(
+            std::fs::read_to_string(&lock).unwrap_or_default().trim(),
+        )),
+    }
 }
 
 /// [`ensure_daemon`] with these daemon settings.
 pub fn ensure_daemon_with(socket: &Path, ainet: &Path, settings: &DaemonSettings) -> Result<()> {
     if Client::connect(socket).is_ok() {
         return check_version(socket);
+    }
+    // One ainetd per database: one running on another socket (settings.json's
+    // `daemon.socket` changed since it started) would refuse a second.
+    if let Some(other) =
+        running_elsewhere(&paths::database()).filter(|o| !o.as_os_str().is_empty() && o != socket)
+    {
+        bail!(
+            "ainetd is running on {}, not {}: settings.json's daemon.socket changed since it started? Stop it with `AINET_SOCKET={} ainet shutdown`, then try again",
+            other.display(),
+            socket.display(),
+            other.display()
+        );
     }
     if !settings.autostart {
         bail!(
