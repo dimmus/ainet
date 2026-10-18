@@ -253,6 +253,7 @@ fn local_paths(conn: &Conn) -> PathsReport {
         version: env!("CARGO_PKG_VERSION").into(),
         protocol: protocol::VERSION,
         pid: 0,
+        started: 0,
     }
 }
 

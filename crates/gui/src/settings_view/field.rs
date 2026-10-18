@@ -33,6 +33,57 @@ impl Choice {
     }
 }
 
+/// What the items of a list, or the values of a map, are.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Values {
+    /// Text, as typed.
+    Text,
+    /// Folders, typed or picked with Browse….
+    Folder,
+    /// Whole numbers of at least `min`.
+    Count { min: u64 },
+    /// JSON (a rule, an MCP server), checked as it is typed.
+    Json,
+}
+
+impl Values {
+    /// What typed `text` is as an item or value, or why it is none.
+    pub fn parse(self, text: &str) -> Result<Value, String> {
+        let text = text.trim();
+        match self {
+            Values::Text | Values::Folder => Ok(Value::String(text.to_string())),
+            Values::Count { min } => match text.parse::<u64>() {
+                Ok(n) if n >= min => Ok(Value::from(n)),
+                _ => Err(format!("a whole number of at least {min}")),
+            },
+            Values::Json => serde_json::from_str(text).map_err(|e| format!("not JSON: {e}")),
+        }
+    }
+
+    /// An item or value in words.
+    pub fn show(self, value: &Value) -> String {
+        match value {
+            Value::String(s) if self != Values::Json => s.clone(),
+            v => compact(v),
+        }
+    }
+}
+
+/// A part of a page that is not one setting: shown, and searched, among
+/// them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Panel {
+    /// The `/always` rules in force, each with Revoke.
+    Always,
+    /// ainet's hooks in Claude Code's settings: per event, and Install,
+    /// Repair, Uninstall.
+    Hooks,
+    /// The spec library and where each spec comes from.
+    Specs,
+    /// Paths, versions, the daemon, the connection and its log.
+    Diagnostics,
+}
+
 /// The control a setting gets.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Kind {
@@ -54,17 +105,26 @@ pub enum Kind {
     /// A file or folder, typed or picked with Browse…; empty means unset.
     #[cfg_attr(not(test), allow(dead_code))]
     Path { directory: bool },
-    /// A list of texts (or paths), added and removed one at a time.
-    #[cfg_attr(not(test), allow(dead_code))]
-    List { placeholder: &'static str },
-    /// Names to texts (environment variables), added and removed.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// A list (of texts, folders, rules), added and removed one at a
+    /// time.
+    List {
+        placeholder: &'static str,
+        values: Values,
+    },
+    /// Names to values (environment variables, MCP servers), added and
+    /// removed.
     Map {
         key_placeholder: &'static str,
         value_placeholder: &'static str,
+        values: Values,
     },
+    /// Model prices: a table of model prefixes and dollars per million
+    /// tokens.
+    Prices,
     /// The theme: the theme selector, which previews as it moves.
     Theme,
+    /// Not a setting: a panel of its own.
+    Panel(Panel),
 }
 
 /// Whether a part of a setting shows, from the setting's value.
@@ -88,6 +148,11 @@ pub struct Field {
     /// What unset means, in words, from the app's settings in force (the
     /// terminal's size follows the UI's).
     pub when_unset: Option<fn(&crate::settings::Settings) -> String>,
+    /// The sub-section of its page it is in (a runtime); empty for none.
+    pub group: &'static str,
+    /// A warning shown with it always: it can let agents do more without
+    /// asking you. Such a change is confirmed before it is written.
+    pub caution: Option<&'static str>,
 }
 
 impl Field {
@@ -101,12 +166,13 @@ impl Field {
             owner: Owner::App,
             part_of: None,
             when_unset: None,
+            group: "",
+            caution: None,
         }
     }
 
     /// One of ainetd's settings; its description is the schema's unless
     /// one is given with [`Field::describe`].
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn daemon(key: &'static str, label: &'static str, kind: Kind) -> Field {
         Field {
             key,
@@ -116,11 +182,40 @@ impl Field {
             owner: Owner::Daemon,
             part_of: None,
             when_unset: None,
+            group: "",
+            caution: None,
         }
     }
 
-    /// With its own description.
+    /// A panel that is not a setting, under the pseudo-key `key`
+    /// (`panel.always`), searched by its label and description.
+    pub fn panel(key: &'static str, label: &'static str, description: &'static str, panel: Panel) -> Field {
+        Field {
+            description,
+            ..Field::daemon(key, label, Kind::Panel(panel))
+        }
+    }
+
+    /// In the sub-section `group` of its page.
+    pub fn group(mut self, group: &'static str) -> Field {
+        self.group = group;
+        self
+    }
+
+    /// Warned about with `why`, and confirmed before a looser value is
+    /// written.
+    pub fn caution(mut self, why: &'static str) -> Field {
+        self.caution = Some(why);
+        self
+    }
+
+    /// Whether it is a setting (else a panel).
     #[cfg_attr(not(test), allow(dead_code))]
+    pub fn is_setting(&self) -> bool {
+        !matches!(self.kind, Kind::Panel(_))
+    }
+
+    /// With its own description.
     pub fn describe(mut self, description: &'static str) -> Field {
         self.description = description;
         self
@@ -172,11 +267,15 @@ impl Field {
     /// `value` in words, for the default and the dropdown's button.
     pub fn show(&self, value: &Value) -> String {
         match (&self.kind, value) {
+            // A dropdown may name what unset means ("Claude Code's
+            // default").
+            (Kind::Dropdown(choices), v) => match chosen(choices, v) {
+                Some(c) => c.label.to_string(),
+                None if v.is_null() => "unset".into(),
+                None => compact(v),
+            },
             (_, Value::Null) => "unset".into(),
             (Kind::Toggle, Value::Bool(on)) => if *on { "on" } else { "off" }.into(),
-            (Kind::Dropdown(choices), v) => {
-                chosen(choices, v).map_or_else(|| compact(v), |c| c.label.to_string())
-            }
             (Kind::Number { unit, .. }, Value::Number(n)) => {
                 let n = number_text(n.as_f64().unwrap_or_default());
                 match unit {
@@ -185,7 +284,7 @@ impl Field {
                 }
             }
             (Kind::List { .. }, Value::Array(items)) if items.is_empty() => "none".into(),
-            (Kind::Map { .. }, Value::Object(map)) if map.is_empty() => "none".into(),
+            (Kind::Map { .. } | Kind::Prices, Value::Object(map)) if map.is_empty() => "none".into(),
             (_, Value::String(s)) if s.is_empty() => "empty".into(),
             (_, Value::String(s)) => s.clone(),
             (_, v) => compact(v),
@@ -259,6 +358,27 @@ impl Field {
         let from = value.as_f64().or_else(|| default.as_f64()).unwrap_or(*min);
         let to = ((from + step * by) / step).round() * step;
         Some(number_value(to.clamp(*min, *max), *integer))
+    }
+}
+
+/// Whether changing ainetd's setting `key` from `current` to `new` lets
+/// agents do more without asking you: a looser value, or items added to
+/// a list that loosen (a tool allowed, a global rule, a dangerous
+/// argument). Taking something away never does, but from the lists that
+/// hold agents back: tools disallowed, paths kept sensitive.
+pub fn loosens(key: &str, current: &Value, new: &Value) -> bool {
+    use ainet_core::settings::less_safe;
+    let restricts = key.ends_with(".disallowed_tools") || key == "permissions.sensitive_paths";
+    match (current, new) {
+        (Value::Array(old), new) if restricts => {
+            let kept = new.as_array().map(Vec::as_slice).unwrap_or_default();
+            old.iter().any(|v| !kept.contains(v))
+        }
+        (Value::Array(old), Value::Array(items)) => {
+            let added: Vec<Value> = items.iter().filter(|v| !old.contains(v)).cloned().collect();
+            !added.is_empty() && less_safe(key, &Value::Array(added))
+        }
+        _ => !same(current, new) && less_safe(key, new),
     }
 }
 
@@ -383,9 +503,29 @@ mod tests {
             (toggle.show(&json!(true)), toggle.show(&json!(false))),
             ("on".into(), "off".into())
         );
-        let list = Field::daemon("rigs.spec_dirs", "Spec Folders", Kind::List { placeholder: "" });
+        let list = Field::daemon(
+            "rigs.spec_dirs",
+            "Spec Folders",
+            Kind::List {
+                placeholder: "",
+                values: Values::Folder,
+            },
+        );
         assert_eq!(list.show(&json!([])), "none");
         assert_eq!(list.show(&json!(["/a"])), "[\"/a\"]");
+        let mode = Field::daemon(
+            "runtimes.claude.permission_mode",
+            "Permission Mode",
+            Kind::Dropdown(vec![
+                Choice {
+                    label: "Claude Code's Default",
+                    value: Value::Null,
+                },
+                Choice::text("Plan", "plan"),
+            ]),
+        );
+        assert_eq!(mode.show(&Value::Null), "Claude Code's Default");
+        assert_eq!(mode.show(&json!("plan")), "Plan");
         assert!(same(&json!(16), &json!(16.0)));
         assert!(!same(&json!("16"), &json!(16)));
     }
@@ -400,6 +540,86 @@ mod tests {
         assert!(!f.matches("font colour"), "every word");
         let d = Field::daemon("queue.nudge", "Nudge", Kind::Toggle);
         assert!(d.matches("queue"), "by key");
+    }
+
+    #[test]
+    fn only_looser_changes_loosen() {
+        let mode = "runtimes.claude.permission_mode";
+        assert!(loosens(mode, &Value::Null, &json!("bypassPermissions")));
+        assert!(loosens(mode, &json!("acceptEdits"), &json!("bypassPermissions")));
+        assert!(!loosens(
+            mode,
+            &json!("bypassPermissions"),
+            &json!("bypassPermissions")
+        ));
+        assert!(!loosens(mode, &json!("bypassPermissions"), &json!("plan")));
+        let tools = "runtimes.claude.allowed_tools";
+        assert!(loosens(tools, &json!([]), &json!(["Bash"])));
+        assert!(loosens(tools, &json!(["Bash"]), &json!(["Bash", "Edit"])));
+        assert!(
+            !loosens(tools, &json!(["Bash", "Edit"]), &json!(["Bash"])),
+            "taking away"
+        );
+        let args = "runtimes.claude.args";
+        assert!(!loosens(args, &json!([]), &json!(["--verbose"])));
+        assert!(loosens(
+            args,
+            &json!(["--verbose"]),
+            &json!(["--verbose", "--dangerously-skip-permissions"])
+        ));
+        assert!(
+            !loosens(
+                args,
+                &json!(["--dangerously-skip-permissions"]),
+                &json!(["--dangerously-skip-permissions", "--verbose"])
+            ),
+            "only what is added counts"
+        );
+        assert!(loosens("permissions.persist_always", &json!(false), &json!(true)));
+        assert!(!loosens(
+            "permissions.persist_always",
+            &json!(true),
+            &json!(false)
+        ));
+        assert!(!loosens("queue.nudge", &json!(true), &json!(false)));
+        // Lists that hold agents back loosen as they shrink.
+        let denied = "runtimes.claude.disallowed_tools";
+        assert!(!loosens(denied, &json!([]), &json!(["WebFetch"])));
+        assert!(loosens(denied, &json!(["WebFetch"]), &json!([])));
+        assert!(
+            loosens(denied, &json!(["WebFetch"]), &Value::Null),
+            "reset to none"
+        );
+        assert!(loosens(
+            "permissions.sensitive_paths",
+            &json!(["~/keys"]),
+            &json!([])
+        ));
+    }
+
+    #[test]
+    fn items_and_values_are_read_as_their_kind() {
+        assert_eq!(Values::Text.parse(" a b ").unwrap(), json!("a b"));
+        assert_eq!(Values::Count { min: 1 }.parse("200000").unwrap(), json!(200000));
+        assert_eq!(
+            Values::Count { min: 1 }.parse("0").unwrap_err(),
+            "a whole number of at least 1"
+        );
+        assert_eq!(
+            Values::Json.parse(r#"{"command": "cargo test"}"#).unwrap(),
+            json!({ "command": "cargo test" })
+        );
+        assert!(
+            Values::Json
+                .parse("{command")
+                .unwrap_err()
+                .starts_with("not JSON")
+        );
+        assert_eq!(
+            Values::Json.show(&json!({ "tool": "WebSearch" })),
+            r#"{"tool":"WebSearch"}"#
+        );
+        assert_eq!(Values::Text.show(&json!("x")), "x");
     }
 
     #[test]

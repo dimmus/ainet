@@ -9,14 +9,19 @@
 //! that value changes in the text, and the app takes it at once. ainet's
 //! (Daemon … Cost) go through ainetd when it runs (`SettingsSet`, which
 //! edits the same file the same way and puts it in force), else into the
-//! file directly. The Keymap category is its own editor
-//! ([`keymap_editor`]); settings.json and keymap.json stay one action away
-//! (`workspace::OpenSettingsFile`, `OpenKeymapFile`).
+//! file directly. A change that lets agents do more without asking you
+//! (a looser permission mode, tools allowed, rules kept) is confirmed
+//! first. The Keymap category is its own editor ([`keymap_editor`]); the
+//! parts of ainet's pages that are not settings (the `/always` rules,
+//! hooks, the spec library, Diagnostics) are [`panels`]. settings.json and
+//! keymap.json stay one action away (`workspace::OpenSettingsFile`,
+//! `OpenKeymapFile`).
 
 mod controls;
 pub mod field;
 pub mod keymap_editor;
 pub mod pages;
+pub mod panels;
 #[cfg(all(test, not(target_os = "macos")))]
 mod tests;
 
@@ -25,7 +30,7 @@ use std::collections::HashMap;
 use ainet_core::Request;
 use ainet_core::settings::SettingsReport;
 use ainet_model::ConfigReply;
-use gpui::{Entity, EventEmitter, FocusHandle, Focusable, ScrollHandle, Subscription};
+use gpui::{Entity, EventEmitter, FocusHandle, Focusable, PromptLevel, ScrollHandle, Subscription};
 use serde_json::Value;
 use ui::prelude::*;
 
@@ -34,19 +39,30 @@ use crate::item::{Item, ItemEvent};
 use crate::persistence::SavedItem;
 use crate::settings::{self, AppSettings};
 use crate::text_input::{InputEvent, TextInput};
-use field::{Field, Kind, Owner, at, same};
+use field::{Field, Kind, Owner, Values, at, loosens, same};
 use keymap_editor::KeymapEditor;
 use pages::Page;
 
 /// Which of a field's inputs: its value, or the new item of a list or
-/// entry of a map.
+/// entry of a map (a price's model is its key, its four prices
+/// `Price(0..4)`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Slot {
     Value,
     NewItem,
     NewKey,
     NewValue,
+    Price(u8),
 }
+
+/// The four prices of a model, as settings.json names them, and as the
+/// price table heads them.
+const PRICES: [(&str, &str); 4] = [
+    ("input", "Input"),
+    ("output", "Output"),
+    ("cache_write", "Cache Write"),
+    ("cache_read", "Cache Read"),
+];
 
 pub struct SettingsItem {
     fleet: Entity<FleetModel>,
@@ -67,6 +83,8 @@ pub struct SettingsItem {
     /// ainet's defaults, until a report comes.
     daemon_defaults: Value,
     keymap: Entity<KeymapEditor>,
+    /// What the panels show.
+    panels: panels::Panels,
     scroll: ScrollHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -116,11 +134,18 @@ impl SettingsItem {
                 Kind::Number { .. } | Kind::Text { .. } | Kind::Path { .. } => &[Slot::Value],
                 Kind::List { .. } => &[Slot::NewItem],
                 Kind::Map { .. } => &[Slot::NewKey, Slot::NewValue],
-                Kind::Toggle | Kind::Dropdown(_) | Kind::Theme => &[],
+                Kind::Prices => &[
+                    Slot::NewKey,
+                    Slot::Price(0),
+                    Slot::Price(1),
+                    Slot::Price(2),
+                    Slot::Price(3),
+                ],
+                Kind::Toggle | Kind::Dropdown(_) | Kind::Theme | Kind::Panel(_) => &[],
             };
             for &slot in slots {
                 let placeholder = match (&field.kind, slot) {
-                    (Kind::List { placeholder }, _) => *placeholder,
+                    (Kind::List { placeholder, .. }, _) => *placeholder,
                     (Kind::Map { key_placeholder, .. }, Slot::NewKey) => *key_placeholder,
                     (
                         Kind::Map {
@@ -128,6 +153,9 @@ impl SettingsItem {
                         },
                         _,
                     ) => *value_placeholder,
+                    (Kind::Prices, Slot::NewKey) => "model prefix",
+                    (Kind::Prices, Slot::Price(0 | 1)) => "$ / Mtok",
+                    (Kind::Prices, Slot::Price(_)) => "optional",
                     _ => "",
                 };
                 let input = cx.new(|cx| TextInput::new(window, cx).with_placeholder(placeholder));
@@ -156,6 +184,7 @@ impl SettingsItem {
             daemon_defaults: serde_json::to_value(ainet_core::settings::Settings::default())
                 .unwrap_or(Value::Null),
             keymap,
+            panels: panels::Panels::default(),
             scroll: ScrollHandle::new(),
             _subscriptions: subscriptions,
         };
@@ -170,11 +199,16 @@ impl SettingsItem {
         self.page
     }
 
-    /// Shows `page`, the search cleared.
+    /// Shows `page`, the search cleared, and asks again for what its
+    /// panels show.
     pub fn show_page(&mut self, page: Page, cx: &mut Context<Self>) {
+        let again = self.page != page;
         self.page = page;
         self.search.update(cx, |s, cx| s.set_text("", cx));
         self.scroll.set_offset(Default::default());
+        if again {
+            self.fetch_panels(Some(page), cx);
+        }
         cx.notify();
     }
 
@@ -224,7 +258,7 @@ impl SettingsItem {
             .collect()
     }
 
-    /// How many fields of `page` match the search.
+    /// How many fields (and panels) of `page` match the search.
     fn matches_in(&self, page: Page, query: &str) -> usize {
         self.fields
             .iter()
@@ -271,10 +305,11 @@ impl SettingsItem {
         )
     }
 
-    /// Asks again for ainet's settings (and the key bindings): from
-    /// ainetd, or the file when it is not there.
+    /// Asks again for ainet's settings, what the panels show and the key
+    /// bindings: from ainetd, or the file when it is not there.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         self.keymap.update(cx, |k, cx| k.reload(cx));
+        self.fetch_panels(None, cx);
         if !self.connected(cx) {
             self.report = Some(local_report(cx));
             self.sync_inputs(cx);
@@ -355,26 +390,31 @@ impl SettingsItem {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let next = |slot| self.inputs.get(&(key, slot)).cloned();
         match (slot, event) {
-            (Slot::Value, InputEvent::Submitted | InputEvent::Blurred) => self.commit(key, cx),
+            (Slot::Value, InputEvent::Submitted | InputEvent::Blurred) => self.commit(key, window, cx),
             (Slot::Value, InputEvent::Cancelled) => {
                 self.errors.remove(key);
                 self.sync_input(key, true, cx);
                 cx.notify();
             }
-            (Slot::NewItem, InputEvent::Submitted) => self.add_item(key, cx),
+            (Slot::NewItem, InputEvent::Submitted) => self.add_item(key, window, cx),
             (Slot::NewKey, InputEvent::Submitted) => {
-                if let Some(next) = self.inputs.get(&(key, Slot::NewValue)) {
+                if let Some(next) = next(Slot::NewValue).or_else(|| next(Slot::Price(0))) {
                     window.focus(&next.focus_handle(cx), cx);
                 }
             }
-            (Slot::NewValue, InputEvent::Submitted) => self.add_entry(key, cx),
+            (Slot::NewValue, InputEvent::Submitted) => self.add_entry(key, window, cx),
+            (Slot::Price(i), InputEvent::Submitted) => match next(Slot::Price(i + 1)) {
+                Some(next) => window.focus(&next.focus_handle(cx), cx),
+                None => self.add_price(key, window, cx),
+            },
             _ => {}
         }
     }
 
     /// Writes what was typed in `key`'s input, if it changed.
-    fn commit(&mut self, key: &'static str, cx: &mut Context<Self>) {
+    fn commit(&mut self, key: &'static str, window: &mut Window, cx: &mut Context<Self>) {
         let (Some(field), Some(input)) = (self.field(key).cloned(), self.inputs.get(&(key, Slot::Value)))
         else {
             return;
@@ -384,7 +424,7 @@ impl SettingsItem {
             return;
         }
         match field.parse_input(&text) {
-            Ok(value) => self.write(key, value, cx),
+            Ok(value) => self.change(key, value, window, cx),
             Err(why) => {
                 self.errors.insert(key, why);
                 cx.notify();
@@ -392,29 +432,48 @@ impl SettingsItem {
         }
     }
 
+    /// What the items or values of `key`'s list or map are.
+    fn values_of(&self, key: &str) -> Values {
+        match self.field(key).map(|f| &f.kind) {
+            Some(Kind::List { values, .. } | Kind::Map { values, .. }) => *values,
+            _ => Values::Text,
+        }
+    }
+
     /// Adds what was typed to `key`'s list.
-    fn add_item(&mut self, key: &'static str, cx: &mut Context<Self>) {
-        let Some(field) = self.field(key).cloned() else {
-            return;
-        };
+    fn add_item(&mut self, key: &'static str, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.input_text(key, Slot::NewItem, cx);
         if text.is_empty() {
             return;
         }
+        match self.values_of(key).parse(&text) {
+            Ok(item) => self.push_item(key, item, window, cx),
+            Err(why) => {
+                self.errors.insert(key, why);
+                cx.notify();
+            }
+        }
+    }
+
+    /// Adds `item` to the end of `key`'s list.
+    fn push_item(&mut self, key: &'static str, item: Value, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(field) = self.field(key).cloned() else {
+            return;
+        };
         let mut items = match self.value(&field, cx) {
             Value::Array(items) => items,
             _ => Vec::new(),
         };
-        items.push(Value::String(text));
-        self.write(key, Some(Value::Array(items)), cx);
+        items.push(item);
+        self.change(key, Some(Value::Array(items)), window, cx);
     }
 
     /// Adds the name and value typed to `key`'s map.
-    fn add_entry(&mut self, key: &'static str, cx: &mut Context<Self>) {
+    fn add_entry(&mut self, key: &'static str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(field) = self.field(key).cloned() else {
             return;
         };
-        let (name, value) = (
+        let (name, text) = (
             self.input_text(key, Slot::NewKey, cx),
             self.input_text(key, Slot::NewValue, cx),
         );
@@ -422,16 +481,56 @@ impl SettingsItem {
             self.errors.insert(key, "a name first".into());
             return cx.notify();
         }
+        let value = match self.values_of(key).parse(&text) {
+            Ok(value) => value,
+            Err(why) => {
+                self.errors.insert(key, why);
+                return cx.notify();
+            }
+        };
         let mut map = match self.value(&field, cx) {
             Value::Object(map) => map,
             _ => Default::default(),
         };
-        map.insert(name, Value::String(value));
-        self.write(key, Some(Value::Object(map)), cx);
+        map.insert(name, value);
+        self.change(key, Some(Value::Object(map)), window, cx);
+    }
+
+    /// Adds the model and prices typed to `key`'s price table: input and
+    /// output are needed, the cache prices may be left to their default.
+    fn add_price(&mut self, key: &'static str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(field) = self.field(key).cloned() else {
+            return;
+        };
+        let model = self.input_text(key, Slot::NewKey, cx);
+        let mut price = serde_json::Map::new();
+        let mut problem = model.is_empty().then(|| "a model prefix first".to_string());
+        for (i, (name, label)) in PRICES.iter().enumerate() {
+            let text = self.input_text(key, Slot::Price(i as u8), cx);
+            match text.parse::<f64>() {
+                Ok(n) if n.is_finite() && n >= 0. => {
+                    price.insert(name.to_string(), Value::from(n));
+                }
+                _ if text.is_empty() && i >= 2 => {}
+                _ => {
+                    problem.get_or_insert(format!("{label}: dollars per million tokens, 0 or more"));
+                }
+            }
+        }
+        if let Some(why) = problem {
+            self.errors.insert(key, why);
+            return cx.notify();
+        }
+        let mut map = match self.value(&field, cx) {
+            Value::Object(map) => map,
+            _ => Default::default(),
+        };
+        map.insert(model, Value::Object(price));
+        self.change(key, Some(Value::Object(map)), window, cx);
     }
 
     /// Takes item or entry `at` out of `key`'s list or map.
-    fn remove_at(&mut self, key: &'static str, at: usize, cx: &mut Context<Self>) {
+    fn remove_at(&mut self, key: &'static str, at: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(field) = self.field(key).cloned() else {
             return;
         };
@@ -449,7 +548,7 @@ impl SettingsItem {
             }
             _ => return,
         };
-        self.write(key, Some(value), cx);
+        self.change(key, Some(value), window, cx);
     }
 
     fn input_text(&self, key: &'static str, slot: Slot, cx: &App) -> String {
@@ -459,10 +558,77 @@ impl SettingsItem {
             .unwrap_or_default()
     }
 
+    /// Sets `key` to `value` as [`SettingsItem::write`] does, but asks
+    /// first when the change lets agents do more without asking you.
+    pub fn change(
+        &mut self,
+        key: &'static str,
+        value: Option<Value>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(field) = self.field(key).cloned() else {
+            return;
+        };
+        let current = self.value(&field, cx);
+        let new = value.clone().unwrap_or_else(|| self.default(&field));
+        if field.owner != Owner::Daemon || !loosens(key, &current, &new) {
+            return self.write(key, value, cx);
+        }
+        // A list names what is added, or (one that holds agents back)
+        // what is taken off.
+        let shown = match (&field.kind, &current) {
+            (Kind::List { values, .. }, Value::Array(old)) => {
+                let items = new.as_array().map(Vec::as_slice).unwrap_or_default();
+                let added: Vec<String> = items
+                    .iter()
+                    .filter(|v| !old.contains(v))
+                    .map(|v| values.show(v))
+                    .collect();
+                let removed: Vec<String> = old
+                    .iter()
+                    .filter(|v| !items.contains(v))
+                    .map(|v| values.show(v))
+                    .collect();
+                match added.is_empty() {
+                    false => added.join(", "),
+                    true => format!("{} taken off", removed.join(", ")),
+                }
+            }
+            _ => field.show(&new),
+        };
+        let detail = format!(
+            "{}: {shown}. {} ainet's defaults ask you first; this does not.",
+            field.label,
+            field
+                .caution
+                .unwrap_or("This lets agents do more without asking you.")
+        );
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            "Let agents do more without asking you?",
+            Some(&detail),
+            &["Set Anyway", "Cancel"],
+            cx,
+        );
+        cx.spawn(async move |this, cx| {
+            let set = answer.await == Ok(0);
+            let _ = this.update(cx, |this, cx| match set {
+                true => this.write(key, value, cx),
+                // Not set: the input shows the value in force again.
+                false => {
+                    this.sync_input(key, true, cx);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
     /// Sets `key` to `value`, or unsets it with `None` (so does a value
     /// equal to the default: the file keeps only what you changed). The
     /// app's settings are written here; ainet's through ainetd, else into
-    /// the file.
+    /// the file. Nothing is asked: [`SettingsItem::change`] asks.
     pub fn write(&mut self, key: &'static str, value: Option<Value>, cx: &mut Context<Self>) {
         let Some(field) = self.field(key).cloned() else {
             return;
@@ -528,7 +694,11 @@ impl SettingsItem {
                     self.report = Some(report);
                 }
                 self.errors.remove(key);
-                for slot in [Slot::NewItem, Slot::NewKey, Slot::NewValue] {
+                let price = (0..4).map(Slot::Price);
+                for slot in [Slot::NewItem, Slot::NewKey, Slot::NewValue]
+                    .into_iter()
+                    .chain(price)
+                {
                     if let Some(input) = self.inputs.get(&(key, slot)) {
                         input.update(cx, |i, cx| i.set_text("", cx));
                     }

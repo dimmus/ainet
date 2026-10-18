@@ -4,11 +4,14 @@
 
 use gpui::{Div, Entity, PathPromptOptions};
 use serde_json::Value;
-use ui::{ContextMenu, DropdownMenu, Indicator, ListItem, ListItemSpacing, Switch, Tooltip, prelude::*};
+use ui::{
+    Callout, ContextMenu, DropdownMenu, Indicator, ListItem, ListItemSpacing, Severity, Switch, Tooltip,
+    prelude::*,
+};
 
-use super::field::{Field, Kind, Owner, chosen, same};
+use super::field::{Field, Kind, Owner, Values, chosen, same};
 use super::pages::Page;
-use super::{SettingsItem, Slot};
+use super::{PRICES, SettingsItem, Slot};
 use crate::actions::theme_selector;
 use crate::actions::{OpenKeymapFile, OpenSettingsFile};
 use crate::problems;
@@ -176,6 +179,7 @@ impl SettingsItem {
         }
         body = body.children(self.render_banners(searching, cx));
         let mut last_page = None;
+        let mut last_group = "";
         for (page, field) in shown {
             if searching && last_page != Some(page) {
                 last_page = Some(page);
@@ -188,10 +192,19 @@ impl SettingsItem {
                     ),
                 );
             }
+            // A sub-section (a runtime) under its own heading.
+            if !searching && field.group != last_group {
+                last_group = field.group;
+                let group = field.group;
+                body = body.child(
+                    div()
+                        .debug_selector(move || format!("SETTINGS-GROUP-{group}"))
+                        .pt_6()
+                        .pb_1()
+                        .child(Headline::new(group).size(HeadlineSize::XSmall)),
+                );
+            }
             body = body.child(self.render_field(field, window, cx));
-        }
-        if !searching && !self.fields.iter().any(|(p, _)| *p == self.page) {
-            body = body.child(self.render_placeholder(self.page));
         }
         body.into_any_element()
     }
@@ -207,6 +220,11 @@ impl SettingsItem {
             ),
             page if page.is_app() => (
                 "The app's own settings, in settings.json. Changes apply at once.".into(),
+                Box::new(OpenSettingsFile),
+            ),
+            Page::Diagnostics => (
+                "Where ainet keeps things and how it is doing, from ainetd when it runs. Nothing here is a setting."
+                    .into(),
                 Box::new(OpenSettingsFile),
             ),
             page => (
@@ -304,22 +322,10 @@ impl SettingsItem {
         out
     }
 
-    /// An ainet category whose page is still to come: where its settings
-    /// are until then.
-    fn render_placeholder(&self, page: Page) -> impl IntoElement {
-        let text = match page.section() {
-            Some(section) => format!(
-                "This category's page is coming. Until then its settings are in settings.json under \"{section}\" (the schema describes each), and `ainet config list {section}` shows them with their defaults."
-            ),
-            None => "Paths, versions, the daemon's pid and its log will be shown here. Until then, `ainet config path --all` lists them.".into(),
-        };
-        div()
-            .debug_selector(move || format!("SETTINGS-PLACEHOLDER-{}", page.name()))
-            .py_4()
-            .child(Label::new(text).color(Color::Muted))
-    }
-
     fn render_field(&self, field: &Field, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        if let Kind::Panel(panel) = field.kind {
+            return self.render_panel(field, panel, cx);
+        }
         let key = field.key;
         let value = self.value(field, cx);
         let default = self.default(field);
@@ -350,43 +356,46 @@ impl SettingsItem {
                 field.applies().label()
             )
         };
-        let wide = matches!(field.kind, Kind::List { .. } | Kind::Map { .. });
+        let wide = matches!(field.kind, Kind::List { .. } | Kind::Map { .. } | Kind::Prices);
         let control = self.render_control(field, &value, window, cx);
         let error = self.errors.get(key).cloned();
-        let label = h_flex()
-            .gap_1()
-            .when(modified, |el| {
-                el.child(
-                    div()
-                        .debug_selector(move || format!("SETTING-MODIFIED-{key}"))
-                        .child(Indicator::dot().color(Color::Accent)),
-                )
-            })
-            .child(Label::new(field.label))
-            .when(modified, |el| {
-                el.child(
-                    div()
-                        .debug_selector(move || format!("SETTING-RESET-{key}"))
-                        .child(
-                            IconButton::new(SharedString::from(format!("reset-{key}")), IconName::Undo)
-                                .icon_size(IconSize::Small)
-                                .icon_color(Color::Muted)
-                                .tooltip(Tooltip::text("Reset to Default"))
-                                .on_click(cx.listener(move |this, _, _, cx| this.write(key, None, cx))),
-                        ),
-                )
-            })
-            .when(less_safe, |el| {
-                el.child(
-                    div()
-                        .debug_selector(move || format!("SETTING-LESS-SAFE-{key}"))
-                        .child(
-                            Label::new("less safe: agents act without asking you")
-                                .size(LabelSize::XSmall)
-                                .color(Color::Warning),
-                        ),
-                )
-            });
+        let label =
+            h_flex()
+                .gap_1()
+                .when(modified, |el| {
+                    el.child(
+                        div()
+                            .debug_selector(move || format!("SETTING-MODIFIED-{key}"))
+                            .child(Indicator::dot().color(Color::Accent)),
+                    )
+                })
+                .child(Label::new(field.label))
+                .when(modified, |el| {
+                    el.child(
+                        div()
+                            .debug_selector(move || format!("SETTING-RESET-{key}"))
+                            .child(
+                                IconButton::new(SharedString::from(format!("reset-{key}")), IconName::Undo)
+                                    .icon_size(IconSize::Small)
+                                    .icon_color(Color::Muted)
+                                    .tooltip(Tooltip::text("Reset to Default"))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.change(key, None, window, cx)
+                                    })),
+                            ),
+                    )
+                })
+                .when(less_safe, |el| {
+                    el.child(
+                        div()
+                            .debug_selector(move || format!("SETTING-LESS-SAFE-{key}"))
+                            .child(
+                                Label::new("less safe: agents act without asking you")
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Warning),
+                            ),
+                    )
+                });
         // Never narrower than this: in a narrow pane the control goes
         // under it instead.
         let about = v_flex()
@@ -404,6 +413,18 @@ impl SettingsItem {
                     .size(LabelSize::XSmall)
                     .color(Color::Placeholder),
             );
+        let caution = field.caution.map(|why| {
+            div()
+                .debug_selector(move || format!("SETTING-CAUTION-{key}"))
+                .rounded_sm()
+                .overflow_hidden()
+                .child(
+                    Callout::new()
+                        .severity(Severity::Warning)
+                        .icon(IconName::Warning)
+                        .title(format!("{why} You are asked before such a change is made.")),
+                )
+        });
         v_flex()
             .id(SharedString::from(format!("setting-{key}")))
             .debug_selector(move || format!("SETTING-{key}"))
@@ -415,7 +436,7 @@ impl SettingsItem {
             .border_color(cx.theme().colors().border_variant)
             .map(|el| {
                 if wide {
-                    el.child(about).child(control)
+                    el.child(about).children(caution).child(control)
                 } else {
                     el.child(
                         h_flex()
@@ -427,6 +448,7 @@ impl SettingsItem {
                             .child(about)
                             .child(div().flex_none().child(control)),
                     )
+                    .children(caution)
                 }
             })
             .when_some(error, |el, error| {
@@ -454,9 +476,9 @@ impl SettingsItem {
                 let on = value.as_bool().unwrap_or_default();
                 div()
                     .debug_selector(selector)
-                    .child(Switch::new(id("switch"), on.into()).on_click(
-                        cx.listener(move |this, _, _, cx| this.write(key, Some(Value::Bool(!on)), cx)),
-                    ))
+                    .child(Switch::new(id("switch"), on.into()).on_click(cx.listener(
+                        move |this, _, window, cx| this.change(key, Some(Value::Bool(!on)), window, cx),
+                    )))
                     .into_any_element()
             }
             Kind::Dropdown(choices) => {
@@ -472,9 +494,9 @@ impl SettingsItem {
                             picked,
                             IconPosition::Start,
                             None,
-                            move |_, cx| {
+                            move |window, cx| {
                                 let value = choice.value.clone();
-                                let _ = this.update(cx, |this, cx| this.write(key, Some(value), cx));
+                                let _ = this.update(cx, |this, cx| this.change(key, Some(value), window, cx));
                             },
                         );
                     }
@@ -492,13 +514,13 @@ impl SettingsItem {
                         IconButton::new(id(what), icon)
                             .icon_size(IconSize::Small)
                             .icon_color(Color::Muted)
-                            .on_click(cx.listener(move |this, _, _, cx| {
+                            .on_click(cx.listener(move |this, _, window, cx| {
                                 let Some(field) = this.field(key).cloned() else {
                                     return;
                                 };
                                 let default = this.default(&field);
                                 let to = field.stepped(&value, &default, by);
-                                this.write(key, to, cx);
+                                this.change(key, to, window, cx);
                             })),
                     )
                 };
@@ -532,20 +554,19 @@ impl SettingsItem {
                             Button::new(id("browse"), "Browse…")
                                 .label_size(LabelSize::Small)
                                 .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.browse(key, directory, window, cx)
+                                    this.browse(key, directory, false, window, cx)
                                 })),
                         ),
                     )
                     .into_any_element()
             }
-            Kind::List { .. } => {
+            Kind::List { values, .. } => {
+                let values = *values;
                 let items: Vec<String> = match value {
-                    Value::Array(items) => items
-                        .iter()
-                        .map(|v| v.as_str().map_or_else(|| v.to_string(), str::to_string))
-                        .collect(),
+                    Value::Array(items) => items.iter().map(|v| values.show(v)).collect(),
                     _ => Vec::new(),
                 };
+                let wide = rems(if values == Values::Json { 28. } else { 20. });
                 v_flex()
                     .w_full()
                     .gap_1()
@@ -558,19 +579,30 @@ impl SettingsItem {
                     .child(
                         h_flex()
                             .gap_1()
-                            .child(self.input_box(key, Slot::NewItem, rems(20.), selector, cx))
-                            .child(self.add_button(key, Slot::NewItem, cx)),
+                            .child(self.input_box(key, Slot::NewItem, wide, selector, cx))
+                            .child(self.add_button(key, Slot::NewItem, cx))
+                            .when(values == Values::Folder, |el| {
+                                el.child(
+                                    div().debug_selector(move || format!("BROWSE-{key}")).child(
+                                        Button::new(id("browse"), "Browse…")
+                                            .label_size(LabelSize::Small)
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                this.browse(key, true, true, window, cx)
+                                            })),
+                                    ),
+                                )
+                            }),
                     )
                     .into_any_element()
             }
-            Kind::Map { .. } => {
+            Kind::Prices => self.render_prices(key, value, cx),
+            Kind::Panel(_) => div().into_any_element(),
+            Kind::Map { values, .. } => {
+                let values = *values;
                 let entries: Vec<String> = match value {
                     Value::Object(map) => map
                         .iter()
-                        .map(|(k, v)| match v {
-                            Value::String(s) => format!("{k} = {s}"),
-                            v => format!("{k} = {v}"),
-                        })
+                        .map(|(k, v)| format!("{k} = {}", values.show(v)))
                         .collect(),
                     _ => Vec::new(),
                 };
@@ -657,9 +689,10 @@ impl SettingsItem {
         div().debug_selector(move || format!("ADD-{key}")).child(
             Button::new(SharedString::from(format!("add-{key}")), "Add")
                 .label_size(LabelSize::Small)
-                .on_click(cx.listener(move |this, _, _, cx| match slot {
-                    Slot::NewItem => this.add_item(key, cx),
-                    _ => this.add_entry(key, cx),
+                .on_click(cx.listener(move |this, _, window, cx| match slot {
+                    Slot::NewItem => this.add_item(key, window, cx),
+                    Slot::Price(_) => this.add_price(key, window, cx),
+                    _ => this.add_entry(key, window, cx),
                 })),
         )
     }
@@ -675,14 +708,24 @@ impl SettingsItem {
                         .icon_size(IconSize::XSmall)
                         .icon_color(Color::Muted)
                         .tooltip(Tooltip::text("Remove"))
-                        .on_click(cx.listener(move |this, _, _, cx| this.remove_at(key, ix, cx))),
+                        .on_click(
+                            cx.listener(move |this, _, window, cx| this.remove_at(key, ix, window, cx)),
+                        ),
                 ),
             )
             .into_any_element()
     }
 
-    /// Asks the system for a file or folder for `key`.
-    fn browse(&mut self, key: &'static str, directory: bool, window: &mut Window, cx: &mut Context<Self>) {
+    /// Asks the system for a file or folder for `key`: its value, or with
+    /// `add` an item added to its list.
+    fn browse(
+        &mut self,
+        key: &'static str,
+        directory: bool,
+        add: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let picked = cx.prompt_for_paths(PathPromptOptions {
             files: !directory,
             directories: directory,
@@ -694,9 +737,118 @@ impl SettingsItem {
                 && let Some(path) = paths.first()
             {
                 let path = Value::String(path.display().to_string());
-                let _ = this.update(cx, |this, cx| this.write(key, Some(path), cx));
+                let _ = this.update_in(cx, |this, window, cx| match add {
+                    true => this.push_item(key, path, window, cx),
+                    false => this.change(key, Some(path), window, cx),
+                });
             }
         })
         .detach();
+    }
+
+    /// A panel: its label and description over its own content, and what
+    /// went wrong with it last.
+    fn render_panel(&self, field: &Field, panel: super::field::Panel, cx: &mut Context<Self>) -> AnyElement {
+        let key = field.key;
+        let error = self.errors.get(key).cloned();
+        v_flex()
+            .id(SharedString::from(format!("setting-{key}")))
+            .debug_selector(move || format!("SETTING-{key}"))
+            .w_full()
+            .py_3()
+            .gap_2()
+            .border_b_1()
+            .border_color(cx.theme().colors().border_variant)
+            .child(
+                v_flex().gap_0p5().child(Label::new(field.label)).child(
+                    Label::new(field.description())
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                ),
+            )
+            .child(self.render_panel_body(panel, cx))
+            .when_some(error, |el, error| {
+                el.child(
+                    div()
+                        .debug_selector(move || format!("SETTING-ERROR-{key}"))
+                        .child(Label::new(error).size(LabelSize::Small).color(Color::Error)),
+                )
+            })
+            .into_any_element()
+    }
+
+    /// The price table: a row per model prefix, and one to add a model.
+    fn render_prices(&self, key: &'static str, value: &Value, cx: &mut Context<Self>) -> AnyElement {
+        let cell = |text: String, width: Rems, color: Color| {
+            div()
+                .w(width)
+                .flex_none()
+                .child(Label::new(text).size(LabelSize::Small).color(color))
+        };
+        let (model_w, price_w) = (rems(12.), rems(6.));
+        let mut header = h_flex()
+            .gap_2()
+            .child(cell("Model Prefix".into(), model_w, Color::Muted));
+        for (_, label) in PRICES {
+            header = header.child(cell(label.into(), price_w, Color::Muted));
+        }
+        let rows: Vec<AnyElement> = match value {
+            Value::Object(map) => map
+                .iter()
+                .enumerate()
+                .map(|(ix, (model, price))| {
+                    let mut row = h_flex()
+                        .debug_selector(move || format!("PRICE-{key}-{ix}"))
+                        .gap_2()
+                        .child(cell(model.clone(), model_w, Color::Default));
+                    for (name, _) in PRICES {
+                        let text = match price.get(name).and_then(Value::as_f64) {
+                            Some(n) => format!("${n}"),
+                            None => "default".into(),
+                        };
+                        row = row.child(cell(text, price_w, Color::Default));
+                    }
+                    row.child(
+                        div().debug_selector(move || format!("REMOVE-{key}-{ix}")).child(
+                            IconButton::new(
+                                SharedString::from(format!("remove-{key}-{ix}")),
+                                IconName::Close,
+                            )
+                            .icon_size(IconSize::XSmall)
+                            .icon_color(Color::Muted)
+                            .tooltip(Tooltip::text("Remove"))
+                            .on_click(
+                                cx.listener(move |this, _, window, cx| this.remove_at(key, ix, window, cx)),
+                            ),
+                        ),
+                    )
+                    .into_any_element()
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        let mut add = h_flex().gap_2().child(self.input_box(
+            key,
+            Slot::NewKey,
+            model_w,
+            move || format!("CONTROL-{key}"),
+            cx,
+        ));
+        for i in 0..4u8 {
+            add = add.child(self.input_box(
+                key,
+                Slot::Price(i),
+                price_w,
+                move || format!("CONTROL-PRICE-{i}-{key}"),
+                cx,
+            ));
+        }
+        v_flex()
+            .w_full()
+            .gap_1()
+            .child(header)
+            .children(rows)
+            .child(add.child(self.add_button(key, Slot::Price(0), cx)))
+            .into_any_element()
     }
 }

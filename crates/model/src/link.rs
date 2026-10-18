@@ -630,7 +630,8 @@ fn request<S: Sink>(socket: &Path, req: Request, tx: &S, ok: String, timeout: Du
                 | Response::Captures { .. }
                 | Response::Whoami { .. }
                 | Response::AlwaysRules { .. }
-                | Response::Paths { .. }),
+                | Response::Paths { .. }
+                | Response::Log { .. }),
             ) => Msg::Popup(ok, crate::popup::render(&resp)),
             Ok(Response::Rig { rig }) => {
                 Msg::Flash(format!("{ok}: rig {} is {}", rig.name, rig.status.label()), false)

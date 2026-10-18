@@ -67,7 +67,7 @@ fn the_demo_workspace() {
     std::fs::create_dir_all(out_dir()).expect("target/screenshots");
 
     capture(&mut cx, window, "workspace");
-    let views: [(&str, OpenView); 10] = [
+    let views: [(&str, OpenView); 14] = [
         ("terminal", |w, window, cx| {
             let selected = w.fleet().read(cx).store.selected.clone();
             if let Some(id) = selected {
@@ -100,6 +100,18 @@ fn the_demo_workspace() {
         }),
         ("settings-keymap", |w, window, cx| {
             w.open_settings(Some(Page::Keymap), window, cx);
+        }),
+        ("settings-runtimes", |w, window, cx| {
+            w.open_settings(Some(Page::Runtimes), window, cx);
+        }),
+        ("settings-permissions", |w, window, cx| {
+            w.open_settings(Some(Page::Permissions), window, cx);
+        }),
+        ("settings-hooks", |w, window, cx| {
+            w.open_settings(Some(Page::Hooks), window, cx);
+        }),
+        ("settings-diagnostics", |w, window, cx| {
+            w.open_settings(Some(Page::Diagnostics), window, cx);
         }),
         // Two conversations side by side, as OpenRig's.
         ("conversations", |w, window, cx| {

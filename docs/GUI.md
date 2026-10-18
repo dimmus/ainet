@@ -1457,10 +1457,17 @@ The Settings view reads and writes these sections through the link
 (`FleetModel::config`, which routes the answer to its asker by token): `Link::config(request, token)` sends
 `Request::SettingsGet` (`key`: a setting or group, or all),
 `SettingsSet { key, value }`, `SettingsUnset { key }`, `SettingsReload`,
-`AlwaysList`, `AlwaysRevoke`, `HookStatus`, `HookInstall`, `HookUninstall`
-or `Paths`, and the answer comes back as `Msg::Config` /
+`AlwaysList`, `AlwaysRevoke`, `HookStatus`, `HookInstall`, `HookUninstall`,
+`Paths` or `LogTail { lines }`, and the answer comes back as `Msg::Config` /
 `Change::Config { token, reply }`, a `ainet_model::ConfigReply`
-(`Settings`, `Always`, `Hooks`, `Paths`, `Done`). A settings report
+(`Settings`, `Always`, `Hooks`, `Paths`, `Log`, `Done`). `LogTail`
+(`Response::Log`, `protocol::LogTail { path, exists, lines }`) is the end
+of the log file an autostarted ainetd writes (at most 2000 lines, read
+from the end of the file); `PathsReport.started` (ms since the epoch)
+gives its uptime and `HookReport.events` every hook event ainet installs,
+so a front end can show each one's state. All three are additive: an
+older daemon answers `LogTail` "bad request" (the app then reads the log
+file itself) and leaves the other two out. A settings report
 (`ainet_core::settings::SettingsReport`) has each setting's value,
 default, source (default, file, environment variable), description (from
 the schema) and when a change applies (`Applies::Live`, `NewSeats`,
@@ -1525,7 +1532,8 @@ workspace, on its category.
 
 | File | What |
 |---|---|
-| `settings_view/field.rs` | a field without GPUI: `Field::app(key, label, description, kind)` and `Field::daemon(key, label, kind)` (the schema's description unless `.describe(…)`), `Kind::{Toggle, Dropdown(Vec<Choice>), Number { unit, min, max, step, integer }, Text, Path { directory }, List, Map, Theme}`, `.part_of(parent, when)` for a part shown only with some values of another (a custom line height's ratio), `.when_unset(words)`; reading values as words, typed text as JSON (range and whole numbers checked), stepping, search |
+| `settings_view/field.rs` | a field without GPUI: `Field::app(key, label, description, kind)` and `Field::daemon(key, label, kind)` (the schema's description unless `.describe(…)`), `Kind::{Toggle, Dropdown(Vec<Choice>), Number { unit, min, max, step, integer }, Text, Path { directory }, List { values }, Map { values }, Prices, Theme, Panel(Panel)}` (`Values::{Text, Folder, Count, Json}` for a list's items and a map's values), `.part_of(parent, when)` for a part shown only with some values of another (a custom line height's ratio), `.when_unset(words)`, `.group(name)` for a sub-section (a runtime), `.caution(why)` for a field that can loosen safety, `Field::panel(key, label, description, panel)` for a part of a page that is not a setting; `loosens(key, current, new)`; reading values as words, typed text as JSON (range and whole numbers checked), stepping, search |
+| `settings_view/panels.rs` | the panels: the `/always` rules (`AlwaysList`, Revoke with `AlwaysRevoke`), the hooks (`HookStatus`, Install / Repair / Uninstall confirmed with the file and backup named), the spec library (`Request::Specs`) and Diagnostics (`Paths`, `LogTail`, the connection; Copy Diagnostics; without ainetd, or with an older one, the paths and log as this app finds them) |
 | `settings_view/pages.rs` | `Page` (the categories, with their names and settings.json sections) and `fields()`, the list of every field by category |
 | `settings_view/mod.rs` | `SettingsItem`: values (the app's from its settings in force; ainet's from a `SettingsReport` asked of ainetd, or read from the file without one), inputs that follow the setting unless typed into, and `write(key, value)` |
 | `settings_view/controls.rs` | drawing: the nav, the search, banners, a field's row (label, the modified dot, reset, a "less safe" note from `ainet_core::settings::less_safe`, description, a footnote with the default, when it applies, the key and an environment variable that wins), and each control: Zed's `Switch`, `DropdownMenu` (only the listed values can be picked), a number with − and + and its unit, text, a path with Browse… (`prompt_for_paths`), list and name = value editors |
@@ -1547,10 +1555,44 @@ The file's problems, ainetd's notice for an older daemon, keys ainet
 ignores and "ainetd is not running" show as banners. The theme field
 opens the theme selector, which previews as it moves.
 
-ainet's categories are placeholders for now, saying where their settings
-are (`ainet config list <section>`); the framework for them is in place
-and tested (each field kind over ainetd's keys, through the demo's
-ainetd and through the file).
+ainet's categories have a field for every setting of their section
+(but Codex's permission mode and tool lists, which Codex does not have):
+Daemon (autostart, restore rigs, socket, and the log under its own
+heading), Runtimes (Claude Code, Codex, Shell and Readiness as
+sub-sections: program, model, effort, spec effort, permission mode,
+allowed and disallowed tools, arguments, environment, MCP servers as
+JSON, strict MCP config), Permissions (hold time, the `/always` rules in
+force as a table with Revoke, keeping rules, global rules as JSON,
+specs' policies, more sensitive paths), Messaging, Queue (watchdogs under
+their heading), Rigs & Specs (spec folders with Browse…, the library with
+where each spec comes from, default folder, snapshots), Discovery, Hooks
+(each hook event in place or missing, Install, Repair when an entry is
+out of date, Uninstall, Check Again, and Claude Code's settings file),
+Retention (kept and pruned) and Cost (a price table: a row per model
+prefix with input, output and cache prices, cache ones optional; context
+windows by model). Diagnostics shows the connection, the app's and
+ainetd's versions, its pid and uptime, every path, and the last 40 lines
+of its log, with Refresh and Copy Diagnostics (to the clipboard as text,
+values of environment variables and MCP servers left out).
+
+Safety: fields that can let agents do more without asking you (Claude
+Code's permission mode, allowed tools, arguments, keeping `/always`
+rules, global rules, specs' policies) carry a warning callout, and a
+change that loosens (`field::loosens`: `less_safe` of what is added, or
+items taken off disallowed tools or sensitive paths) is confirmed first
+in a prompt naming it ("Set Anyway" / "Cancel"); Cancel writes nothing
+and puts the value back. Making things safer or resetting asks nothing.
+Hook changes are confirmed in a prompt naming Claude Code's settings file
+and the backup kept beside it.
+
+Without ainetd, ainet's settings are read from and written to the file
+(a banner says so; a loosening change is still confirmed), and the
+`/always` rules, the hooks and the spec library say ainetd is not
+running (with the console command that works without it); Diagnostics
+shows the paths this app would give ainetd and reads the log file
+itself. An older ainetd: settings fall back to the file with its notice,
+the rules and hooks show its "older" message, Diagnostics uses this
+app's paths and reads the log itself.
 
 The Keymap category lists every binding by context: the defaults and
 yours (keymap.json), a default you replaced shown once as yours ("yours,
@@ -1600,7 +1642,7 @@ module; modules without tests of their own are covered where named):
 | `actions.rs`, `keymap.rs` | 1 | 3 | Zed's keymap format, every default binding naming a real action, a focused terminal getting every ctrl letter and the list keys, user overrides and errors |
 | `args.rs` | 5 | | flags and view names |
 | `assets.rs` | 2 | | every `ui::IconName` served, themes, fonts and keymaps bundled |
-| `settings_view/`, `keymap_edit.rs` | 14 | 7 | fields as words and typed numbers, search, every app field a setting with its default choice; keymap rows, binding and unbinding in keymap.json's text keeping comments and indentation; the view opening from its action, the title bar and the palette, each field kind writing settings.json with comments kept and the modified dot and reset, an out-of-range number said and escape restoring, a broken file left alone, search across categories and into the Keymap, ainet's settings through the demo's ainetd (toggle, a less safe dropdown, a refusal shown, Browse…, list, map) and into the file without ainetd, keys recorded (bound ones too, escape, a chord, a third starting again), removed and reset |
+| `settings_view/`, `keymap_edit.rs` | 14 | 14 | fields as words and typed numbers, search, every app field a setting with its default choice; keymap rows, binding and unbinding in keymap.json's text keeping comments and indentation; the view opening from its action, the title bar and the palette, each field kind writing settings.json with comments kept and the modified dot and reset, an out-of-range number said and escape restoring, a broken file left alone, search across categories and into the Keymap, ainet's settings through the demo's ainetd (toggle, dropdown, a refusal shown, Browse…, list, map, the price table) and into the file without ainetd, every ainet category drawing each of its fields, a change's effective value following, loosening changes confirmed (Cancel writing nothing) and safer ones not, `/always` rules revoked, hooks installed and removed only once confirmed, Diagnostics copied without secrets, a daemon that cannot answer said so; keys recorded (bound ones too, escape, a chord, a third starting again), removed and reset |
 | `settings.rs`, `json_edit.rs`, `watch.rs` | 17 | 1 | defaults, the template and schema, lenient JSON, clamping, a theme per appearance, saving into the text as written, never losing the file, writers at once never mixing their files, file watching |
 | `themes.rs`, `zed_theme.rs` | 2 | 3 | Deepharness by default, One Dark bundled, user themes loaded, reported and reloaded, palettes as themes |
 | `theme_selector.rs` | | 2 | preview, escape and a click outside restoring, the pick saved; a query matching nothing, a theme per appearance changing only that one, a broken settings.json left alone with a toast |
@@ -1636,8 +1678,9 @@ demo workspace offscreen with GPUI's own renderer
 which is wgpu without a surface, and the Linux app's cosmic-text text
 system) and writes `workspace.png`, `terminal.png`, `inbox.png`,
 `map.png`, `topology.png`, `topology-recent.png`, `topology-overview.png`,
-`topology-health.png`, `settings.png`, `settings-keymap.png` and
-`conversations.png` (two side by side) into
+`topology-health.png`, `settings.png`, `settings-keymap.png`,
+`settings-runtimes.png`, `settings-permissions.png`, `settings-hooks.png`,
+`settings-diagnostics.png` and `conversations.png` (two side by side) into
 `target/screenshots/`:
 
 ```sh
@@ -1716,8 +1759,10 @@ Collected from the plan's phase notes; none of these is started.
   (`/queue` in Comms does), editing priority and tags, a reason when
   unclaiming, `@` completion in the handoff form; searching a report,
   YAML highlighting, transcript filters.
-- **Settings view:** ainet's categories (Daemon … Cost) and Diagnostics
-  are placeholders until their pages are built; fonts are typed, not
+- **Settings view:** MCP servers and global rules are typed as JSON (one
+  per entry), not edited by field; a map key with a dot in it is set by
+  rewriting the whole map; the spec library and the hooks need ainetd
+  (the console's `ainet specs` and `ainet hooks` work without it); fonts are typed, not
   picked from a list; the categories cannot be moved through by keys;
   ainet's values are asked for again when the tab is shown, not as the
   file changes by hand; the keymap editor changes keys of the bindings

@@ -878,6 +878,32 @@ part two: ainet's ten categories and Diagnostics (placeholders now; the
 framework takes `Field::daemon(key, label, kind)` entries in
 `pages::fields`).
 
+**Done: item 4, part two** (ainet's categories and Diagnostics). Every
+setting of the ten sections has a field (Codex's permission mode and
+tool lists excepted: setting them is an error), with sub-sections
+(`Field::group`: Claude Code, Codex, Shell, Readiness; the log;
+watchdogs; snapshots; kept and pruned), lists of folders with Browse…,
+of JSON (global rules) and of text, maps of text, numbers or JSON (MCP
+servers), and a price table for `cost.prices`. Panels that are not
+settings (`settings_view/panels.rs`): the `/always` rules in force with
+Revoke (`AlwaysList` / `AlwaysRevoke`), the hooks per event with Install,
+Repair, Uninstall (`HookStatus` / `HookInstall` / `HookUninstall`), the
+spec library with where each spec comes from (`Request::Specs`), and
+Diagnostics (connection, versions, ainetd's pid and uptime, paths, the
+end of its log, Copy Diagnostics without secret values). Additive
+protocol for it: `Request::LogTail { lines }` → `Response::Log`
+(`protocol::LogTail`), `PathsReport.started`, `HookReport.events`; the
+model's `ConfigReply::Log`, `popup::{uptime, log_text}`, and `Demo::full`
+answering them. Safety: fields that can loosen carry a warning callout,
+and a loosening change (`field::loosens`) is confirmed before it is
+written; hook changes are confirmed naming the file and the backup.
+Without ainetd the settings go to the file and the panels that need it
+say so; an older ainetd's "bad request" falls back to the file (settings)
+or this app's own paths and log (Diagnostics). Headless tests against
+`Demo::full` cover each category, writes and the effective value, the
+price table, revoke, hooks' confirmation, Diagnostics' copy, the safety
+confirmation, and a daemon that cannot answer.
+
 ## 6. Risks
 
 | Risk | Mitigation |

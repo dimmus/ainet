@@ -186,6 +186,13 @@ fn hooks_are_checked_installed_and_removed_with_backups() {
     let st = hooks(&Request::HookStatus);
     assert_eq!(st.settings_path, claude);
     assert!(!st.installed && !st.current && !st.missing.is_empty());
+    // Every event ainet installs is listed; none is in place yet.
+    assert!(
+        st.events.iter().any(|e| e == "PermissionRequest"),
+        "{:?}",
+        st.events
+    );
+    assert_eq!(st.missing, st.events);
     assert_eq!(
         std::fs::read_to_string(&claude).unwrap(),
         r#"{"model":"opus"}"#,
@@ -225,6 +232,7 @@ fn paths_and_version() {
         protocol: version,
         pid,
         exe,
+        started,
         ..
     } = *paths;
     assert_eq!(socket, d.socket);
@@ -234,4 +242,28 @@ fn paths_and_version() {
     assert_eq!(version, protocol::VERSION);
     assert_eq!(pid, std::process::id());
     assert_eq!(exe, std::path::PathBuf::from("ainet"));
+    let age = ainet_core::now_ms() - started;
+    assert!((0..600_000).contains(&age), "started {age} ms ago");
+}
+
+#[test]
+fn the_log_tail_is_the_end_of_the_configured_file() {
+    let d = Daemon::start("admin-log", None);
+    let log = d.dir.join("my-ainetd.log");
+    d.write_settings(&format!(
+        r#"{{ "discovery": {{ "claude_sessions": false }}, "daemon": {{ "log": {{ "file": {:?} }} }} }}"#,
+        log.display().to_string()
+    ));
+    settings(&d, &Request::SettingsReload);
+    let tail = |lines: usize| match d.call(&Request::LogTail { lines }) {
+        Response::Log { log } => *log,
+        other => panic!("no log: {other:?}"),
+    };
+    let none = tail(10);
+    assert_eq!(none.path, log);
+    assert!(!none.exists && none.lines.is_empty(), "started by hand: no file");
+    std::fs::write(&log, "one\ntwo\nthree\n").unwrap();
+    let some = tail(2);
+    assert!(some.exists);
+    assert_eq!(some.lines, ["two", "three"]);
 }

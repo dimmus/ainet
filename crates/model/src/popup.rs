@@ -1,7 +1,7 @@
 //! Turns daemon replies into text: for the TUI's result popup, the GUI's
 //! report tabs, and (a queue item) the console's `ainet queue show`.
 
-use ainet_core::protocol::{AlwaysRule, HookReport, PathsReport};
+use ainet_core::protocol::{AlwaysRule, HookReport, LogTail, PathsReport};
 use ainet_core::settings::{Applies, Effective, SettingsReport, Source};
 use ainet_core::{QItem, Response};
 
@@ -23,7 +23,8 @@ pub fn reply(resp: &Response) -> Result<String, String> {
         | Response::QItem { .. }
         | Response::AlwaysRules { .. }
         | Response::Hooks { .. }
-        | Response::Paths { .. } => Ok(render(resp)),
+        | Response::Paths { .. }
+        | Response::Log { .. } => Ok(render(resp)),
         Response::Settings { settings } => Ok(match crate::config::changed_line(settings) {
             Some(line) => format!("{line}\n"),
             None => render(resp),
@@ -197,6 +198,7 @@ pub fn render(resp: &Response) -> String {
         Response::AlwaysRules { rules } => out.push_str(&always_text(rules)),
         Response::Hooks { hooks } => out.push_str(&hooks_text(hooks)),
         Response::Paths { paths } => out.push_str(&paths_text(paths)),
+        Response::Log { log } => out.push_str(&log_text(log)),
         other => out.push_str(&format!("{other:?}")),
     }
     out
@@ -308,7 +310,15 @@ pub fn paths_text(p: &PathsReport) -> String {
                 "ainet {} (protocol {}), ainetd not running",
                 p.version, p.protocol
             ),
-            pid => format!("ainetd {} (protocol {}, pid {pid})", p.version, p.protocol),
+            pid => match p.started {
+                0 => format!("ainetd {} (protocol {}, pid {pid})", p.version, p.protocol),
+                started => format!(
+                    "ainetd {} (protocol {}, pid {pid}, up {})",
+                    p.version,
+                    p.protocol,
+                    uptime(started, ainet_core::now_ms())
+                ),
+            },
         },
     );
     line("socket", p.socket.display().to_string());
@@ -327,4 +337,57 @@ pub fn paths_text(p: &PathsReport) -> String {
     line("claude config", p.claude_config_dir.display().to_string());
     line("ainet binary", p.exe.display().to_string());
     out
+}
+
+/// How long since `started` (ms since the epoch) as of `now`, in the
+/// two largest units: `40 s`, `12 min`, `3 h 5 min`, `2 d 4 h`.
+pub fn uptime(started: i64, now: i64) -> String {
+    let secs = (now - started).max(0) / 1000;
+    let (d, h, m) = (secs / 86_400, secs / 3600 % 24, secs / 60 % 60);
+    match (d, h, m) {
+        (0, 0, 0) => format!("{secs} s"),
+        (0, 0, m) => format!("{m} min"),
+        (0, h, m) => format!("{h} h {m} min"),
+        (d, h, _) => format!("{d} d {h} h"),
+    }
+}
+
+/// The end of ainetd's log, or where it would be.
+pub fn log_text(log: &LogTail) -> String {
+    match (log.exists, log.lines.is_empty()) {
+        (false, _) => format!(
+            "no log at {} (an ainetd started by hand logs to its terminal)\n",
+            log.path.display()
+        ),
+        (true, true) => format!("{} is empty\n", log.path.display()),
+        (true, false) => log.lines.iter().map(|l| format!("{l}\n")).collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uptime_reads_in_its_two_largest_units() {
+        let at = |secs: i64| uptime(1_000, 1_000 + secs * 1000);
+        assert_eq!(at(40), "40 s");
+        assert_eq!(at(12 * 60 + 5), "12 min");
+        assert_eq!(at(3 * 3600 + 5 * 60), "3 h 5 min");
+        assert_eq!(at(2 * 86_400 + 4 * 3600 + 7), "2 d 4 h");
+        assert_eq!(uptime(5_000, 1_000), "0 s", "a clock that went back");
+    }
+
+    #[test]
+    fn a_log_says_where_it_is_when_it_is_not_there() {
+        let mut log = LogTail {
+            path: "/s/ainetd.log".into(),
+            ..LogTail::default()
+        };
+        assert!(log_text(&log).starts_with("no log at /s/ainetd.log"));
+        log.exists = true;
+        assert_eq!(log_text(&log), "/s/ainetd.log is empty\n");
+        log.lines = vec!["a".into(), "b".into()];
+        assert_eq!(log_text(&log), "a\nb\n");
+    }
 }

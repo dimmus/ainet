@@ -409,6 +409,12 @@ pub enum Request {
     HookUninstall,
     /// The paths ainetd uses, and its version (`Response::Paths`).
     Paths,
+    /// The last `lines` lines of ainetd's log file (`Response::Log`).
+    /// Daemons from before it answer "bad request"; clients then read the
+    /// file themselves.
+    LogTail {
+        lines: usize,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -547,6 +553,10 @@ pub struct HookReport {
     /// The file as it was before that change.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backup: Option<PathBuf>,
+    /// Every hook event ainet installs, in order; those not in `missing`
+    /// are in place. Empty from daemons before it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub events: Vec<String>,
 }
 
 /// Where ainetd keeps things, and which ainetd it is (`Request::Paths`).
@@ -575,6 +585,65 @@ pub struct PathsReport {
     /// ainetd's process id; 0 when no daemon answered.
     #[serde(default)]
     pub pid: u32,
+    /// When this ainetd started (ms since the epoch); 0 when no daemon
+    /// answered, or one from before it.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub started: i64,
+}
+
+fn is_zero(n: &i64) -> bool {
+    *n == 0
+}
+
+/// The end of ainetd's log file (`Request::LogTail`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogTail {
+    /// The file: where an autostarted ainetd writes its log.
+    pub path: PathBuf,
+    /// Whether it is there (an ainetd started by hand logs to its
+    /// terminal instead).
+    pub exists: bool,
+    /// Its last lines, oldest first.
+    #[serde(default)]
+    pub lines: Vec<String>,
+}
+
+impl LogTail {
+    /// The last `lines` lines of the log file at `path`, read from its
+    /// end (it can be large). A file that is not there is said so.
+    pub fn read(path: &std::path::Path, lines: usize) -> std::io::Result<LogTail> {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut file = match std::fs::File::open(path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(LogTail {
+                    path: path.to_path_buf(),
+                    ..LogTail::default()
+                });
+            }
+            Err(e) => return Err(e),
+        };
+        // A line is rarely longer than 512 bytes; reading this much from
+        // the end is enough without reading a large log whole.
+        let want = (lines as u64).saturating_mul(512).max(4096);
+        let len = file.metadata()?.len();
+        let from = len.saturating_sub(want);
+        file.seek(SeekFrom::Start(from))?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        let text = String::from_utf8_lossy(&bytes);
+        let mut all: Vec<&str> = text.lines().collect();
+        // The first line read from the middle of the file is a part.
+        if from > 0 && !all.is_empty() {
+            all.remove(0);
+        }
+        let skip = all.len().saturating_sub(lines);
+        Ok(LogTail {
+            path: path.to_path_buf(),
+            exists: true,
+            lines: all[skip..].iter().map(|l| l.to_string()).collect(),
+        })
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -721,6 +790,10 @@ pub enum Response {
     /// The paths in use, and versions.
     Paths {
         paths: Box<PathsReport>,
+    },
+    /// The end of ainetd's log (`Request::LogTail`).
+    Log {
+        log: Box<LogTail>,
     },
 }
 
@@ -1105,5 +1178,55 @@ mod tests {
         };
         let back: Response = serde_json::from_slice(&encode(&paths)).unwrap();
         assert!(matches!(back, Response::Paths { paths } if paths.pid == 7 && paths.settings.is_none()));
+    }
+
+    #[test]
+    fn log_tails_uptime_and_hook_events_are_additions_old_peers_can_ignore() {
+        let req = Request::LogTail { lines: 50 };
+        let line = String::from_utf8(encode(&req)).unwrap();
+        assert_eq!(line.trim_end(), r#"{"op":"log_tail","lines":50}"#);
+        let log = Response::Log {
+            log: Box::new(LogTail {
+                path: "/s/ainetd.log".into(),
+                exists: true,
+                lines: vec!["INFO listening".into()],
+            }),
+        };
+        let back: Response = serde_json::from_slice(&encode(&log)).unwrap();
+        assert!(matches!(back, Response::Log { log } if log.exists && log.lines == ["INFO listening"]));
+
+        // From a daemon before them: no start time, no list of events.
+        let old_paths: PathsReport = serde_json::from_str(
+            r#"{"socket":"/s","state_dir":"/d","database":"/d/a.db","log":"/d/l","claude_config_dir":"/c","exe":"/a","version":"0.1.0","protocol":2,"pid":9}"#,
+        )
+        .unwrap();
+        assert_eq!((old_paths.pid, old_paths.started), (9, 0));
+        let old_hooks: HookReport = serde_json::from_str(
+            r#"{"settings_path":"/c/s.json","exists":true,"installed":false,"current":false,"summary":"not installed"}"#,
+        )
+        .unwrap();
+        assert!(old_hooks.events.is_empty());
+        // And to one: unset, they are not sent.
+        let text = serde_json::to_string(&PathsReport::default()).unwrap();
+        assert!(!text.contains("started"), "{text}");
+        let text = serde_json::to_string(&HookReport::default()).unwrap();
+        assert!(!text.contains("events"), "{text}");
+    }
+
+    #[test]
+    fn a_log_tail_is_its_last_lines() {
+        let dir = std::env::temp_dir().join(format!("ainet-core-logtail-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ainetd.log");
+        let missing = LogTail::read(&path, 3).unwrap();
+        assert!(!missing.exists && missing.lines.is_empty());
+        let text: String = (1..=5000).map(|n| format!("line {n}\n")).collect();
+        std::fs::write(&path, text).unwrap();
+        let tail = LogTail::read(&path, 3).unwrap();
+        assert!(tail.exists);
+        assert_eq!(tail.lines, ["line 4998", "line 4999", "line 5000"]);
+        std::fs::write(&path, "only\n").unwrap();
+        assert_eq!(LogTail::read(&path, 3).unwrap().lines, ["only"]);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -8,7 +8,7 @@ use std::path::Path;
 
 use ainet_core::Request;
 use ainet_core::Response;
-use ainet_core::protocol::{AlwaysRule, HookReport, PathsReport, unknown_request};
+use ainet_core::protocol::{AlwaysRule, HookReport, LogTail, PathsReport, unknown_request};
 use ainet_core::settings::{self, SettingsReport};
 
 /// Said with settings read or written here because ainetd is older than
@@ -29,6 +29,8 @@ pub enum ConfigReply {
     Hooks(Box<HookReport>),
     /// The paths in use and versions.
     Paths(Box<PathsReport>),
+    /// The end of ainetd's log.
+    Log(Box<LogTail>),
     /// Done, in words (a revoked rule).
     Done(String),
 }
@@ -41,6 +43,7 @@ impl ConfigReply {
             Response::AlwaysRules { rules } => Ok(ConfigReply::Always(rules)),
             Response::Hooks { hooks } => Ok(ConfigReply::Hooks(hooks)),
             Response::Paths { paths } => Ok(ConfigReply::Paths(paths)),
+            Response::Log { log } => Ok(ConfigReply::Log(log)),
             Response::Text { text } => Ok(ConfigReply::Done(text)),
             Response::Ok => Ok(ConfigReply::Done(String::new())),
             Response::Error { message } if unknown_request(&message) => Err(OLD_DAEMON.into()),
@@ -65,6 +68,7 @@ pub fn is_config(req: &Request) -> bool {
             | Request::HookInstall
             | Request::HookUninstall
             | Request::Paths
+            | Request::LogTail { .. }
     )
 }
 
@@ -362,7 +366,16 @@ mod link_tests {
         link.config(Request::HookInstall, 7);
         assert!(matches!(next_config(&rx), Ok(ConfigReply::Hooks(h)) if h.installed && h.done.is_some()));
         link.config(Request::Paths, 7);
-        assert!(matches!(next_config(&rx), Ok(ConfigReply::Paths(p)) if p.settings.is_some()));
+        assert!(
+            matches!(next_config(&rx), Ok(ConfigReply::Paths(p)) if p.settings.is_some() && p.started > 0)
+        );
+        link.config(Request::LogTail { lines: 3 }, 7);
+        assert!(matches!(next_config(&rx), Ok(ConfigReply::Log(l)) if l.exists && l.lines.len() == 3));
+        link.config(Request::HookStatus, 7);
+        assert!(
+            matches!(next_config(&rx), Ok(ConfigReply::Hooks(h)) if h.events.len() > h.missing.len()),
+            "every event listed, some in place"
+        );
 
         let (tx, rx) = mpsc::channel();
         let (mut console, _) = Link::new(Backend::Demo(Box::default()), tx);

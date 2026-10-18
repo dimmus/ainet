@@ -147,6 +147,10 @@ pub fn hook_action(
         stale: st.stale,
         done,
         backup,
+        events: ainet_claude::hooks::SPECS
+            .iter()
+            .map(|sp| sp.event.to_string())
+            .collect(),
     })
 }
 
@@ -186,8 +190,23 @@ pub(crate) fn paths(d: &Shared) -> Response {
         version: env!("CARGO_PKG_VERSION").into(),
         protocol: protocol::VERSION,
         pid: std::process::id(),
+        started: g.started,
     };
     Response::Paths {
         paths: Box::new(report),
+    }
+}
+
+/// The most lines a log tail gives.
+const MAX_LOG_LINES: usize = 2000;
+
+/// The last `lines` lines of the log file an autostarted ainetd writes.
+pub(crate) async fn log_tail(d: &Shared, lines: usize) -> Response {
+    let path = lock(d).settings().daemon.log.path();
+    let lines = lines.min(MAX_LOG_LINES);
+    match tokio::task::spawn_blocking(move || protocol::LogTail::read(&path, lines)).await {
+        Ok(Ok(log)) => Response::Log { log: Box::new(log) },
+        Ok(Err(e)) => err(format!("the log: {e}")),
+        Err(e) => err(format!("the log: {e}")),
     }
 }

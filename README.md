@@ -258,7 +258,21 @@ In the desktop app, `ctrl-,` (or the gear in the title bar) opens the
 Settings view: a search box over categories, each field with its
 description, default, a dot when changed, a reset and when a change
 applies. The app's own settings are written to the file at once; ainet's
-go through ainetd as `ainet config set` does. `ctrl-alt-,` opens its
+go through ainetd as `ainet config set` does. Each of ainet's sections
+has its category (Runtimes with a part per runtime; Permissions with the
+`/always` rules in force and a Revoke for each; Rigs & Specs with the
+spec library and where each spec comes from; Hooks with each hook event's
+state and Install, Repair, Uninstall; Cost with a price table), and
+Diagnostics shows the paths, versions, ainetd's pid and uptime, the
+connection and the end of its log, with a Copy Diagnostics button (values
+of environment variables and MCP servers are left out). A change that
+lets agents do more without asking you (a looser permission mode, a tool
+allowed or no longer disallowed, rules kept, global rules, specs'
+policies, a `--dangerously…` argument) carries a warning and is
+confirmed before it is written; so is every change to Claude Code's
+settings, naming the file and the backup kept. Without ainetd the
+settings are written to the file, and what lives in ainetd says it is
+not running. `ctrl-alt-,` opens its
 Keymap category, where bindings are changed by pressing the new keys
 (written to keymap.json). The palette's "open settings file" and "open
 keymap file" open the files themselves.

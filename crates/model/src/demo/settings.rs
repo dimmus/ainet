@@ -6,7 +6,7 @@
 
 use std::path::PathBuf;
 
-use ainet_core::protocol::{AlwaysRule, HookReport, PathsReport};
+use ainet_core::protocol::{AlwaysRule, HookReport, LogTail, PathsReport};
 use ainet_core::settings::{self, SettingsReport};
 use ainet_core::{Request, Response};
 
@@ -26,8 +26,35 @@ const SETTINGS: &str = r#"// ainet's settings (the demo's own; nothing here is o
 }
 "#;
 
+/// The hook events ainet installs, as `ainet_claude::hooks::SPECS` lists
+/// them.
+const HOOK_EVENTS: [&str; 10] = [
+    "SessionStart",
+    "SessionEnd",
+    "UserPromptSubmit",
+    "Notification",
+    "Stop",
+    "PostToolUse",
+    "PreToolUse",
+    "PermissionRequest",
+    "StopFailure",
+    "PostToolUseFailure",
+];
+
+/// The pretend daemon's log, as tracing writes it.
+const LOG: &[&str] = &[
+    "INFO ainet_daemon: listening on /run/user/1000/ainet.sock",
+    "INFO ainet_daemon::config: settings from ~/.config/ainet/settings.json: daemon.log.level, runtimes.claude.effort, rigs.keep_snapshots, retention.events_max_age_days",
+    "INFO ainet_daemon::rigs: rig docs: 3 seats",
+    "DEBUG ainet_daemon::comms: message #12 to dev-ui@docs delivered",
+    "INFO ainet_daemon::hooks: permission request from qa@docs held for you",
+    "DEBUG ainet_daemon::discover: 2 Claude Code sessions, 0 new",
+];
+
 pub(super) struct DemoSettings {
     home: PathBuf,
+    /// When the pretend ainetd started.
+    started: i64,
     text: String,
     rules: Vec<AlwaysRule>,
     hooks: bool,
@@ -59,6 +86,7 @@ impl DemoSettings {
         }
         DemoSettings {
             home: PathBuf::from(home),
+            started: now - (3 * 60 + 12) * 60_000,
             text: SETTINGS.into(),
             rules,
             hooks: false,
@@ -88,10 +116,9 @@ impl DemoSettings {
             current: self.hooks,
             missing: match self.hooks {
                 true => Vec::new(),
-                false => ["SessionStart", "PreToolUse", "PermissionRequest", "Stop"]
-                    .map(String::from)
-                    .to_vec(),
+                false => HOOK_EVENTS.map(String::from).to_vec(),
             },
+            events: HOOK_EVENTS.map(String::from).to_vec(),
             summary,
             backup: done
                 .as_ref()
@@ -202,6 +229,17 @@ impl DemoSettings {
                         version: env!("CARGO_PKG_VERSION").into(),
                         protocol: ainet_core::protocol::VERSION,
                         pid: 4_040_001,
+                        started: self.started,
+                    }),
+                }
+            }
+            Request::LogTail { lines } => {
+                let skip = LOG.len().saturating_sub(*lines);
+                Response::Log {
+                    log: Box::new(LogTail {
+                        path: self.home.join(".local/state/ainet/ainetd.log"),
+                        exists: true,
+                        lines: LOG[skip..].iter().map(|l| l.to_string()).collect(),
                     }),
                 }
             }

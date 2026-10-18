@@ -110,6 +110,8 @@ struct Daemon {
     stopping: bool,
     /// Where Claude Code announces its sessions.
     claude_sessions: PathBuf,
+    /// When this ainetd started (ms since the epoch).
+    started: i64,
 }
 
 type Shared = Arc<Mutex<Daemon>>;
@@ -211,6 +213,7 @@ pub async fn run(opts: Options) -> Result<()> {
         config,
         stopping: false,
         claude_sessions: opts.claude_sessions.clone(),
+        started: ainet_core::now_ms(),
     };
     let were_running = daemon.load();
     let restore = daemon.settings().daemon.restore_rigs;
@@ -525,6 +528,7 @@ async fn handle(req: Request, d: &Shared) -> Response {
         Request::HookInstall => admin::hooks(d, admin::HookAction::Install).await,
         Request::HookUninstall => admin::hooks(d, admin::HookAction::Uninstall).await,
         Request::Paths => admin::paths(d),
+        Request::LogTail { lines } => admin::log_tail(d, lines).await,
     }
 }
 
